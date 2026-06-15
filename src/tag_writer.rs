@@ -60,6 +60,31 @@ pub fn write(
         overwrite,
     );
     optional(tag, ItemKey::Isrc, &candidate.isrc, f.isrc, overwrite);
+    optional(tag, ItemKey::Genre, &candidate.genre, f.genre, overwrite);
+    optional(
+        tag,
+        ItemKey::Composer,
+        &candidate.composer,
+        f.composer,
+        overwrite,
+    );
+    optional(tag, ItemKey::Label, &candidate.label, f.label, overwrite);
+    optional(
+        tag,
+        ItemKey::RecordingDate,
+        &candidate.year,
+        f.release_date,
+        overwrite,
+    );
+    if f.comment {
+        optional(
+            tag,
+            ItemKey::Comment,
+            &Some("Matched by Ununknown".into()),
+            true,
+            overwrite,
+        );
+    }
     optional(
         tag,
         ItemKey::MusicBrainzRecordingId,

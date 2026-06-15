@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub struct Event {
     pub kind: String,
     pub job_id: String,
+    pub track_id: Option<i64>,
+    pub stage: Option<String>,
     pub current: i64,
     pub total: i64,
     pub message: String,
@@ -62,10 +64,23 @@ pub async fn finish(state: &Arc<AppState>, kind: &str, id: &str, error: Option<&
         .await;
     emit(state, kind, id, 0, 0, status);
 }
+pub fn track(state: &Arc<AppState>, job_id: &str, track_id: i64, stage: &str, message: &str) {
+    let _ = state.events.send(Event {
+        kind: "track".into(),
+        job_id: job_id.into(),
+        track_id: Some(track_id),
+        stage: Some(stage.into()),
+        current: 0,
+        total: 0,
+        message: message.into(),
+    });
+}
 fn emit(state: &Arc<AppState>, kind: &str, id: &str, current: i64, total: i64, message: &str) {
     let _ = state.events.send(Event {
         kind: kind.into(),
         job_id: id.into(),
+        track_id: None,
+        stage: None,
         current,
         total,
         message: message.into(),

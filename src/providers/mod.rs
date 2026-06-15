@@ -38,16 +38,13 @@ pub async fn identify(
     duration: f64,
     current: &AudioInfo,
 ) -> Result<Vec<Candidate>> {
-    if cfg.acoustid_api_key.is_empty() {
-        return Ok(vec![]);
-    }
-    let hits = acoustid::lookup(client, &cfg.acoustid_api_key, fingerprint, duration).await?;
     let mut out = Vec::new();
-    for hit in hits.into_iter().take(3) {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if let Ok(mut candidate) =
-            musicbrainz::recording(client, &cfg.musicbrainz_user_agent, &hit.recording_id).await
-        {
+    if !cfg.acoustid_api_key.is_empty() {
+        let hits = acoustid::lookup(client, &cfg.acoustid_api_key, fingerprint, duration).await?;
+        for hit in hits.into_iter().take(3) {
+            let mut candidate =
+                musicbrainz::recording(client, &cfg.musicbrainz_user_agent, &hit.recording_id)
+                    .await?;
             candidate.score = crate::matcher::score(
                 hit.score,
                 current,
@@ -56,6 +53,26 @@ pub async fn identify(
                 duration,
             );
             out.push(candidate);
+        }
+    }
+    if out.is_empty() {
+        let title = current
+            .title
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        if let Some(title) = title {
+            for mut candidate in musicbrainz::search(
+                client,
+                &cfg.musicbrainz_user_agent,
+                title,
+                current.artist.as_deref(),
+            )
+            .await?
+            {
+                candidate.score =
+                    crate::matcher::text_score(current, &candidate.title, &candidate.artist);
+                out.push(candidate);
+            }
         }
     }
     Ok(out)

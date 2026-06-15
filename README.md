@@ -1,120 +1,74 @@
 # Ununknown
 
-Ununknown is a fast, local-first web tool for repairing missing or incorrect music metadata. It recursively scans mounted folders, fingerprints tracks with Chromaprint, matches them through AcoustID and MusicBrainz, previews every planned change, then writes selected tags and Cover Art Archive artwork.
+Current release: **0.2.0**
 
-It is a practical NAS tool: no authentication, accounts, streaming, playlists, backups, or cloud service.
+Ununknown is a small, local-first web app that repairs music metadata. It scans folders recursively, fingerprints audio with Chromaprint, finds metadata using AcoustID and MusicBrainz, shows a required dry-run preview, then writes approved tags and artwork.
 
-## Quick Start
+There are no accounts, login, streaming features, or cloud storage. Settings are managed in the web UI and saved locally in SQLite.
 
-1. Create local folders and copy the example configuration:
+The complete tabbed Settings page exposes matching thresholds, every supported metadata field, path templates, collision behavior, provider configuration, and protected Expert Mode file operations.
 
-   ```bash
-   mkdir -p music/input music/output config cache
-   cp config.example.toml config/config.toml
-   ```
+## Fastest Start
 
-2. Edit `config/config.toml` with an AcoustID API key and a meaningful MusicBrainz User-Agent.
-3. Put test copies of audio files under `music/input`.
-4. Start the app:
+Requirements: Docker with Docker Compose.
 
-   ```bash
-   docker compose up --build
-   ```
+```bash
+mkdir -p ununknown/music/input ununknown/music/output ununknown/cache
+cd ununknown
+curl -O https://raw.githubusercontent.com/artamrj/ununknown/main/docker-compose.yml
+docker compose up -d
+```
 
-5. Open <http://localhost:7331>.
+Open <http://localhost:7331>, open **Settings**, and enter a MusicBrainz contact such as:
 
-Compose mounts:
+```text
+Ununknown/0.1 (you@example.com)
+```
+
+Copy test music into `music/input`, click **Scan music**, review matches, preview every change, then apply.
 
 ```text
 ./music/input  -> /music/input
 ./music/output -> /music/output
-./config       -> /config
 ./cache        -> /cache
 ```
 
-**Test with copied files first.** In-place metadata writing and optional organization change existing files. Ununknown intentionally has no backup or rollback system.
+**Test with copied files first.** Ununknown has no backup or rollback system.
+
+## Provider Setup
+
+- **MusicBrainz does not require an API key.** Set `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` in Docker Compose; requests are limited to one per second.
+- **AcoustID is optional.** Set an application key from <https://acoustid.org/api-key> as `UNUNKNOWN_ACOUSTID_API_KEY` in Docker Compose.
+- Without AcoustID, Ununknown can search MusicBrainz using existing tags. These lower-confidence results always require review.
+- Cover artwork comes from Cover Art Archive when a release is known.
+
+Provider failures are shown on affected tracks instead of being hidden as “no match.”
 
 ## Workflow
 
-Ununknown enforces:
-
 ```text
-Scan -> Match -> Dry-run preview -> Confirm -> Apply
+Scan -> Match -> Review -> Dry-run preview -> Confirm -> Apply
 ```
 
-Scanning never modifies audio. A successful current dry-run is required before Apply can start.
+Scanning never changes audio files. Apply is rejected until a current successful preview exists.
 
-- **Safe Auto:** selects matches scoring at least 90.
-- **Aggressive Auto:** selects matches scoring at least 75.
-- **Manual Review:** selects nothing automatically.
+- **Safe:** automatically selects fingerprint matches scoring at least 90.
+- **Aggressive:** automatically selects fingerprint matches scoring at least 75.
+- **Manual:** selects nothing automatically.
 
-All modes require an explicit Apply confirmation.
+## Guides
 
-## Providers
+- [Docker Compose and deployment](docs/DEPLOYMENT.md)
+- [Setup and use after deployment](docs/USAGE.md)
+- [Local developer run and testing](docs/DEVELOPMENT.md)
 
-### AcoustID
+## Local Development
 
-Create an application API key at <https://acoustid.org/api-key> and set `acoustid_api_key` in `config/config.toml`. The key is used only to identify Chromaprint fingerprints.
+See the [developer guide](docs/DEVELOPMENT.md) for frontend hot reload, backend development, SQLite inspection, Docker development, and all test commands.
 
-### MusicBrainz
+## Supported Formats
 
-MusicBrainz requires applications to send a meaningful User-Agent containing application and contact information. Set:
-
-```toml
-musicbrainz_user_agent = "Ununknown/0.1 (you@example.com)"
-```
-
-Ununknown limits MusicBrainz requests to one request per second. Cover images come from Cover Art Archive when a release is known.
-
-Secrets remain in TOML/environment configuration. Use `UNUNKNOWN_ACOUSTID_API_KEY` and
-`UNUNKNOWN_MUSICBRAINZ_USER_AGENT` for environment-based configuration. The UI and API
-expose only configured/not-configured flags.
-
-## Output And Templates
-
-Copy mode writes under `/music/output`. The default path template is:
-
-```text
-$albumartist/$album/$track - $title
-```
-
-Supported variables include `$artist`, `$albumartist`, `$album`, `$title`, `$track`, `$tracktotal`, `$disc`, `$disctotal`, `$year`, `$genre`, `$composer`, `$isrc`, `$label`, `$format`, `$bitrate`, and `$ext`.
-
-The original extension is always preserved; Ununknown does not transcode. Generated paths are sanitized and prevented from escaping the configured root. Collision strategies are `skip`, `overwrite`, and `rename`.
-
-In-place mode writes tags without moving files by default. File renaming and folder reorganization must be explicitly enabled.
-
-## Format Safety
-
-MP3, FLAC, M4A, OGG, and Opus are the primary formats. WAV and AIFF can be scanned, but this MVP skips writes because their tag combinations require conditional safety handling. Dry-run and apply results show the warning.
-
-Tag writes use Lofty’s supported write path. Atomic behavior is best effort and varies by format.
-
-## Development
-
-Requirements: current stable Rust, Node.js 24, npm, and `fpcalc`.
-
-```bash
-npm ci --prefix frontend
-npm run build --prefix frontend
-cargo run
-```
-
-Checks:
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-npm run build --prefix frontend
-docker build -t ununknown .
-```
-
-The Docker runtime installs the Debian package that provides `fpcalc` and verifies the executable during image build. On other distributions, install the package commonly named `chromaprint-tools`, `libchromaprint-tools`, or the package that provides `fpcalc`.
-
-## API
-
-Core endpoints include health, settings, scan jobs, tracks, candidates, SSE events, path-template previews, required apply previews, and apply jobs. See the route definitions in `src/api.rs` for the compact MVP contract.
+MP3, FLAC, M4A, OGG, and Opus are primary formats. WAV and AIFF are scanned but unsafe writes are skipped with a warning. Ununknown never transcodes files.
 
 ## License
 

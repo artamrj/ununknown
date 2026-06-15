@@ -20,7 +20,6 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend /app/target/release/ununknown /usr/local/bin/ununknown
 COPY --from=frontend /app/frontend/dist frontend/dist
-ENV UNUNKNOWN_CONFIG=/config/config.toml UNUNKNOWN_DB=/cache/ununknown.sqlite \
-    UNUNKNOWN_INPUT_DIR=/music/input UNUNKNOWN_OUTPUT_DIR=/music/output RUST_LOG=info
+ENV RUST_LOG=info
 EXPOSE 7331
 CMD ["ununknown"]

@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
@@ -84,6 +84,10 @@ struct Track {
     status: String,
     error: Option<String>,
     is_missing: bool,
+    stage: String,
+    stage_message: Option<String>,
+    retry_count: i64,
+    next_retry_at: Option<String>,
 }
 #[derive(Serialize, FromRow)]
 struct CandidateRow {
@@ -150,6 +154,22 @@ struct SelectRequest {
     candidate_id: Option<i64>,
 }
 #[derive(Deserialize)]
+struct CandidateEdit {
+    title: String,
+    artist: String,
+    album: Option<String>,
+    album_artist: Option<String>,
+    track_number: Option<i64>,
+    track_total: Option<i64>,
+    disc_number: Option<i64>,
+    disc_total: Option<i64>,
+    year: Option<String>,
+    genre: Option<String>,
+    composer: Option<String>,
+    label: Option<String>,
+    isrc: Option<String>,
+}
+#[derive(Deserialize)]
 struct PreviewRequest {
     template: Option<String>,
     track_id: Option<i64>,
@@ -157,6 +177,30 @@ struct PreviewRequest {
 #[derive(Deserialize)]
 struct ApplyRequest {
     preview_token: String,
+}
+#[derive(Deserialize)]
+struct SettingsRequest {
+    #[serde(flatten)]
+    config: Config,
+}
+#[derive(Serialize)]
+struct WorkspaceTrack {
+    #[serde(flatten)]
+    track: Track,
+    candidates: Vec<CandidateRow>,
+}
+#[derive(Deserialize)]
+struct TrackQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    status: Option<String>,
+    search: Option<String>,
+}
+#[derive(Serialize)]
+struct TrackPage {
+    items: Vec<WorkspaceTrack>,
+    total: i64,
+    counts: HashMap<String, i64>,
 }
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -166,6 +210,11 @@ pub fn router() -> Router<Arc<AppState>> {
             get(|| async { Json(serde_json::json!({"status":"ok"})) }),
         )
         .route("/settings", get(settings).put(update_settings))
+        .route("/settings/reset", post(reset_settings))
+        .route("/settings/reset/{section}", post(reset_settings_section))
+        .route("/workspace/clear", post(clear_workspace))
+        .route("/providers/acoustid/test", post(test_acoustid))
+        .route("/providers/musicbrainz/test", post(test_musicbrainz))
         .route("/scan/start", post(start_scan))
         .route("/scan/stop", post(stop_scan))
         .route("/jobs", get(list_jobs))
@@ -174,6 +223,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/tracks/{id}", get(get_track))
         .route("/tracks/{id}/candidates", get(candidates))
         .route("/tracks/{id}/select-candidate", post(select_candidate))
+        .route("/candidates/{id}", axum::routing::put(edit_candidate))
+        .route("/tracks/{id}/retry", post(retry_track))
+        .route("/tracks/bulk/retry", post(retry_failed))
+        .route("/tracks/bulk/skip", post(skip_review))
         .route("/path-template/preview", post(template_preview))
         .route("/apply/preview", post(apply_preview))
         .route("/apply/start", post(start_apply))
@@ -185,16 +238,96 @@ async fn settings(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
 }
 async fn update_settings(
     State(s): State<Arc<AppState>>,
-    Json(mut cfg): Json<Config>,
+    Json(body): Json<SettingsRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    cfg.acoustid_api_key = s.config.read().await.acoustid_api_key.clone();
-    cfg.db_path = s.config.read().await.db_path.clone();
+    let current = s.config.read().await.clone();
+    let mut cfg = body.config;
+    cfg.acoustid_api_key = current.acoustid_api_key;
+    cfg.musicbrainz_user_agent = current.musicbrainz_user_agent;
+    cfg.db_path = current.db_path;
+    cfg.validate()?;
+    crate::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
     s.previews.write().await.clear();
     Ok(Json(serde_json::json!({"saved":true})))
 }
+async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let current = s.config.read().await.clone();
+    let mut cfg = Config {
+        db_path: current.db_path,
+        input_dir: current.input_dir,
+        output_dir: current.output_dir,
+        ..Default::default()
+    };
+    cfg.acoustid_api_key = current.acoustid_api_key;
+    crate::db::save_settings(&s.pool, &cfg).await?;
+    *s.config.write().await = cfg;
+    s.previews.write().await.clear();
+    Ok(Json(serde_json::json!({"reset":true})))
+}
+async fn clear_workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
+    sqlx::query("DELETE FROM jobs").execute(&s.pool).await?;
+    sqlx::query("DELETE FROM provider_cache")
+        .execute(&s.pool)
+        .await?;
+    s.previews.write().await.clear();
+    Ok(Json(serde_json::json!({"cleared":true})))
+}
+async fn reset_settings_section(
+    State(s): State<Arc<AppState>>,
+    Path(section): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let mut cfg = s.config.read().await.clone();
+    let defaults = Config::default();
+    match section.as_str() {
+        "matching" => {
+            cfg.automation_mode = defaults.automation_mode;
+            cfg.confidence_threshold = defaults.confidence_threshold;
+        }
+        "metadata" => {
+            cfg.metadata_fields = defaults.metadata_fields;
+            cfg.overwrite_existing_tags = defaults.overwrite_existing_tags;
+            cfg.cover_art_enabled = defaults.cover_art_enabled;
+        }
+        "files" => {
+            cfg.path_templates = defaults.path_templates;
+            cfg.in_place = defaults.in_place;
+            cfg.output_mode = defaults.output_mode;
+            cfg.expert_mode = false;
+        }
+        _ => return Err(anyhow!("unknown settings section").into()),
+    }
+    crate::db::save_settings(&s.pool, &cfg).await?;
+    *s.config.write().await = cfg;
+    Ok(Json(serde_json::json!({"reset":section})))
+}
+async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = s.config.read().await.clone();
+    let sample: Option<(String, f64)> = sqlx::query_as(
+        "SELECT content_fingerprint,duration FROM tracks WHERE content_fingerprint IS NOT NULL AND duration IS NOT NULL LIMIT 1",
+    )
+    .fetch_optional(&s.pool)
+    .await?;
+    let (fingerprint, duration) =
+        sample.ok_or_else(|| anyhow!("Scan at least one audio file before testing AcoustID"))?;
+    crate::providers::acoustid::test_key(&s.client, &cfg.acoustid_api_key, &fingerprint, duration)
+        .await?;
+    Ok(Json(
+        serde_json::json!({"ok":true,"message":"AcoustID accepted the configured key"}),
+    ))
+}
+async fn test_musicbrainz(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let cfg = s.config.read().await.clone();
+    crate::providers::musicbrainz::test_connection(&s.client, &cfg.musicbrainz_user_agent).await?;
+    Ok(Json(
+        serde_json::json!({"ok":true,"message":"MusicBrainz connection is working"}),
+    ))
+}
 async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     s.previews.write().await.clear();
+    let config = s.config.read().await.clone();
+    crate::db::cleanup(&s.pool, &config).await?;
     let id = jobs::create(&s, "scan").await?;
     let state = s.clone();
     let job = id.clone();
@@ -237,11 +370,35 @@ async fn get_job(
     let v:String=sqlx::query_scalar("SELECT json_object('id',id,'kind',kind,'status',status,'progress_current',progress_current,'progress_total',progress_total,'error',error) FROM jobs WHERE id=?").bind(id).fetch_one(&s.pool).await?;
     Ok(Json(serde_json::from_str(&v)?))
 }
-async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Vec<Track>>> {
-    Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing FROM tracks ORDER BY path").fetch_all(&s.pool).await?))
+async fn list_tracks(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<TrackQuery>,
+) -> ApiResult<Json<TrackPage>> {
+    let page = q.page.unwrap_or(1).max(1);
+    let size = q.page_size.unwrap_or(100).clamp(20, 200);
+    let status = q.status.unwrap_or_default();
+    let search = format!("%{}%", q.search.unwrap_or_default());
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?)")
+        .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).fetch_one(&s.pool).await?;
+    let tracks: Vec<Track> = sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?) ORDER BY path LIMIT ? OFFSET ?")
+        .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).bind(size).bind((page-1)*size).fetch_all(&s.pool).await?;
+    let mut result = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let candidates = fetch_candidates(&s.pool, track.id).await?;
+        result.push(WorkspaceTrack { track, candidates });
+    }
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT stage,count(*) FROM tracks GROUP BY stage")
+            .fetch_all(&s.pool)
+            .await?;
+    Ok(Json(TrackPage {
+        items: result,
+        total,
+        counts: rows.into_iter().collect(),
+    }))
 }
 async fn get_track(State(s): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult<Json<Track>> {
-    Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing FROM tracks WHERE id=?").bind(id).fetch_one(&s.pool).await?))
+    Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(&s.pool).await?))
 }
 async fn candidates(
     State(s): State<Arc<AppState>>,
@@ -258,6 +415,36 @@ async fn select_candidate(
     s.previews.write().await.clear();
     Ok(Json(serde_json::json!({"selected":true})))
 }
+async fn edit_candidate(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(v): Json<CandidateEdit>,
+) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query("UPDATE candidates SET title=?,artist=?,album=?,album_artist=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,genre=?,composer=?,label=?,isrc=?,provider='manual' WHERE id=?")
+        .bind(v.title).bind(v.artist).bind(v.album).bind(v.album_artist).bind(v.track_number).bind(v.track_total).bind(v.disc_number).bind(v.disc_total).bind(v.year).bind(v.genre).bind(v.composer).bind(v.label).bind(v.isrc).bind(id).execute(&s.pool).await?;
+    s.previews.write().await.clear();
+    Ok(Json(serde_json::json!({"saved":true})))
+}
+async fn retry_track(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query(
+        "UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE id=?",
+    )
+    .bind(id)
+    .execute(&s.pool)
+    .await?;
+    start_scan(State(s)).await
+}
+async fn retry_failed(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query("UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE stage='failed'").execute(&s.pool).await?;
+    start_scan(State(s)).await
+}
+async fn skip_review(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    sqlx::query("UPDATE tracks SET selected_candidate_id=NULL,status='skipped',stage='skipped' WHERE stage='review'").execute(&s.pool).await?;
+    Ok(Json(serde_json::json!({"skipped":true})))
+}
 async fn template_preview(
     State(s): State<Arc<AppState>>,
     Json(body): Json<PreviewRequest>,
@@ -272,7 +459,7 @@ async fn apply_preview(
     State(s): State<Arc<AppState>>,
     Json(_): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let tracks:Vec<Track>=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0").fetch_all(&s.pool).await?;
+    let tracks:Vec<Track>=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0").fetch_all(&s.pool).await?;
     let cfg = s.config.read().await.clone();
     let mut items = Vec::new();
     for track in tracks {
@@ -359,9 +546,22 @@ async fn apply(s: Arc<AppState>, job: String, items: Vec<PreviewItem>) -> Result
             src
         };
         let write_target = target.clone();
+        let original_mtime = if cfg.in_place.preserve_mtime {
+            std::fs::metadata(&write_target)
+                .ok()
+                .map(|m| filetime::FileTime::from_last_modification_time(&m))
+        } else {
+            None
+        };
         let result = tokio::task::spawn_blocking({
             let cfg = cfg.clone();
-            move || tag_writer::write(&write_target, &candidate, &cfg, artwork)
+            move || {
+                tag_writer::write(&write_target, &candidate, &cfg, artwork)?;
+                if let Some(mtime) = original_mtime {
+                    filetime::set_file_mtime(&write_target, mtime)?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }
         })
         .await?;
         let (status, error) = match result {
@@ -401,6 +601,12 @@ async fn apply(s: Arc<AppState>, job: String, items: Vec<PreviewItem>) -> Result
         .execute(&s.pool)
         .await?;
         jobs::progress(&s, "apply", &job, i as i64 + 1, total, status).await;
+        if status == "applied" {
+            sqlx::query("DELETE FROM tracks WHERE id=?")
+                .bind(item.track_id)
+                .execute(&s.pool)
+                .await?;
+        }
     }
     Ok(())
 }
@@ -432,13 +638,17 @@ fn destination(
         bitrate: None,
         ext,
     };
-    let chosen = template.unwrap_or(
-        if cfg.output_mode == "in_place" && !cfg.in_place.rename_folders {
-            &cfg.in_place.filename_template
-        } else {
-            &cfg.path_templates.default_template
-        },
-    );
+    let compilation = c
+        .album_artist
+        .as_deref()
+        .is_some_and(|v| v.eq_ignore_ascii_case("Various Artists"));
+    let chosen = template.unwrap_or(if compilation && cfg.output_mode == "copy" {
+        &cfg.path_templates.compilation_template
+    } else if cfg.output_mode == "in_place" && !cfg.in_place.rename_folders {
+        &cfg.in_place.filename_template
+    } else {
+        &cfg.path_templates.default_template
+    });
     let relative = path_templates::render(chosen, &values, &cfg.path_templates)?;
     let root = if cfg.output_mode == "copy" {
         PathBuf::from(&cfg.output_dir)
@@ -458,7 +668,7 @@ fn destination(
     .into())
 }
 async fn selected(pool: &SqlitePool, id: i64) -> Result<(Track, Candidate)> {
-    let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing FROM tracks WHERE id=?").bind(id).fetch_one(pool).await?;
+    let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(pool).await?;
     let cid = track
         .selected_candidate_id
         .ok_or_else(|| anyhow!("track has no selected candidate"))?;

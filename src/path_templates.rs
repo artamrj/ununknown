@@ -1,10 +1,7 @@
 use crate::config::PathTemplateConfig;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::{Component, Path, PathBuf},
-};
+use std::path::{Component, Path, PathBuf};
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,7 +30,7 @@ pub fn render(
     cfg: &PathTemplateConfig,
 ) -> Result<PathBuf> {
     let padded = |v: Option<i64>, width| v.map(|n| format!("{n:0width$}")).unwrap_or_default();
-    let map: HashMap<&str, String> = [
+    let mut variables = vec![
         (
             "artist",
             values
@@ -78,11 +75,10 @@ pub fn render(
             values.bitrate.map(|v| v.to_string()).unwrap_or_default(),
         ),
         ("ext", values.ext.clone()),
-    ]
-    .into_iter()
-    .collect();
+    ];
+    variables.sort_by_key(|(key, _)| std::cmp::Reverse(key.len()));
     let mut output = template.to_string();
-    for (key, value) in map {
+    for (key, value) in variables {
         output = output.replace(
             &format!("${key}"),
             &sanitize(&value, cfg.max_filename_length),
@@ -198,6 +194,15 @@ mod tests {
         assert_eq!(
             render("$artist/$track - $title", &values(), &Default::default()).unwrap(),
             PathBuf::from("A_B/01 - Song.flac")
+        );
+    }
+    #[test]
+    fn album_artist_does_not_partially_replace_artist() {
+        let mut values = values();
+        values.albumartist = Some("Album Artist".into());
+        assert_eq!(
+            render("$albumartist/$artist", &values, &Default::default()).unwrap(),
+            PathBuf::from("Album Artist/A_B.flac")
         );
     }
     #[test]

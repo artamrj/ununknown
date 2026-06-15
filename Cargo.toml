@@ -1,6 +1,6 @@
 [package]
 name = "ununknown"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
@@ -10,6 +10,7 @@ async-stream = "0.3"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+filetime = "0.2"
 lofty = "0.24"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -18,7 +19,6 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 strsim = "0.11"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
-toml = "0.8"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

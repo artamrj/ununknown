@@ -26,6 +26,20 @@ pub fn score(
     score.clamp(0.0, 100.0)
 }
 
+pub fn text_score(current: &AudioInfo, title: &str, artist: &str) -> f64 {
+    let title_score = current
+        .title
+        .as_deref()
+        .map(|value| normalized_levenshtein(&value.to_lowercase(), &title.to_lowercase()))
+        .unwrap_or_default();
+    let artist_score = current
+        .artist
+        .as_deref()
+        .map(|value| normalized_levenshtein(&value.to_lowercase(), &artist.to_lowercase()))
+        .unwrap_or_default();
+    ((title_score * 45.0) + (artist_score * 25.0)).clamp(0.0, 70.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

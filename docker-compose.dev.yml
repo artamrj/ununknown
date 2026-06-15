@@ -1,6 +1,6 @@
 services:
   ununknown:
-    image: ghcr.io/artamrj/ununknown:latest
+    build: .
     ports:
       - "7331:7331"
     environment:
