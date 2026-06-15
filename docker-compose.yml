@@ -1,0 +1,17 @@
+services:
+  ununknown:
+    build: .
+    ports:
+      - "7331:7331"
+    environment:
+      UNUNKNOWN_CONFIG: /config/config.toml
+      UNUNKNOWN_DB: /cache/ununknown.sqlite
+      UNUNKNOWN_INPUT_DIR: /music/input
+      UNUNKNOWN_OUTPUT_DIR: /music/output
+      RUST_LOG: info
+    volumes:
+      - ./music/input:/music/input
+      - ./music/output:/music/output
+      - ./config:/config
+      - ./cache:/cache
+    restart: unless-stopped

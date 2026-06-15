@@ -1,0 +1,7 @@
+.git
+target
+frontend/node_modules
+frontend/dist
+cache
+music
+config
