@@ -33,6 +33,21 @@ pub struct AppState {
     pub events: broadcast::Sender<jobs::Event>,
     cancelled: RwLock<HashSet<String>>,
     previews: RwLock<HashMap<String, Vec<PreviewItem>>>,
+    pub workflow: RwLock<Workflow>,
+}
+#[derive(Clone, Default, Serialize)]
+pub struct Workflow {
+    pub phase: String,
+    pub message: String,
+    pub current_file: Option<String>,
+    pub current: usize,
+    pub total: usize,
+    pub processed: usize,
+    pub matched: usize,
+    pub unmatched: usize,
+    pub failed: usize,
+    #[serde(skip)]
+    pub cancelled: bool,
 }
 impl AppState {
     pub fn new(config: Config, pool: SqlitePool) -> Self {
@@ -44,6 +59,11 @@ impl AppState {
             events,
             cancelled: Default::default(),
             previews: Default::default(),
+            workflow: RwLock::new(Workflow {
+                phase: "idle".into(),
+                message: "Ready to scan".into(),
+                ..Default::default()
+            }),
         }
     }
     pub async fn cancelled(&self, id: &str) -> bool {
@@ -148,6 +168,10 @@ struct PreviewItem {
     destination_path: String,
     action: String,
     warnings: Vec<String>,
+    duplicate_group_id: Option<String>,
+    duplicate_action: String,
+    duplicate_reason: Option<String>,
+    kept_track_id: Option<i64>,
 }
 #[derive(Deserialize)]
 struct SelectRequest {
@@ -173,10 +197,19 @@ struct CandidateEdit {
 struct PreviewRequest {
     template: Option<String>,
     track_id: Option<i64>,
+    settings: Option<Config>,
 }
 #[derive(Deserialize)]
 struct ApplyRequest {
     preview_token: String,
+}
+#[derive(Serialize)]
+struct PathPreviewResult {
+    label: String,
+    template: String,
+    path: Option<String>,
+    warnings: Vec<String>,
+    errors: Vec<String>,
 }
 #[derive(Deserialize)]
 struct SettingsRequest {
@@ -213,6 +246,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/settings/reset", post(reset_settings))
         .route("/settings/reset/{section}", post(reset_settings_section))
         .route("/workspace/clear", post(clear_workspace))
+        .route("/workspace", get(workspace))
         .route("/providers/acoustid/test", post(test_acoustid))
         .route("/providers/musicbrainz/test", post(test_musicbrainz))
         .route("/scan/start", post(start_scan))
@@ -272,7 +306,25 @@ async fn clear_workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         .execute(&s.pool)
         .await?;
     s.previews.write().await.clear();
+    *s.workflow.write().await = Workflow {
+        phase: "idle".into(),
+        message: "Ready to scan".into(),
+        ..Default::default()
+    };
     Ok(Json(serde_json::json!({"cleared":true})))
+}
+async fn workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    let mut workflow = s.workflow.read().await.clone();
+    let matched: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tracks WHERE selected_candidate_id IS NOT NULL")
+            .fetch_one(&s.pool)
+            .await?;
+    workflow.matched = matched as usize;
+    if workflow.phase == "idle" && matched > 0 {
+        workflow.phase = "preview".into();
+        workflow.message = "Restored matched preview".into();
+    }
+    Ok(Json(serde_json::to_value(workflow)?))
 }
 async fn reset_settings_section(
     State(s): State<Arc<AppState>>,
@@ -304,17 +356,11 @@ async fn reset_settings_section(
 }
 async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let cfg = s.config.read().await.clone();
-    let sample: Option<(String, f64)> = sqlx::query_as(
-        "SELECT content_fingerprint,duration FROM tracks WHERE content_fingerprint IS NOT NULL AND duration IS NOT NULL LIMIT 1",
-    )
-    .fetch_optional(&s.pool)
-    .await?;
-    let (fingerprint, duration) =
-        sample.ok_or_else(|| anyhow!("Scan at least one audio file before testing AcoustID"))?;
-    crate::providers::acoustid::test_key(&s.client, &cfg.acoustid_api_key, &fingerprint, duration)
-        .await?;
+    if cfg.acoustid_api_key.is_empty() {
+        return Err(anyhow!("AcoustID is not configured").into());
+    }
     Ok(Json(
-        serde_json::json!({"ok":true,"message":"AcoustID accepted the configured key"}),
+        serde_json::json!({"ok":true,"message":"AcoustID key is configured. It will be validated during matching."}),
     ))
 }
 async fn test_musicbrainz(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -325,50 +371,52 @@ async fn test_musicbrainz(State(s): State<Arc<AppState>>) -> ApiResult<Json<serd
     ))
 }
 async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+    if matches!(
+        s.workflow.read().await.phase.as_str(),
+        "scan" | "fetch" | "apply"
+    ) {
+        return Err(anyhow!("workflow is already running").into());
+    }
+    sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
+    sqlx::query("DELETE FROM provider_cache")
+        .execute(&s.pool)
+        .await?;
     s.previews.write().await.clear();
-    let config = s.config.read().await.clone();
-    crate::db::cleanup(&s.pool, &config).await?;
-    let id = jobs::create(&s, "scan").await?;
+    *s.workflow.write().await = Workflow {
+        phase: "scan".into(),
+        message: "Discovering music".into(),
+        ..Default::default()
+    };
     let state = s.clone();
-    let job = id.clone();
     tokio::spawn(async move {
-        let result = fs_scan::run(state.clone(), job.clone()).await;
-        jobs::finish(
-            &state,
-            "scan",
-            &job,
-            result.as_ref().err().map(|e| e.to_string()).as_deref(),
-        )
-        .await;
+        if let Err(error) = fs_scan::run(state.clone()).await {
+            let mut w = state.workflow.write().await;
+            w.phase = "failed".into();
+            w.message = error.to_string();
+            jobs::emit(&state, "workflow", Some("failed"), 0, 0, &error.to_string());
+        }
     });
-    Ok(Json(serde_json::json!({"job_id":id})))
+    Ok(Json(serde_json::json!({"started":true})))
 }
 async fn stop_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    cancel_kind(&s, "scan").await?;
+    s.workflow.write().await.cancelled = true;
     Ok(Json(serde_json::json!({"stopping":true})))
 }
 async fn stop_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    cancel_kind(&s, "apply").await?;
+    s.workflow.write().await.cancelled = true;
     Ok(Json(serde_json::json!({"stopping":true})))
 }
-async fn cancel_kind(s: &Arc<AppState>, kind: &str) -> Result<()> {
-    let ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM jobs WHERE kind=? AND status='running'")
-            .bind(kind)
-            .fetch_all(&s.pool)
-            .await?;
-    s.cancelled.write().await.extend(ids);
-    Ok(())
-}
 async fn list_jobs(State(s): State<Arc<AppState>>) -> ApiResult<Json<Vec<serde_json::Value>>> {
-    Ok(Json(sqlx::query_scalar("SELECT json_object('id',id,'kind',kind,'status',status,'progress_current',progress_current,'progress_total',progress_total,'error',error) FROM jobs ORDER BY created_at DESC").fetch_all(&s.pool).await?.into_iter().filter_map(|v:String|serde_json::from_str(&v).ok()).collect()))
+    Ok(Json(vec![serde_json::to_value(
+        s.workflow.read().await.clone(),
+    )?]))
 }
 async fn get_job(
     State(s): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let v:String=sqlx::query_scalar("SELECT json_object('id',id,'kind',kind,'status',status,'progress_current',progress_current,'progress_total',progress_total,'error',error) FROM jobs WHERE id=?").bind(id).fetch_one(&s.pool).await?;
-    Ok(Json(serde_json::from_str(&v)?))
+    let _ = id;
+    Ok(Json(serde_json::to_value(s.workflow.read().await.clone())?))
 }
 async fn list_tracks(
     State(s): State<Arc<AppState>>,
@@ -449,11 +497,90 @@ async fn template_preview(
     State(s): State<Arc<AppState>>,
     Json(body): Json<PreviewRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let id = body.track_id.ok_or_else(|| anyhow!("track_id required"))?;
-    let (track, candidate) = selected(&s.pool, id).await?;
-    let cfg = s.config.read().await;
-    let path = destination(&cfg, &track, &candidate, body.template.as_deref())?;
-    Ok(Json(serde_json::json!({"path":path})))
+    let base = s.config.read().await.clone();
+    let mut cfg = body.settings.unwrap_or(base.clone());
+    cfg.acoustid_api_key = base.acoustid_api_key;
+    cfg.musicbrainz_user_agent = base.musicbrainz_user_agent;
+    cfg.db_path = base.db_path;
+    let sample_track = Track {
+        id: 0,
+        path: format!("{}/Song Title.mp3", cfg.input_dir),
+        output_path: None,
+        filename: "Song Title.mp3".into(),
+        format: Some("mp3".into()),
+        duration: Some(212.0),
+        current_title: Some("Wrong Title".into()),
+        current_artist: Some("Wrong Artist".into()),
+        current_album: Some("Wrong Album".into()),
+        selected_candidate_id: Some(0),
+        status: "sample".into(),
+        error: None,
+        is_missing: false,
+        stage: "ready".into(),
+        stage_message: None,
+        retry_count: 0,
+        next_retry_at: None,
+    };
+    let sample_candidate = Candidate {
+        title: "Song Title".into(),
+        artist: "Artist".into(),
+        album: Some("Album".into()),
+        album_artist: Some("Album Artist".into()),
+        track_number: Some(1),
+        track_total: Some(10),
+        disc_number: Some(1),
+        disc_total: Some(1),
+        year: Some("2024".into()),
+        genre: Some("Rock".into()),
+        composer: Some("Composer".into()),
+        label: Some("Label".into()),
+        isrc: Some("USRC17607839".into()),
+        cover_url: None,
+        recording_id: Some("sample-recording".into()),
+        release_id: Some("sample-release".into()),
+        artist_id: Some("sample-artist".into()),
+        album_artist_id: Some("sample-album-artist".into()),
+        score: 96.0,
+        raw_json: "{}".into(),
+    };
+    let (track, candidate) = if let Some(id) = body.track_id {
+        selected(&s.pool, id).await?
+    } else {
+        (sample_track, sample_candidate)
+    };
+    let mut previews = vec![
+        (
+            "Output template",
+            cfg.path_templates.default_template.clone(),
+        ),
+        (
+            "Compilation template",
+            cfg.path_templates.compilation_template.clone(),
+        ),
+        (
+            "In-place filename template",
+            cfg.in_place.filename_template.clone(),
+        ),
+    ];
+    if let Some(template) = body.template {
+        previews = vec![("Custom template", template)];
+    }
+    let results: Vec<PathPreviewResult> = previews
+        .into_iter()
+        .map(|(label, template)| path_preview_result(&cfg, &track, &candidate, label, template))
+        .collect();
+    Ok(Json(serde_json::json!({
+        "examples": results,
+        "sample": {
+            "artist":"Artist",
+            "albumartist":"Album Artist",
+            "album":"Album",
+            "title":"Song Title",
+            "track":"01",
+            "year":"2024",
+            "ext":"mp3"
+        }
+    })))
 }
 async fn apply_preview(
     State(s): State<Arc<AppState>>,
@@ -461,13 +588,24 @@ async fn apply_preview(
 ) -> ApiResult<Json<serde_json::Value>> {
     let tracks:Vec<Track>=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0").fetch_all(&s.pool).await?;
     let cfg = s.config.read().await.clone();
+    let selected = load_selected(&s.pool, tracks).await?;
+    let duplicates = duplicate_actions(&selected);
+    let duplicate_skipped = duplicates
+        .values()
+        .filter(|action| action.duplicate_action == "skip_duplicate")
+        .count();
     let mut items = Vec::new();
-    for track in tracks {
-        let (_, candidate) = selected(&s.pool, track.id).await?;
+    for (track, candidate) in selected {
+        let dup = duplicates.get(&track.id).cloned().unwrap_or_default();
         let dest = destination(&cfg, &track, &candidate, None)?;
         let mut warnings = vec![];
         if matches!(track.format.as_deref(), Some("wav" | "aiff" | "aif")) {
             warnings.push("Tag writing will be skipped: conditional/unsafe format".into());
+        }
+        if dup.duplicate_action == "skip_duplicate" {
+            warnings.push(dup.duplicate_reason.clone().unwrap_or_else(|| {
+                "Duplicate of a stronger matched file; it will not be written".into()
+            }));
         }
         items.push(PreviewItem {
             track_id: track.id,
@@ -479,16 +617,27 @@ async fn apply_preview(
                 "write tags".into()
             },
             warnings,
+            duplicate_group_id: dup.duplicate_group_id,
+            duplicate_action: dup.duplicate_action,
+            duplicate_reason: dup.duplicate_reason,
+            kept_track_id: dup.kept_track_id,
         });
     }
     let token = Uuid::new_v4().to_string();
-    s.previews
-        .write()
-        .await
-        .insert(token.clone(), items.clone());
-    Ok(Json(
-        serde_json::json!({"preview_token":token,"items":items}),
-    ))
+    let apply_items: Vec<PreviewItem> = items
+        .iter()
+        .filter(|item| item.duplicate_action != "skip_duplicate")
+        .cloned()
+        .collect();
+    s.previews.write().await.insert(token.clone(), apply_items);
+    Ok(Json(serde_json::json!({
+        "preview_token":token,
+        "items":items,
+        "summary":{
+            "write_count": items.iter().filter(|item| item.duplicate_action != "skip_duplicate").count(),
+            "duplicate_skipped": duplicate_skipped
+        }
+    })))
 }
 async fn start_apply(
     State(s): State<Arc<AppState>>,
@@ -500,18 +649,27 @@ async fn start_apply(
         .await
         .remove(&body.preview_token)
         .ok_or_else(|| anyhow!("a current successful dry-run preview is required"))?;
-    let id = jobs::create(&s, "apply").await?;
+    let id = Uuid::new_v4().to_string();
+    {
+        let mut w = s.workflow.write().await;
+        w.phase = "apply".into();
+        w.message = "Applying matched metadata".into();
+        w.cancelled = false;
+    }
     let state = s.clone();
     let job = id.clone();
     tokio::spawn(async move {
         let result = apply(state.clone(), job.clone(), items).await;
-        jobs::finish(
-            &state,
-            "apply",
-            &job,
-            result.as_ref().err().map(|e| e.to_string()).as_deref(),
-        )
-        .await;
+        let mut w = state.workflow.write().await;
+        w.phase = if result.is_ok() {
+            "finish".into()
+        } else {
+            "failed".into()
+        };
+        w.message = result
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "Apply complete".into());
     });
     Ok(Json(serde_json::json!({"job_id":id})))
 }
@@ -600,7 +758,13 @@ async fn apply(s: Arc<AppState>, job: String, items: Vec<PreviewItem>) -> Result
         .bind(item.track_id)
         .execute(&s.pool)
         .await?;
-        jobs::progress(&s, "apply", &job, i as i64 + 1, total, status).await;
+        {
+            let mut w = s.workflow.write().await;
+            w.current = i + 1;
+            w.total = total as usize;
+            w.current_file = Some(item.current_path.clone());
+        }
+        jobs::emit(&s, "workflow", Some("apply"), i as i64 + 1, total, status);
         if status == "applied" {
             sqlx::query("DELETE FROM tracks WHERE id=?")
                 .bind(item.track_id)
@@ -667,6 +831,146 @@ fn destination(
     .to_string_lossy()
     .into())
 }
+
+fn path_preview_result(
+    cfg: &Config,
+    track: &Track,
+    candidate: &Candidate,
+    label: &str,
+    template: String,
+) -> PathPreviewResult {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    if template.trim().is_empty() {
+        errors.push("Template cannot be empty".into());
+    }
+    if template.contains("..") {
+        warnings.push("Parent path segments are rejected".into());
+    }
+    let path = if errors.is_empty() {
+        match destination(cfg, track, candidate, Some(&template)) {
+            Ok(path) => {
+                if !path.to_ascii_lowercase().ends_with(".mp3") {
+                    warnings.push("Original extension is preserved automatically".into());
+                }
+                Some(path)
+            }
+            Err(error) => {
+                errors.push(error.to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    PathPreviewResult {
+        label: label.into(),
+        template,
+        path,
+        warnings,
+        errors,
+    }
+}
+
+#[derive(Clone, Default)]
+struct DuplicateAction {
+    duplicate_group_id: Option<String>,
+    duplicate_action: String,
+    duplicate_reason: Option<String>,
+    kept_track_id: Option<i64>,
+}
+
+async fn load_selected(pool: &SqlitePool, tracks: Vec<Track>) -> Result<Vec<(Track, Candidate)>> {
+    let mut out = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let (_, candidate) = selected(pool, track.id).await?;
+        out.push((track, candidate));
+    }
+    Ok(out)
+}
+
+fn duplicate_actions(selected: &[(Track, Candidate)]) -> HashMap<i64, DuplicateAction> {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, (track, candidate)) in selected.iter().enumerate() {
+        groups
+            .entry(duplicate_key(track, candidate))
+            .or_default()
+            .push(index);
+    }
+    let mut actions = HashMap::new();
+    for (key, indexes) in groups.into_iter().filter(|(_, indexes)| indexes.len() > 1) {
+        let keep_index = *indexes
+            .iter()
+            .max_by(|a, b| {
+                let (ta, ca) = &selected[**a];
+                let (tb, cb) = &selected[**b];
+                ca.score
+                    .total_cmp(&cb.score)
+                    .then_with(|| {
+                        ta.duration
+                            .unwrap_or_default()
+                            .total_cmp(&tb.duration.unwrap_or_default())
+                    })
+                    .then_with(|| tb.path.cmp(&ta.path))
+            })
+            .expect("duplicate group has indexes");
+        let keep_id = selected[keep_index].0.id;
+        for index in indexes {
+            let (track, candidate) = &selected[index];
+            let reason = if track.id == keep_id {
+                format!(
+                    "Keeping best duplicate match at {:.0}% confidence",
+                    candidate.score
+                )
+            } else {
+                format!("Duplicate of track {keep_id}; kept the stronger match")
+            };
+            actions.insert(
+                track.id,
+                DuplicateAction {
+                    duplicate_group_id: Some(key.clone()),
+                    duplicate_action: if track.id == keep_id {
+                        "keep".into()
+                    } else {
+                        "skip_duplicate".into()
+                    },
+                    duplicate_reason: Some(reason),
+                    kept_track_id: Some(keep_id),
+                },
+            );
+        }
+    }
+    actions
+}
+
+fn duplicate_key(track: &Track, candidate: &Candidate) -> String {
+    if let Some(id) = candidate
+        .recording_id
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+    {
+        return format!("mbid:{}", id.trim().to_ascii_lowercase());
+    }
+    if let Some(isrc) = candidate.isrc.as_deref().filter(|v| !v.trim().is_empty()) {
+        return format!("isrc:{}", isrc.trim().to_ascii_uppercase());
+    }
+    let duration_bucket = track.duration.unwrap_or_default().round() as i64 / 3;
+    format!(
+        "text:{}:{}:{}",
+        normalize_duplicate_text(&candidate.artist),
+        normalize_duplicate_text(&candidate.title),
+        duration_bucket
+    )
+}
+
+fn normalize_duplicate_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 async fn selected(pool: &SqlitePool, id: i64) -> Result<(Track, Candidate)> {
     let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(pool).await?;
     let cid = track

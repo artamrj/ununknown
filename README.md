@@ -1,6 +1,6 @@
 # Ununknown
 
-Current release: **0.2.0**
+Current release: **0.3.0**
 
 Ununknown is a small, local-first web app that repairs music metadata. It scans folders recursively, fingerprints audio with Chromaprint, finds metadata using AcoustID and MusicBrainz, shows a required dry-run preview, then writes approved tags and artwork.
 
@@ -25,7 +25,7 @@ Open <http://localhost:7331>, open **Settings**, and enter a MusicBrainz contact
 Ununknown/0.1 (you@example.com)
 ```
 
-Copy test music into `music/input`, click **Scan music**, review matches, preview every change, then apply.
+Copy test music into `music/input`, click **Scan music**, let the sequential pipeline finish, preview every matched change, then apply.
 
 ```text
 ./music/input  -> /music/input
@@ -44,13 +44,15 @@ Copy test music into `music/input`, click **Scan music**, review matches, previe
 
 Provider failures are shown on affected tracks instead of being hidden as “no match.”
 
-## Workflow
+## Version 0.3 Workflow
 
 ```text
-Scan -> Match -> Review -> Dry-run preview -> Confirm -> Apply
+Scan -> Fetch -> Preview -> Apply -> Finish
 ```
 
-Scanning never changes audio files. Apply is rejected until a current successful preview exists.
+Scan discovers and sorts all audio paths without saving them. Fetch processes one file at a time, retries provider failures using the configured attempt limit, and moves on. Unmatched and failed files are discarded after their totals are updated.
+
+Only successful matched proposals are temporarily saved in SQLite for preview recovery. They expire after one day by default, starting a new scan clears them immediately, and successful Apply deletes them. Apply is rejected until a current successful preview exists.
 
 - **Safe:** automatically selects fingerprint matches scoring at least 90.
 - **Aggressive:** automatically selects fingerprint matches scoring at least 75.

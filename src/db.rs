@@ -48,7 +48,7 @@ pub async fn cleanup(pool: &SqlitePool, config: &Config) -> Result<()> {
     sqlx::query("UPDATE tracks SET stage='failed',status='provider_error',stage_message='Interrupted by restart',error=COALESCE(error,'Interrupted by backend restart') WHERE status='processing'")
         .execute(pool).await?;
     sqlx::query(
-        "DELETE FROM tracks WHERE updated_at IS NOT NULL AND updated_at < datetime('now', ?)",
+        "DELETE FROM tracks WHERE updated_at IS NOT NULL AND julianday(updated_at) < julianday('now', ?)",
     )
     .bind(format!("-{} days", config.workspace_retention_days))
     .execute(pool)

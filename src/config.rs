@@ -11,6 +11,7 @@ pub struct Config {
     pub output_mode: String,
     pub automation_mode: String,
     pub confidence_threshold: f64,
+    pub track_attempts: u32,
     pub cover_art_enabled: bool,
     pub overwrite_existing_tags: bool,
     pub expert_mode: bool,
@@ -110,6 +111,10 @@ impl Config {
             "Confidence threshold must be between 0 and 100"
         );
         anyhow::ensure!(
+            (1..=10).contains(&self.track_attempts),
+            "Track attempts must be between 1 and 10"
+        );
+        anyhow::ensure!(
             Self::valid_musicbrainz_user_agent(&self.musicbrainz_user_agent),
             "MusicBrainz contact must include an email address or website, for example: Ununknown/0.1 (you@example.com)"
         );
@@ -178,11 +183,12 @@ impl Default for Config {
             output_mode: "copy".into(),
             automation_mode: "safe".into(),
             confidence_threshold: 90.0,
+            track_attempts: 3,
             cover_art_enabled: true,
             overwrite_existing_tags: true,
             expert_mode: false,
             acoustid_api_key: String::new(),
-            workspace_retention_days: 7,
+            workspace_retention_days: 1,
             job_retention_days: 7,
             musicbrainz_user_agent: "Ununknown/0.1 (configure-your-contact)".into(),
             path_templates: Default::default(),

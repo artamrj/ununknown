@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let defaults = config::Config {
         acoustid_api_key: std::env::var("UNUNKNOWN_ACOUSTID_API_KEY").unwrap_or_default(),
         musicbrainz_user_agent: std::env::var("UNUNKNOWN_MUSICBRAINZ_USER_AGENT")
-            .unwrap_or_else(|_| "Ununknown/0.2.0 (https://github.com/artamrj/ununknown)".into()),
+            .unwrap_or_else(|_| "Ununknown/0.3.0 (https://github.com/artamrj/ununknown)".into()),
         ..Default::default()
     };
     let pool = db::connect(&defaults.db_path).await?;

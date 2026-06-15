@@ -71,6 +71,7 @@ pub async fn lookup(
         .collect())
 }
 
+#[allow(dead_code)]
 pub async fn test_key(client: &Client, key: &str, fingerprint: &str, duration: f64) -> Result<()> {
     if key.trim().is_empty() {
         bail!("AcoustID API key is not configured");

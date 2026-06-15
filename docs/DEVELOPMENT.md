@@ -172,7 +172,7 @@ For provider testing, export environment variables before starting the backend:
 
 ```bash
 export UNUNKNOWN_ACOUSTID_API_KEY="your-application-key"
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.2.0 (you@example.com)"
+export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.3.0 (you@example.com)"
 cargo run
 ```
 
@@ -192,7 +192,7 @@ Successful applies remove their temporary track and candidate records automatica
 2. Start backend and frontend.
 3. Open `http://localhost:5173`.
 4. Open **Settings**.
-5. Enter a MusicBrainz contact such as `Ununknown/0.2.0 (you@example.com)`.
+5. Enter a MusicBrainz contact such as `Ununknown/0.3.0 (you@example.com)`.
 6. Save and test MusicBrainz.
 7. Optionally save and test an AcoustID application key.
 8. Click **Scan music**.
