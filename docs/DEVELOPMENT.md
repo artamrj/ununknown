@@ -48,11 +48,21 @@ From the repository:
 
 ```bash
 cd /Users/arta/Documents/GITHUB/ununknown
-mkdir -p music/input music/output cache
+mkdir -p .local/ununknown/music/input .local/ununknown/music/output .local/ununknown/cache .local/ununknown/logs .local/ununknown/fixtures
 npm ci --prefix frontend
 ```
 
-The backend uses the same fixed paths as the production container:
+All local runtime data lives under `.local/ununknown`, which is ignored by Git:
+
+```text
+.local/ununknown/music/input   copied test music
+.local/ununknown/music/output  generated fixed files
+.local/ununknown/cache         SQLite database, provider cache, artwork cache
+.local/ununknown/logs          optional local logs
+.local/ununknown/fixtures      manual/generated local fixtures
+```
+
+The backend still uses the same fixed paths as the production container:
 
 ```text
 /music/input
@@ -63,8 +73,8 @@ The backend uses the same fixed paths as the production container:
 For native development on macOS, create local links once:
 
 ```bash
-sudo ln -s "$PWD/music" /music
-sudo ln -s "$PWD/cache" /cache
+sudo ln -s "$PWD/.local/ununknown/music" /music
+sudo ln -s "$PWD/.local/ununknown/cache" /cache
 ```
 
 If `/music` or `/cache` already exists, do not replace it. Use Docker development instead.
@@ -72,7 +82,7 @@ If `/music` or `/cache` already exists, do not replace it. Use Docker developmen
 Put only test copies of music inside:
 
 ```text
-music/input
+.local/ununknown/music/input
 ```
 
 ## Fast Edit Loop
@@ -141,7 +151,7 @@ Do not run Docker and native `cargo run` together because both use port `7331`.
 SQLite stores settings and temporary scan/matching data:
 
 ```text
-cache/ununknown.sqlite
+.local/ununknown/cache/ununknown.sqlite
 ```
 
 Install the SQLite CLI if needed:
@@ -153,7 +163,7 @@ brew install sqlite
 Inspect the database:
 
 ```bash
-sqlite3 cache/ununknown.sqlite
+sqlite3 .local/ununknown/cache/ununknown.sqlite
 ```
 
 Useful commands inside SQLite:
@@ -179,7 +189,7 @@ cargo run
 Reset all local settings and temporary data:
 
 ```bash
-rm cache/ununknown.sqlite
+rm .local/ununknown/cache/ununknown.sqlite
 ```
 
 Stop the backend before deleting the database. The next backend start creates and migrates a fresh database.
@@ -188,7 +198,7 @@ Successful applies remove their temporary track and candidate records automatica
 
 ## Manual Development Test
 
-1. Put copied MP3 or FLAC files in `music/input`.
+1. Put copied MP3 or FLAC files in `.local/ununknown/music/input`.
 2. Start backend and frontend.
 3. Open `http://localhost:5173`.
 4. Open **Settings**.
@@ -196,7 +206,7 @@ Successful applies remove their temporary track and candidate records automatica
 6. Click **Scan music**.
 7. Watch the Fetch terminal for provider, score, retry, and unmatched diagnostics.
 8. Preview old-vs-new metadata cards and apply selected changes.
-9. Verify corrected files under `music/output`.
+9. Verify corrected files under `.local/ununknown/music/output`.
 
 Always test with copied music. Ununknown has no backup or rollback system.
 
@@ -272,6 +282,23 @@ docker build -t ununknown:test .
 bash scripts/e2e-fixtures.sh
 ```
 
+## Reset Local Runtime Workspace
+
+Stop any local container first:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+```
+
+Remove generated cache and output, then recreate the folders:
+
+```bash
+rm -rf .local/ununknown/cache .local/ununknown/music/output
+mkdir -p .local/ununknown/cache .local/ununknown/music/output
+```
+
+Keep `.local/ununknown/music/input` if you want to reuse your copied test music. Delete it too when you want a completely clean local workspace.
+
 ## Useful API Checks
 
 With the backend running:
@@ -299,7 +326,7 @@ docker compose -f docker-compose.dev.yml logs -f
 
 - **Port 7331 already used:** stop Docker or another backend process.
 - **Frontend opens but APIs fail:** confirm `cargo run` is running on port `7331`.
-- **No files found:** confirm test music exists under `/music/input` or the Docker-mounted `music/input`.
+- **No files found:** confirm test music exists under `/music/input` or the Docker-mounted `.local/ununknown/music/input`.
 - **`fpcalc` not found:** install Chromaprint or use Docker.
-- **Database permission error:** ensure `/cache` or `cache` is writable.
+- **Database permission error:** ensure `/cache` or `.local/ununknown/cache` is writable.
 - **Provider failures:** check the Fetch terminal, provider environment variables, and backend logs.

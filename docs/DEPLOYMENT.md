@@ -13,7 +13,7 @@ Ununknown 0.4 preserves saved settings during upgrade but clears temporary match
 Create a directory for Ununknown:
 
 ```bash
-mkdir -p ununknown/music/input ununknown/music/output ununknown/cache
+mkdir -p ununknown/.local/ununknown/music/input ununknown/.local/ununknown/music/output ununknown/.local/ununknown/cache
 cd ununknown
 curl -O https://raw.githubusercontent.com/artamrj/ununknown/main/docker-compose.yml
 docker compose up -d
@@ -55,9 +55,9 @@ AcoustID is optional. MusicBrainz requires a meaningful email address or website
 The default Compose file mounts:
 
 ```text
-./music/input  -> /music/input
-./music/output -> /music/output
-./cache        -> /cache
+.local/ununknown/music/input  -> /music/input
+.local/ununknown/music/output -> /music/output
+.local/ununknown/cache        -> /cache
 ```
 
 For existing NAS folders, edit only the host side:

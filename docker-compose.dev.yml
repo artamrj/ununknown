@@ -8,7 +8,7 @@ services:
       UNUNKNOWN_ACOUSTID_API_KEY: AzMVFgUFfS
       UNUNKNOWN_MUSICBRAINZ_USER_AGENT: Ununknown/0.4.5 (artamrjk@gmail.com)
     volumes:
-      - ./music/input:/music/input
-      - ./music/output:/music/output
-      - ./cache:/cache
+      - ./.local/ununknown/music/input:/music/input
+      - ./.local/ununknown/music/output:/music/output
+      - ./.local/ununknown/cache:/cache
     restart: unless-stopped

@@ -2,6 +2,7 @@
 /frontend/node_modules
 /frontend/dist
 *.tsbuildinfo
+/.local
 /cache
 /music
 /config/config.toml

@@ -13,7 +13,7 @@ The complete tabbed Settings page exposes matching thresholds, every supported m
 Requirements: Docker with Docker Compose.
 
 ```bash
-mkdir -p ununknown/music/input ununknown/music/output ununknown/cache
+mkdir -p ununknown/.local/ununknown/music/input ununknown/.local/ununknown/music/output ununknown/.local/ununknown/cache
 cd ununknown
 curl -O https://raw.githubusercontent.com/artamrj/ununknown/main/docker-compose.yml
 docker compose up -d
@@ -25,12 +25,12 @@ Open <http://localhost:7331>, open **Settings**, and enter a MusicBrainz contact
 Ununknown/0.1 (you@example.com)
 ```
 
-Copy test music into `music/input`, click **Scan music**, let the sequential pipeline finish, preview every matched change, then apply.
+Copy test music into `.local/ununknown/music/input`, click **Scan music**, let the sequential pipeline finish, preview every matched change, then apply.
 
 ```text
-./music/input  -> /music/input
-./music/output -> /music/output
-./cache        -> /cache
+.local/ununknown/music/input  -> /music/input
+.local/ununknown/music/output -> /music/output
+.local/ununknown/cache        -> /cache
 ```
 
 **Test with copied files first.** Ununknown has no backup or rollback system.
