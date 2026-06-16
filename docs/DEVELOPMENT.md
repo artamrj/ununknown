@@ -52,14 +52,14 @@ mkdir -p .local/ununknown/music/input .local/ununknown/music/output .local/ununk
 npm ci --prefix frontend
 ```
 
-All local runtime data lives under `.local/ununknown`, which is ignored by Git:
+All local runtime and test data belongs under `.local/ununknown`, which is ignored by Git:
 
 ```text
-.local/ununknown/music/input   copied test music
+.local/ununknown/music/input   copied test music only
 .local/ununknown/music/output  generated fixed files
 .local/ununknown/cache         SQLite database, provider cache, artwork cache
 .local/ununknown/logs          optional local logs
-.local/ununknown/fixtures      manual/generated local fixtures
+.local/ununknown/fixtures      developer-created test files
 ```
 
 The backend still uses the same fixed paths as the production container:
@@ -83,6 +83,21 @@ Put only test copies of music inside:
 
 ```text
 .local/ununknown/music/input
+```
+
+If you already have old root folders, migrate them manually. Do not delete them until you confirm the new workspace works:
+
+```bash
+mkdir -p .local/ununknown/music/input .local/ununknown/music/output .local/ununknown/cache
+mv music/input/* .local/ununknown/music/input/ 2>/dev/null || true
+mv music/output/* .local/ununknown/music/output/ 2>/dev/null || true
+mv cache/* .local/ununknown/cache/ 2>/dev/null || true
+```
+
+After confirming the app works, remove the old ignored root folders if you no longer need them:
+
+```bash
+rm -rf music cache
 ```
 
 ## Fast Edit Loop
@@ -284,20 +299,20 @@ bash scripts/e2e-fixtures.sh
 
 ## Reset Local Runtime Workspace
 
-Stop any local container first:
+Reset generated data while keeping copied input music:
 
 ```bash
 docker compose -f docker-compose.dev.yml down
-```
-
-Remove generated cache and output, then recreate the folders:
-
-```bash
 rm -rf .local/ununknown/cache .local/ununknown/music/output
 mkdir -p .local/ununknown/cache .local/ununknown/music/output
 ```
 
-Keep `.local/ununknown/music/input` if you want to reuse your copied test music. Delete it too when you want a completely clean local workspace.
+Fully remove all local runtime data:
+
+```bash
+docker compose -f docker-compose.dev.yml down
+rm -rf .local/ununknown
+```
 
 ## Useful API Checks
 

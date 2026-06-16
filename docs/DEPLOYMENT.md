@@ -60,6 +60,16 @@ The default Compose file mounts:
 .local/ununknown/cache        -> /cache
 ```
 
+For local testing, keep all runtime data in `.local/ununknown`:
+
+```text
+.local/ununknown/music/input   copied test music
+.local/ununknown/music/output  generated fixed files
+.local/ununknown/cache         SQLite database, provider cache, artwork cache
+.local/ununknown/logs          optional local logs
+.local/ununknown/fixtures      manual/generated local fixtures
+```
+
 For existing NAS folders, edit only the host side:
 
 ```yaml
