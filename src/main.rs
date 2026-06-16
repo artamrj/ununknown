@@ -24,9 +24,13 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let defaults = config::Config {
+        db_path: std::env::var("UNUNKNOWN_DB").unwrap_or_else(|_| "/cache/ununknown.sqlite".into()),
+        input_dir: std::env::var("UNUNKNOWN_INPUT_DIR").unwrap_or_else(|_| "/music/input".into()),
+        output_dir: std::env::var("UNUNKNOWN_OUTPUT_DIR")
+            .unwrap_or_else(|_| "/music/output".into()),
         acoustid_api_key: std::env::var("UNUNKNOWN_ACOUSTID_API_KEY").unwrap_or_default(),
         musicbrainz_user_agent: std::env::var("UNUNKNOWN_MUSICBRAINZ_USER_AGENT")
-            .unwrap_or_else(|_| "Ununknown/0.3.0 (https://github.com/artamrj/ununknown)".into()),
+            .unwrap_or_else(|_| "Ununknown/0.4.0 (https://github.com/artamrj/ununknown)".into()),
         ..Default::default()
     };
     let pool = db::connect(&defaults.db_path).await?;

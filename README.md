@@ -1,6 +1,6 @@
 # Ununknown
 
-Current release: **0.3.0**
+Current release: **0.4.0**
 
 Ununknown is a small, local-first web app that repairs music metadata. It scans folders recursively, fingerprints audio with Chromaprint, finds metadata using AcoustID and MusicBrainz, shows a required dry-run preview, then writes approved tags and artwork.
 

@@ -1,6 +1,6 @@
 # Docker Compose And Deployment
 
-Ununknown 0.2 preserves saved settings during upgrade but clears the temporary 0.1 scan workspace and provider cache.
+Ununknown 0.4 preserves saved settings during upgrade but clears temporary matched previews and provider cache when migrations require it.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ Provider configuration is not saved in SQLite. Supply both providers through the
 
 ```bash
 export UNUNKNOWN_ACOUSTID_API_KEY="your-application-key"
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.3.0 (you@example.com)"
+export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.4.0 (you@example.com)"
 docker compose up -d
 ```
 
@@ -35,7 +35,7 @@ Or place them in a `.env` file beside `docker-compose.yml`:
 
 ```dotenv
 UNUNKNOWN_ACOUSTID_API_KEY=your-application-key
-UNUNKNOWN_MUSICBRAINZ_USER_AGENT=Ununknown/0.3.0 (you@example.com)
+UNUNKNOWN_MUSICBRAINZ_USER_AGENT=Ununknown/0.4.0 (you@example.com)
 ```
 
 AcoustID is optional. MusicBrainz requires a meaningful email address or website but no API key.

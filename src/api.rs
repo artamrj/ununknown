@@ -46,8 +46,17 @@ pub struct Workflow {
     pub matched: usize,
     pub unmatched: usize,
     pub failed: usize,
+    pub terminal_log: Vec<TerminalLine>,
     #[serde(skip)]
     pub cancelled: bool,
+}
+#[derive(Clone, Default, Serialize)]
+pub struct TerminalLine {
+    pub timestamp: String,
+    pub level: String,
+    pub stage: String,
+    pub file: Option<String>,
+    pub message: String,
 }
 impl AppState {
     pub fn new(config: Config, pool: SqlitePool) -> Self {
@@ -68,6 +77,46 @@ impl AppState {
     }
     pub async fn cancelled(&self, id: &str) -> bool {
         self.cancelled.read().await.contains(id)
+    }
+    pub async fn terminal(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {
+        let line = TerminalLine {
+            timestamp: Utc::now().to_rfc3339(),
+            level: level.into(),
+            stage: stage.into(),
+            file: file.map(str::to_owned),
+            message: message.into(),
+        };
+        let mut workflow = self.workflow.write().await;
+        workflow.terminal_log.push(line.clone());
+        let overflow = workflow.terminal_log.len().saturating_sub(160);
+        if overflow > 0 {
+            workflow.terminal_log.drain(0..overflow);
+        }
+        let phase = workflow.phase.clone();
+        let current_file = workflow.current_file.clone();
+        let current = workflow.current as i64;
+        let total = workflow.total as i64;
+        let processed = workflow.processed as i64;
+        let matched = workflow.matched as i64;
+        let unmatched = workflow.unmatched as i64;
+        let failed = workflow.failed as i64;
+        drop(workflow);
+        let _ = self.events.send(jobs::Event {
+            kind: "terminal".into(),
+            stage: Some(stage.into()),
+            level: Some(line.level),
+            file: line.file,
+            timestamp: Some(line.timestamp),
+            phase: Some(phase),
+            current_file,
+            processed: Some(processed),
+            matched: Some(matched),
+            unmatched: Some(unmatched),
+            failed: Some(failed),
+            current,
+            total,
+            message: line.message,
+        });
     }
 }
 
@@ -100,6 +149,8 @@ struct Track {
     current_title: Option<String>,
     current_artist: Option<String>,
     current_album: Option<String>,
+    current_album_artist: Option<String>,
+    current_track_number: Option<i64>,
     selected_candidate_id: Option<i64>,
     status: String,
     error: Option<String>,
@@ -172,6 +223,26 @@ struct PreviewItem {
     duplicate_action: String,
     duplicate_reason: Option<String>,
     kept_track_id: Option<i64>,
+    old: MetadataSummary,
+    new: MetadataSummary,
+    cover_url: Option<String>,
+    confidence: f64,
+    artwork_action: String,
+}
+#[derive(Clone, Serialize)]
+struct MetadataSummary {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    album_artist: Option<String>,
+    track_number: Option<i64>,
+    disc_number: Option<i64>,
+    year: Option<String>,
+    genre: Option<String>,
+    label: Option<String>,
+    isrc: Option<String>,
+    duration: Option<f64>,
+    format: Option<String>,
 }
 #[derive(Deserialize)]
 struct SelectRequest {
@@ -387,6 +458,13 @@ async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json
         message: "Discovering music".into(),
         ..Default::default()
     };
+    s.terminal(
+        "info",
+        "scan",
+        None,
+        "Starting new scan; cleared previous temporary workspace",
+    )
+    .await;
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(error) = fs_scan::run(state.clone()).await {
@@ -428,7 +506,7 @@ async fn list_tracks(
     let search = format!("%{}%", q.search.unwrap_or_default());
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?)")
         .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).fetch_one(&s.pool).await?;
-    let tracks: Vec<Track> = sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?) ORDER BY path LIMIT ? OFFSET ?")
+    let tracks: Vec<Track> = sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?) ORDER BY path LIMIT ? OFFSET ?")
         .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).bind(size).bind((page-1)*size).fetch_all(&s.pool).await?;
     let mut result = Vec::with_capacity(tracks.len());
     for track in tracks {
@@ -446,7 +524,7 @@ async fn list_tracks(
     }))
 }
 async fn get_track(State(s): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult<Json<Track>> {
-    Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(&s.pool).await?))
+    Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(&s.pool).await?))
 }
 async fn candidates(
     State(s): State<Arc<AppState>>,
@@ -512,6 +590,8 @@ async fn template_preview(
         current_title: Some("Wrong Title".into()),
         current_artist: Some("Wrong Artist".into()),
         current_album: Some("Wrong Album".into()),
+        current_album_artist: Some("Wrong Album Artist".into()),
+        current_track_number: Some(9),
         selected_candidate_id: Some(0),
         status: "sample".into(),
         error: None,
@@ -586,7 +666,7 @@ async fn apply_preview(
     State(s): State<Arc<AppState>>,
     Json(_): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let tracks:Vec<Track>=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0").fetch_all(&s.pool).await?;
+    let tracks:Vec<Track>=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0").fetch_all(&s.pool).await?;
     let cfg = s.config.read().await.clone();
     let selected = load_selected(&s.pool, tracks).await?;
     let duplicates = duplicate_actions(&selected);
@@ -621,6 +701,15 @@ async fn apply_preview(
             duplicate_action: dup.duplicate_action,
             duplicate_reason: dup.duplicate_reason,
             kept_track_id: dup.kept_track_id,
+            old: old_summary(&track),
+            new: new_summary(&candidate, &track),
+            cover_url: candidate.cover_url.clone(),
+            confidence: candidate.score,
+            artwork_action: if cfg.cover_art_enabled && candidate.cover_url.is_some() {
+                "download + embed cover art".into()
+            } else {
+                "no artwork change".into()
+            },
         });
     }
     let token = Uuid::new_v4().to_string();
@@ -872,6 +961,40 @@ fn path_preview_result(
     }
 }
 
+fn old_summary(track: &Track) -> MetadataSummary {
+    MetadataSummary {
+        title: track.current_title.clone(),
+        artist: track.current_artist.clone(),
+        album: track.current_album.clone(),
+        album_artist: track.current_album_artist.clone(),
+        track_number: track.current_track_number,
+        disc_number: None,
+        year: None,
+        genre: None,
+        label: None,
+        isrc: None,
+        duration: track.duration,
+        format: track.format.clone(),
+    }
+}
+
+fn new_summary(candidate: &Candidate, track: &Track) -> MetadataSummary {
+    MetadataSummary {
+        title: Some(candidate.title.clone()),
+        artist: Some(candidate.artist.clone()),
+        album: candidate.album.clone(),
+        album_artist: candidate.album_artist.clone(),
+        track_number: candidate.track_number,
+        disc_number: candidate.disc_number,
+        year: candidate.year.clone(),
+        genre: candidate.genre.clone(),
+        label: candidate.label.clone(),
+        isrc: candidate.isrc.clone(),
+        duration: track.duration,
+        format: track.format.clone(),
+    }
+}
+
 #[derive(Clone, Default)]
 struct DuplicateAction {
     duplicate_group_id: Option<String>,
@@ -972,7 +1095,7 @@ fn normalize_duplicate_text(value: &str) -> String {
 }
 
 async fn selected(pool: &SqlitePool, id: i64) -> Result<(Track, Candidate)> {
-    let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(pool).await?;
+    let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(pool).await?;
     let cid = track
         .selected_candidate_id
         .ok_or_else(|| anyhow!("track has no selected candidate"))?;

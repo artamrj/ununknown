@@ -172,7 +172,7 @@ For provider testing, export environment variables before starting the backend:
 
 ```bash
 export UNUNKNOWN_ACOUSTID_API_KEY="your-application-key"
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.3.0 (you@example.com)"
+export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.4.0 (you@example.com)"
 cargo run
 ```
 
@@ -192,13 +192,11 @@ Successful applies remove their temporary track and candidate records automatica
 2. Start backend and frontend.
 3. Open `http://localhost:5173`.
 4. Open **Settings**.
-5. Enter a MusicBrainz contact such as `Ununknown/0.3.0 (you@example.com)`.
-6. Save and test MusicBrainz.
-7. Optionally save and test an AcoustID application key.
-8. Click **Scan music**.
-9. Check row-level processing stages and review uncertain matches.
-10. Preview and apply selected changes.
-11. Verify corrected files under `music/output`.
+5. Confirm provider environment variables are set before backend startup.
+6. Click **Scan music**.
+7. Watch the Fetch terminal for provider, score, retry, and unmatched diagnostics.
+8. Preview old-vs-new metadata cards and apply selected changes.
+9. Verify corrected files under `music/output`.
 
 Always test with copied music. Ununknown has no backup or rollback system.
 
@@ -304,4 +302,4 @@ docker compose -f docker-compose.dev.yml logs -f
 - **No files found:** confirm test music exists under `/music/input` or the Docker-mounted `music/input`.
 - **`fpcalc` not found:** install Chromaprint or use Docker.
 - **Database permission error:** ensure `/cache` or `cache` is writable.
-- **Provider failures:** test AcoustID and MusicBrainz from Settings and inspect backend logs.
+- **Provider failures:** check the Fetch terminal, provider environment variables, and backend logs.

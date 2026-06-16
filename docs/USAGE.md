@@ -1,8 +1,10 @@
 # Setup And Use After Deployment
 
-## Version 0.3 Pipeline
+## Version 0.4 Pipeline
 
-Ununknown 0.3 discovers all files first, then fetches metadata for exactly one file at a time. The workspace moves automatically through Scan, Fetch, Preview, Apply, and Finish.
+Ununknown 0.4 discovers all files first, then fetches metadata for exactly one file at a time. The workspace moves automatically through Scan, Fetch, Preview, Apply, and Finish.
+
+Fetch includes a terminal-style diagnostic panel showing provider lookups, retry messages, score decisions, and why files became unmatched.
 
 Files are never saved to SQLite while they are being discovered or identified. Unmatched and failed details are discarded after their totals are updated. Only successful matched proposals are kept temporarily so Preview can survive a browser or backend restart.
 
