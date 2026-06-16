@@ -1,5 +1,5 @@
 use anyhow::Result;
-use lofty::{file::AudioFile, prelude::*, probe::Probe};
+use lofty::{file::AudioFile, picture::PictureType, prelude::*, probe::Probe};
 use serde::Serialize;
 use std::path::Path;
 
@@ -13,6 +13,11 @@ pub struct AudioInfo {
     pub duration: f64,
     pub bitrate: Option<u32>,
     pub format: String,
+}
+
+pub struct Artwork {
+    pub mime: String,
+    pub data: Vec<u8>,
 }
 
 pub fn read(path: &Path) -> Result<AudioInfo> {
@@ -36,6 +41,26 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
             .unwrap_or("")
             .to_lowercase(),
     })
+}
+
+pub fn artwork(path: &Path) -> Result<Option<Artwork>> {
+    let tagged = Probe::open(path)?.read()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    let Some(picture) = tag.and_then(|tag| {
+        tag.pictures()
+            .iter()
+            .find(|picture| picture.pic_type() == PictureType::CoverFront)
+            .or_else(|| tag.pictures().first())
+    }) else {
+        return Ok(None);
+    };
+    Ok(Some(Artwork {
+        mime: picture
+            .mime_type()
+            .map(|mime| mime.as_str().to_owned())
+            .unwrap_or_else(|| "image/jpeg".into()),
+        data: picture.data().to_vec(),
+    }))
 }
 
 pub fn is_supported(path: &Path) -> bool {

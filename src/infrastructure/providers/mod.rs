@@ -2,13 +2,14 @@ pub mod acoustid;
 pub mod cover_art_archive;
 pub mod musicbrainz;
 
-use crate::{audio::AudioInfo, config::Config};
+use crate::{config::Config, domain::audio::AudioInfo};
 use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Candidate {
+    pub id: Option<i64>,
     pub title: String,
     pub artist: String,
     pub album: Option<String>,
@@ -45,7 +46,7 @@ pub async fn identify(
             let mut candidate =
                 musicbrainz::recording(client, &cfg.musicbrainz_user_agent, &hit.recording_id)
                     .await?;
-            candidate.score = crate::matcher::score(
+            candidate.score = crate::domain::matcher::score(
                 hit.score,
                 current,
                 &candidate.title,
@@ -69,8 +70,11 @@ pub async fn identify(
             )
             .await?
             {
-                candidate.score =
-                    crate::matcher::text_score(current, &candidate.title, &candidate.artist);
+                candidate.score = crate::domain::matcher::text_score(
+                    current,
+                    &candidate.title,
+                    &candidate.artist,
+                );
                 out.push(candidate);
             }
         }

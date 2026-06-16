@@ -1,4 +1,4 @@
-use crate::{config::Config, providers::Candidate};
+use crate::{config::Config, infrastructure::providers::Candidate};
 use anyhow::{Result, bail};
 use lofty::{
     config::WriteOptions,

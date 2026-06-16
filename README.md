@@ -1,6 +1,6 @@
 # Ununknown
 
-Current release: **0.4.0**
+Current release: **0.4.5**
 
 Ununknown is a small, local-first web app that repairs music metadata. It scans folders recursively, fingerprints audio with Chromaprint, finds metadata using AcoustID and MusicBrainz, shows a required dry-run preview, then writes approved tags and artwork.
 
@@ -35,6 +35,15 @@ Copy test music into `music/input`, click **Scan music**, let the sequential pip
 
 **Test with copied files first.** Ununknown has no backup or rollback system.
 
+## Docker Images And Versions
+
+The project version lives in `Cargo.toml`; the frontend package version must match it. GitHub Actions publishes Docker images from `main` using one tag style:
+
+- `ghcr.io/artamrj/ununknown:latest` for the newest successful `main` build.
+- `ghcr.io/artamrj/ununknown:0.4.5` for a pinned deployment of this release.
+
+Docker tags do not use a `v` prefix.
+
 ## Provider Setup
 
 - **MusicBrainz does not require an API key.** Set `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` in Docker Compose; requests are limited to one per second.
@@ -44,7 +53,7 @@ Copy test music into `music/input`, click **Scan music**, let the sequential pip
 
 Provider failures are shown on affected tracks instead of being hidden as “no match.”
 
-## Version 0.3 Workflow
+## Workflow
 
 ```text
 Scan -> Fetch -> Preview -> Apply -> Finish

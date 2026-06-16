@@ -172,7 +172,7 @@ For provider testing, export environment variables before starting the backend:
 
 ```bash
 export UNUNKNOWN_ACOUSTID_API_KEY="your-application-key"
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.4.0 (you@example.com)"
+export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.4.5 (you@example.com)"
 cargo run
 ```
 

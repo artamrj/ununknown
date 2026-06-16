@@ -21,13 +21,23 @@ docker compose up -d
 
 The standard Compose file pulls `ghcr.io/artamrj/ununknown:latest`. Open <http://localhost:7331>.
 
+`latest` follows the newest successful `main` build. To pin a deployment to this release, change the image to the plain project version tag:
+
+```yaml
+services:
+  ununknown:
+    image: ghcr.io/artamrj/ununknown:0.4.5
+```
+
+Ununknown uses one version source: `Cargo.toml`. The frontend `package.json` version must match it, and Docker tags use plain semver such as `0.4.5`, not `v0.4.5`.
+
 Ununknown has no TOML configuration file. Normal configuration is done in the web UI and saved in `/cache/ununknown.sqlite`.
 
 Provider configuration is not saved in SQLite. Supply both providers through the environment:
 
 ```bash
 export UNUNKNOWN_ACOUSTID_API_KEY="your-application-key"
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.4.0 (you@example.com)"
+export UNUNKNOWN_MUSICBRAINZ_USER_AGENT="Ununknown/0.4.5 (you@example.com)"
 docker compose up -d
 ```
 
@@ -35,7 +45,7 @@ Or place them in a `.env` file beside `docker-compose.yml`:
 
 ```dotenv
 UNUNKNOWN_ACOUSTID_API_KEY=your-application-key
-UNUNKNOWN_MUSICBRAINZ_USER_AGENT=Ununknown/0.4.0 (you@example.com)
+UNUNKNOWN_MUSICBRAINZ_USER_AGENT=Ununknown/0.4.5 (you@example.com)
 ```
 
 AcoustID is optional. MusicBrainz requires a meaningful email address or website but no API key.

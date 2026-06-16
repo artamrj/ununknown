@@ -6,7 +6,7 @@ services:
     environment:
       RUST_LOG: info
       UNUNKNOWN_ACOUSTID_API_KEY: AzMVFgUFfS
-      UNUNKNOWN_MUSICBRAINZ_USER_AGENT: Ununknown/0.4.0 (artamrjk@gmail.com)}
+      UNUNKNOWN_MUSICBRAINZ_USER_AGENT: Ununknown/0.4.5 (artamrjk@gmail.com)
     volumes:
       - ./music/input:/music/input
       - ./music/output:/music/output

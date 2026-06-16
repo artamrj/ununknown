@@ -1,145 +1,29 @@
 use crate::{
+    app::{AppState, Workflow},
+    application::scan_pipeline,
     config::Config,
-    fs_scan, jobs,
-    path_templates::{self, TemplateValues},
-    providers::Candidate,
-    tag_writer,
+    domain::path_templates::{self, TemplateValues},
+    http::error::ApiResult,
+    infrastructure::{media::tag_writer, providers::Candidate},
+    jobs,
 };
 use anyhow::{Result, anyhow};
 use axum::{
-    Json, Router,
+    Json,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response, Sse, sse::Event},
-    routing::{get, post},
 };
 use chrono::Utc;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
-use std::{
-    collections::{HashMap, HashSet},
-    convert::Infallible,
-    path::PathBuf,
-    sync::Arc,
-};
-use tokio::sync::{RwLock, broadcast};
+use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc};
 use uuid::Uuid;
 
-pub struct AppState {
-    pub config: RwLock<Config>,
-    pub pool: SqlitePool,
-    pub client: reqwest::Client,
-    pub events: broadcast::Sender<jobs::Event>,
-    cancelled: RwLock<HashSet<String>>,
-    previews: RwLock<HashMap<String, Vec<PreviewItem>>>,
-    pub workflow: RwLock<Workflow>,
-}
-#[derive(Clone, Default, Serialize)]
-pub struct Workflow {
-    pub phase: String,
-    pub message: String,
-    pub current_file: Option<String>,
-    pub current: usize,
-    pub total: usize,
-    pub processed: usize,
-    pub matched: usize,
-    pub unmatched: usize,
-    pub failed: usize,
-    pub terminal_log: Vec<TerminalLine>,
-    #[serde(skip)]
-    pub cancelled: bool,
-}
-#[derive(Clone, Default, Serialize)]
-pub struct TerminalLine {
-    pub timestamp: String,
-    pub level: String,
-    pub stage: String,
-    pub file: Option<String>,
-    pub message: String,
-}
-impl AppState {
-    pub fn new(config: Config, pool: SqlitePool) -> Self {
-        let (events, _) = broadcast::channel(256);
-        Self {
-            config: RwLock::new(config),
-            pool,
-            client: reqwest::Client::new(),
-            events,
-            cancelled: Default::default(),
-            previews: Default::default(),
-            workflow: RwLock::new(Workflow {
-                phase: "idle".into(),
-                message: "Ready to scan".into(),
-                ..Default::default()
-            }),
-        }
-    }
-    pub async fn cancelled(&self, id: &str) -> bool {
-        self.cancelled.read().await.contains(id)
-    }
-    pub async fn terminal(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {
-        let line = TerminalLine {
-            timestamp: Utc::now().to_rfc3339(),
-            level: level.into(),
-            stage: stage.into(),
-            file: file.map(str::to_owned),
-            message: message.into(),
-        };
-        let mut workflow = self.workflow.write().await;
-        workflow.terminal_log.push(line.clone());
-        let overflow = workflow.terminal_log.len().saturating_sub(160);
-        if overflow > 0 {
-            workflow.terminal_log.drain(0..overflow);
-        }
-        let phase = workflow.phase.clone();
-        let current_file = workflow.current_file.clone();
-        let current = workflow.current as i64;
-        let total = workflow.total as i64;
-        let processed = workflow.processed as i64;
-        let matched = workflow.matched as i64;
-        let unmatched = workflow.unmatched as i64;
-        let failed = workflow.failed as i64;
-        drop(workflow);
-        let _ = self.events.send(jobs::Event {
-            kind: "terminal".into(),
-            stage: Some(stage.into()),
-            level: Some(line.level),
-            file: line.file,
-            timestamp: Some(line.timestamp),
-            phase: Some(phase),
-            current_file,
-            processed: Some(processed),
-            matched: Some(matched),
-            unmatched: Some(unmatched),
-            failed: Some(failed),
-            current,
-            total,
-            message: line.message,
-        });
-    }
-}
-
-#[derive(Debug)]
-struct ApiError(anyhow::Error);
-impl<E: Into<anyhow::Error>> From<E> for ApiError {
-    fn from(value: E) -> Self {
-        Self(value.into())
-    }
-}
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error":self.0.to_string()})),
-        )
-            .into_response()
-    }
-}
-type ApiResult<T> = std::result::Result<T, ApiError>;
-
 #[derive(Serialize, FromRow)]
-struct Track {
+pub struct Track {
     id: i64,
     path: String,
     output_path: Option<String>,
@@ -161,7 +45,7 @@ struct Track {
     next_retry_at: Option<String>,
 }
 #[derive(Serialize, FromRow)]
-struct CandidateRow {
+pub struct CandidateRow {
     id: i64,
     track_id: i64,
     provider: String,
@@ -189,6 +73,7 @@ struct CandidateRow {
 impl CandidateRow {
     fn value(&self) -> Candidate {
         Candidate {
+            id: Some(self.id),
             title: self.title.clone().unwrap_or_default(),
             artist: self.artist.clone().unwrap_or_default(),
             album: self.album.clone(),
@@ -213,8 +98,10 @@ impl CandidateRow {
     }
 }
 #[derive(Clone, Serialize)]
-struct PreviewItem {
+pub struct PreviewItem {
     track_id: i64,
+    candidate_id: i64,
+    filename: String,
     current_path: String,
     destination_path: String,
     action: String,
@@ -226,11 +113,13 @@ struct PreviewItem {
     old: MetadataSummary,
     new: MetadataSummary,
     cover_url: Option<String>,
+    current_cover_url: Option<String>,
+    proposed_cover_url: Option<String>,
     confidence: f64,
     artwork_action: String,
 }
 #[derive(Clone, Serialize)]
-struct MetadataSummary {
+pub struct MetadataSummary {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
@@ -245,11 +134,11 @@ struct MetadataSummary {
     format: Option<String>,
 }
 #[derive(Deserialize)]
-struct SelectRequest {
+pub struct SelectRequest {
     candidate_id: Option<i64>,
 }
 #[derive(Deserialize)]
-struct CandidateEdit {
+pub struct CandidateEdit {
     title: String,
     artist: String,
     album: Option<String>,
@@ -265,17 +154,17 @@ struct CandidateEdit {
     isrc: Option<String>,
 }
 #[derive(Deserialize)]
-struct PreviewRequest {
+pub struct PreviewRequest {
     template: Option<String>,
     track_id: Option<i64>,
     settings: Option<Config>,
 }
 #[derive(Deserialize)]
-struct ApplyRequest {
+pub struct ApplyRequest {
     preview_token: String,
 }
 #[derive(Serialize)]
-struct PathPreviewResult {
+pub struct PathPreviewResult {
     label: String,
     template: String,
     path: Option<String>,
@@ -283,65 +172,34 @@ struct PathPreviewResult {
     errors: Vec<String>,
 }
 #[derive(Deserialize)]
-struct SettingsRequest {
+pub struct SettingsRequest {
     #[serde(flatten)]
     config: Config,
 }
 #[derive(Serialize)]
-struct WorkspaceTrack {
+pub struct WorkspaceTrack {
     #[serde(flatten)]
     track: Track,
     candidates: Vec<CandidateRow>,
 }
 #[derive(Deserialize)]
-struct TrackQuery {
+pub struct TrackQuery {
     page: Option<i64>,
     page_size: Option<i64>,
     status: Option<String>,
     search: Option<String>,
 }
 #[derive(Serialize)]
-struct TrackPage {
+pub struct TrackPage {
     items: Vec<WorkspaceTrack>,
     total: i64,
     counts: HashMap<String, i64>,
 }
 
-pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/health",
-            get(|| async { Json(serde_json::json!({"status":"ok"})) }),
-        )
-        .route("/settings", get(settings).put(update_settings))
-        .route("/settings/reset", post(reset_settings))
-        .route("/settings/reset/{section}", post(reset_settings_section))
-        .route("/workspace/clear", post(clear_workspace))
-        .route("/workspace", get(workspace))
-        .route("/providers/acoustid/test", post(test_acoustid))
-        .route("/providers/musicbrainz/test", post(test_musicbrainz))
-        .route("/scan/start", post(start_scan))
-        .route("/scan/stop", post(stop_scan))
-        .route("/jobs", get(list_jobs))
-        .route("/jobs/{id}", get(get_job))
-        .route("/tracks", get(list_tracks))
-        .route("/tracks/{id}", get(get_track))
-        .route("/tracks/{id}/candidates", get(candidates))
-        .route("/tracks/{id}/select-candidate", post(select_candidate))
-        .route("/candidates/{id}", axum::routing::put(edit_candidate))
-        .route("/tracks/{id}/retry", post(retry_track))
-        .route("/tracks/bulk/retry", post(retry_failed))
-        .route("/tracks/bulk/skip", post(skip_review))
-        .route("/path-template/preview", post(template_preview))
-        .route("/apply/preview", post(apply_preview))
-        .route("/apply/start", post(start_apply))
-        .route("/apply/stop", post(stop_apply))
-        .route("/events", get(events))
-}
-async fn settings(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
+pub async fn settings(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::to_value(s.config.read().await.public()).unwrap())
 }
-async fn update_settings(
+pub async fn update_settings(
     State(s): State<Arc<AppState>>,
     Json(body): Json<SettingsRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -351,12 +209,12 @@ async fn update_settings(
     cfg.musicbrainz_user_agent = current.musicbrainz_user_agent;
     cfg.db_path = current.db_path;
     cfg.validate()?;
-    crate::db::save_settings(&s.pool, &cfg).await?;
+    crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
     s.previews.write().await.clear();
     Ok(Json(serde_json::json!({"saved":true})))
 }
-async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let current = s.config.read().await.clone();
     let mut cfg = Config {
         db_path: current.db_path,
@@ -365,12 +223,12 @@ async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_
         ..Default::default()
     };
     cfg.acoustid_api_key = current.acoustid_api_key;
-    crate::db::save_settings(&s.pool, &cfg).await?;
+    crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
     s.previews.write().await.clear();
     Ok(Json(serde_json::json!({"reset":true})))
 }
-async fn clear_workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn clear_workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
     sqlx::query("DELETE FROM jobs").execute(&s.pool).await?;
     sqlx::query("DELETE FROM provider_cache")
@@ -384,7 +242,7 @@ async fn clear_workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
     };
     Ok(Json(serde_json::json!({"cleared":true})))
 }
-async fn workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let mut workflow = s.workflow.read().await.clone();
     let matched: i64 =
         sqlx::query_scalar("SELECT count(*) FROM tracks WHERE selected_candidate_id IS NOT NULL")
@@ -397,7 +255,7 @@ async fn workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json:
     }
     Ok(Json(serde_json::to_value(workflow)?))
 }
-async fn reset_settings_section(
+pub async fn reset_settings_section(
     State(s): State<Arc<AppState>>,
     Path(section): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -421,11 +279,11 @@ async fn reset_settings_section(
         }
         _ => return Err(anyhow!("unknown settings section").into()),
     }
-    crate::db::save_settings(&s.pool, &cfg).await?;
+    crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
     Ok(Json(serde_json::json!({"reset":section})))
 }
-async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let cfg = s.config.read().await.clone();
     if cfg.acoustid_api_key.is_empty() {
         return Err(anyhow!("AcoustID is not configured").into());
@@ -434,14 +292,20 @@ async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_j
         serde_json::json!({"ok":true,"message":"AcoustID key is configured. It will be validated during matching."}),
     ))
 }
-async fn test_musicbrainz(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn test_musicbrainz(
+    State(s): State<Arc<AppState>>,
+) -> ApiResult<Json<serde_json::Value>> {
     let cfg = s.config.read().await.clone();
-    crate::providers::musicbrainz::test_connection(&s.client, &cfg.musicbrainz_user_agent).await?;
+    crate::infrastructure::providers::musicbrainz::test_connection(
+        &s.client,
+        &cfg.musicbrainz_user_agent,
+    )
+    .await?;
     Ok(Json(
         serde_json::json!({"ok":true,"message":"MusicBrainz connection is working"}),
     ))
 }
-async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     if matches!(
         s.workflow.read().await.phase.as_str(),
         "scan" | "fetch" | "apply"
@@ -467,7 +331,7 @@ async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json
     .await;
     let state = s.clone();
     tokio::spawn(async move {
-        if let Err(error) = fs_scan::run(state.clone()).await {
+        if let Err(error) = scan_pipeline::run(state.clone()).await {
             let mut w = state.workflow.write().await;
             w.phase = "failed".into();
             w.message = error.to_string();
@@ -476,27 +340,27 @@ async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json
     });
     Ok(Json(serde_json::json!({"started":true})))
 }
-async fn stop_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn stop_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     s.workflow.write().await.cancelled = true;
     Ok(Json(serde_json::json!({"stopping":true})))
 }
-async fn stop_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn stop_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     s.workflow.write().await.cancelled = true;
     Ok(Json(serde_json::json!({"stopping":true})))
 }
-async fn list_jobs(State(s): State<Arc<AppState>>) -> ApiResult<Json<Vec<serde_json::Value>>> {
+pub async fn list_jobs(State(s): State<Arc<AppState>>) -> ApiResult<Json<Vec<serde_json::Value>>> {
     Ok(Json(vec![serde_json::to_value(
         s.workflow.read().await.clone(),
     )?]))
 }
-async fn get_job(
+pub async fn get_job(
     State(s): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let _ = id;
     Ok(Json(serde_json::to_value(s.workflow.read().await.clone())?))
 }
-async fn list_tracks(
+pub async fn list_tracks(
     State(s): State<Arc<AppState>>,
     Query(q): Query<TrackQuery>,
 ) -> ApiResult<Json<TrackPage>> {
@@ -523,16 +387,82 @@ async fn list_tracks(
         counts: rows.into_iter().collect(),
     }))
 }
-async fn get_track(State(s): State<Arc<AppState>>, Path(id): Path<i64>) -> ApiResult<Json<Track>> {
+pub async fn get_track(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<Track>> {
     Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id).fetch_one(&s.pool).await?))
 }
-async fn candidates(
+pub async fn current_artwork(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    let path: String = sqlx::query_scalar("SELECT path FROM tracks WHERE id=?")
+        .bind(id)
+        .fetch_one(&s.pool)
+        .await?;
+    let artwork =
+        tokio::task::spawn_blocking(move || crate::domain::audio::artwork(&PathBuf::from(path)))
+            .await
+            .map_err(|error| anyhow!("could not read artwork: {error}"))??;
+    let Some(artwork) = artwork else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    Ok(image_response(artwork.mime, artwork.data))
+}
+pub async fn proposed_artwork(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> ApiResult<Response> {
+    let cover_url: Option<String> =
+        sqlx::query_scalar("SELECT cover_url FROM candidates WHERE id=?")
+            .bind(id)
+            .fetch_optional(&s.pool)
+            .await?
+            .flatten();
+    let Some(url) = cover_url else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let cache_dir = PathBuf::from(&s.config.read().await.db_path)
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/cache"))
+        .join("artwork");
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    let cache_path = cache_dir.join(format!("candidate-{id}.img"));
+    let mime_path = cache_dir.join(format!("candidate-{id}.mime"));
+    if let Ok(data) = tokio::fs::read(&cache_path).await {
+        let mime = tokio::fs::read_to_string(&mime_path)
+            .await
+            .unwrap_or_else(|_| "image/jpeg".into());
+        return Ok(image_response(mime, data));
+    }
+    let response = s.client.get(url).send().await?.error_for_status()?;
+    let mime = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_owned();
+    let data = response.bytes().await?.to_vec();
+    tokio::fs::write(&cache_path, &data).await?;
+    tokio::fs::write(&mime_path, &mime).await?;
+    Ok(image_response(mime, data))
+}
+pub(super) fn image_response(mime: impl AsRef<str>, data: Vec<u8>) -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, mime.as_ref())
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+pub async fn candidates(
     State(s): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<CandidateRow>>> {
     Ok(Json(fetch_candidates(&s.pool, id).await?))
 }
-async fn select_candidate(
+pub async fn select_candidate(
     State(s): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(body): Json<SelectRequest>,
@@ -541,7 +471,7 @@ async fn select_candidate(
     s.previews.write().await.clear();
     Ok(Json(serde_json::json!({"selected":true})))
 }
-async fn edit_candidate(
+pub async fn edit_candidate(
     State(s): State<Arc<AppState>>,
     Path(id): Path<i64>,
     Json(v): Json<CandidateEdit>,
@@ -551,7 +481,7 @@ async fn edit_candidate(
     s.previews.write().await.clear();
     Ok(Json(serde_json::json!({"saved":true})))
 }
-async fn retry_track(
+pub async fn retry_track(
     State(s): State<Arc<AppState>>,
     Path(id): Path<i64>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -563,15 +493,15 @@ async fn retry_track(
     .await?;
     start_scan(State(s)).await
 }
-async fn retry_failed(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn retry_failed(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     sqlx::query("UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE stage='failed'").execute(&s.pool).await?;
     start_scan(State(s)).await
 }
-async fn skip_review(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
+pub async fn skip_review(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     sqlx::query("UPDATE tracks SET selected_candidate_id=NULL,status='skipped',stage='skipped' WHERE stage='review'").execute(&s.pool).await?;
     Ok(Json(serde_json::json!({"skipped":true})))
 }
-async fn template_preview(
+pub async fn template_preview(
     State(s): State<Arc<AppState>>,
     Json(body): Json<PreviewRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -602,6 +532,7 @@ async fn template_preview(
         next_retry_at: None,
     };
     let sample_candidate = Candidate {
+        id: Some(0),
         title: "Song Title".into(),
         artist: "Artist".into(),
         album: Some("Album".into()),
@@ -662,7 +593,7 @@ async fn template_preview(
         }
     })))
 }
-async fn apply_preview(
+pub async fn apply_preview(
     State(s): State<Arc<AppState>>,
     Json(_): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -687,8 +618,13 @@ async fn apply_preview(
                 "Duplicate of a stronger matched file; it will not be written".into()
             }));
         }
+        let candidate_id = candidate
+            .id
+            .ok_or_else(|| anyhow!("selected candidate is missing a database id"))?;
         items.push(PreviewItem {
             track_id: track.id,
+            candidate_id,
+            filename: track.filename.clone(),
             current_path: track.path.clone(),
             destination_path: dest,
             action: if cfg.output_mode == "copy" {
@@ -704,6 +640,11 @@ async fn apply_preview(
             old: old_summary(&track),
             new: new_summary(&candidate, &track),
             cover_url: candidate.cover_url.clone(),
+            current_cover_url: Some(format!("/api/artwork/current/{}", track.id)),
+            proposed_cover_url: candidate
+                .cover_url
+                .as_ref()
+                .map(|_| format!("/api/artwork/proposed/{candidate_id}")),
             confidence: candidate.score,
             artwork_action: if cfg.cover_art_enabled && candidate.cover_url.is_some() {
                 "download + embed cover art".into()
@@ -728,7 +669,7 @@ async fn apply_preview(
         }
     })))
 }
-async fn start_apply(
+pub async fn start_apply(
     State(s): State<Arc<AppState>>,
     Json(body): Json<ApplyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -762,7 +703,7 @@ async fn start_apply(
     });
     Ok(Json(serde_json::json!({"job_id":id})))
 }
-async fn apply(s: Arc<AppState>, job: String, items: Vec<PreviewItem>) -> Result<()> {
+pub async fn apply(s: Arc<AppState>, job: String, items: Vec<PreviewItem>) -> Result<()> {
     let total = items.len() as i64;
     let cfg = s.config.read().await.clone();
     for (i, item) in items.into_iter().enumerate() {
@@ -772,7 +713,7 @@ async fn apply(s: Arc<AppState>, job: String, items: Vec<PreviewItem>) -> Result
         let (_, candidate) = selected(&s.pool, item.track_id).await?;
         let artwork = if cfg.cover_art_enabled {
             if let Some(url) = &candidate.cover_url {
-                crate::providers::cover_art_archive::fetch(&s.client, url)
+                crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
                     .await
                     .ok()
             } else {
@@ -1113,7 +1054,7 @@ async fn fetch_candidates(pool: &SqlitePool, id: i64) -> Result<Vec<CandidateRow
             .await?,
     )
 }
-async fn events(
+pub async fn events(
     State(s): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let mut rx = s.events.subscribe();

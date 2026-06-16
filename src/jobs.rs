@@ -1,4 +1,4 @@
-use crate::api::AppState;
+use crate::app::AppState;
 use serde::Serialize;
 use std::sync::Arc;
 

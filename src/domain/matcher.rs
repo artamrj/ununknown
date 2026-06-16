@@ -1,4 +1,4 @@
-use crate::audio::AudioInfo;
+use crate::domain::audio::AudioInfo;
 use strsim::normalized_levenshtein;
 
 pub fn score(

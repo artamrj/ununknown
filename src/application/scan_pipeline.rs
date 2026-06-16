@@ -1,4 +1,9 @@
-use crate::{api::AppState, audio, fingerprint, jobs, providers};
+use crate::{
+    app::AppState,
+    domain::audio,
+    infrastructure::{media::fingerprint, providers},
+    jobs,
+};
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use std::{
