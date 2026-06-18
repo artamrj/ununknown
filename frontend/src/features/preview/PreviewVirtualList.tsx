@@ -15,7 +15,6 @@ export function PreviewVirtualList({ items }: { items: PreviewItem[] }) {
       <div className="compact-preview-head">
         <span>Current metadata</span>
         <span>Proposed metadata</span>
-        <span>Output</span>
       </div>
       <div
         className="virtual-preview"
