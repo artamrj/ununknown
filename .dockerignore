@@ -1,8 +1,0 @@
-.git
-target
-frontend/node_modules
-frontend/dist
-.local
-cache
-music
-config
