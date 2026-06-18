@@ -12,7 +12,8 @@ pub async fn update_settings(
     cfg.acoustid_api_key = current.acoustid_api_key;
     cfg.musicbrainz_user_agent = current.musicbrainz_user_agent;
     cfg.db_path = current.db_path;
-    cfg.validate()?;
+    cfg.validate()
+        .map_err(|error| ApiError::validation(error.to_string()))?;
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
@@ -65,7 +66,7 @@ pub async fn reset_settings_section(
             cfg.output_mode = defaults.output_mode;
             cfg.expert_mode = false;
         }
-        _ => return Err(anyhow!("unknown settings section").into()),
+        _ => return Err(ApiError::not_found("unknown settings section")),
     }
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     s.refresh_limiters(&cfg).await;
@@ -76,7 +77,7 @@ pub async fn reset_settings_section(
 pub async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     let cfg = s.config.read().await.clone();
     if cfg.acoustid_api_key.is_empty() {
-        return Err(anyhow!("AcoustID is not configured").into());
+        return Err(ApiError::forbidden("AcoustID is not configured"));
     }
     Ok(Json(
         serde_json::json!({"ok":true,"message":"AcoustID key is configured. It will be validated during matching."}),
@@ -90,7 +91,20 @@ pub async fn test_musicbrainz(
         &s.client,
         &cfg.musicbrainz_user_agent,
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if !Config::valid_musicbrainz_user_agent(&cfg.musicbrainz_user_agent) {
+            ApiError::forbidden(error.to_string())
+        } else if let Some(reqwest_error) = error.downcast_ref::<reqwest::Error>() {
+            if reqwest_error.is_timeout() {
+                ApiError::timeout(reqwest_error.to_string())
+            } else {
+                ApiError::provider(reqwest_error.to_string())
+            }
+        } else {
+            ApiError::provider(error.to_string())
+        }
+    })?;
     Ok(Json(
         serde_json::json!({"ok":true,"message":"MusicBrainz connection is working"}),
     ))

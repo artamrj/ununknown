@@ -45,7 +45,10 @@ pub async fn select_candidate(
     Path(id): Path<TrackId>,
     Json(body): Json<SelectRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=CASE WHEN ? IS NULL THEN 'needs_review' ELSE 'selected' END WHERE id=?").bind(body.candidate_id.map(|v| v.0)).bind(body.candidate_id.map(|v| v.0)).bind(id.0).execute(&s.pool).await?;
+    let result = sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=CASE WHEN ? IS NULL THEN 'needs_review' ELSE 'selected' END WHERE id=?").bind(body.candidate_id.map(|v| v.0)).bind(body.candidate_id.map(|v| v.0)).bind(id.0).execute(&s.pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("track not found"));
+    }
     invalidate_previews(&s.pool).await?;
     Ok(Json(serde_json::json!({"selected":true})))
 }
@@ -54,8 +57,11 @@ pub async fn edit_candidate(
     Path(id): Path<CandidateId>,
     Json(v): Json<CandidateEdit>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    sqlx::query("UPDATE candidates SET title=?,artist=?,album=?,album_artist=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,genre=?,composer=?,label=?,isrc=?,provider='manual' WHERE id=?")
+    let result = sqlx::query("UPDATE candidates SET title=?,artist=?,album=?,album_artist=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,genre=?,composer=?,label=?,isrc=?,provider='manual' WHERE id=?")
         .bind(v.title).bind(v.artist).bind(v.album).bind(v.album_artist).bind(v.track_number).bind(v.track_total).bind(v.disc_number).bind(v.disc_total).bind(v.year).bind(v.genre).bind(v.composer).bind(v.label).bind(v.isrc).bind(id.0).execute(&s.pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("candidate not found"));
+    }
     invalidate_previews(&s.pool).await?;
     Ok(Json(serde_json::json!({"saved":true})))
 }
@@ -63,12 +69,15 @@ pub async fn retry_track(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    sqlx::query(
+    let result = sqlx::query(
         "UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE id=?",
     )
     .bind(id.0)
     .execute(&s.pool)
     .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("track not found"));
+    }
     start_scan(State(s)).await
 }
 pub async fn retry_failed(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {

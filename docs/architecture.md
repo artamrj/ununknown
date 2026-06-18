@@ -139,7 +139,7 @@ Router
 - Contains API routing, handlers, and error conversion.
 - `router.rs` defines all public API paths.
 - `handlers/mod.rs` contains endpoint implementations and API DTOs.
-- `error.rs` maps application errors to HTTP 400 JSON responses.
+- `error.rs` maps typed application errors to JSON responses with specific HTTP status codes.
 
 `src/infrastructure/`
 
@@ -315,8 +315,7 @@ Events:
 
 `src/http/error.rs` defines `ApiError`.
 
-Any handler returning `ApiResult<T>` can use `anyhow::Error`. Errors are
-converted into:
+Handlers return `ApiResult<T>` with typed errors. Errors are converted into:
 
 ```json
 {
@@ -324,11 +323,17 @@ converted into:
 }
 ```
 
-with HTTP status `400 Bad Request`.
+with status codes based on the failure class:
 
-This keeps handler code compact, but it also means validation errors, missing
-rows, provider failures, and many operational failures currently share the same
-HTTP status.
+| Error | HTTP |
+| --- | --- |
+| Validation | `422 Unprocessable Entity` |
+| Not found | `404 Not Found` |
+| Conflict | `409 Conflict` |
+| Provider failure | `502 Bad Gateway` |
+| Provider timeout | `504 Gateway Timeout` |
+| Secret/config issue | `403 Forbidden` |
+| I/O/internal failure | `500 Internal Server Error` |
 
 ## Scan And Matching Workflow
 
@@ -1061,7 +1066,9 @@ Important current limitations:
 - Preview tokens are in memory and are lost on restart.
 - Workflow state is mostly in memory; database job/run tables are not the
   primary UI source of truth.
-- Most API errors return HTTP 400.
+- API errors use typed HTTP status codes for validation, missing resources,
+  workflow conflicts, provider failures, timeouts, config issues, and internal
+  failures.
 - Scan processing is sequential.
 - `provider_cache` exists in schema and cleanup, but provider request code does
   not currently use it as a read-through cache.

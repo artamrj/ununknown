@@ -3,7 +3,7 @@ use crate::{
     application::scan_pipeline,
     config::Config,
     domain::path_templates::{self, TemplateValues},
-    http::error::ApiResult,
+    http::error::{ApiError, ApiResult},
     infrastructure::{media::tag_writer, providers::Candidate},
     jobs,
     types::{
@@ -263,7 +263,7 @@ async fn store_preview(
     Ok(())
 }
 
-async fn consume_preview(pool: &SqlitePool, token: PreviewToken) -> Result<Vec<PreviewItem>> {
+async fn consume_preview(pool: &SqlitePool, token: PreviewToken) -> ApiResult<Vec<PreviewItem>> {
     let mut tx = pool.begin().await?;
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM previews WHERE token=?")
         .bind(token.to_string())
@@ -272,11 +272,15 @@ async fn consume_preview(pool: &SqlitePool, token: PreviewToken) -> Result<Vec<P
     match status.as_deref() {
         Some("ready") => {}
         Some("started" | "consumed") => {
-            return Err(anyhow!("preview has already been consumed"));
+            return Err(ApiError::conflict("preview has already been consumed"));
         }
-        Some("stale") => return Err(anyhow!("preview is stale; run preview again")),
-        Some(_) => return Err(anyhow!("preview is not usable")),
-        None => return Err(anyhow!("a current successful dry-run preview is required")),
+        Some("stale") => return Err(ApiError::conflict("preview is stale; run preview again")),
+        Some(_) => return Err(ApiError::conflict("preview is not usable")),
+        None => {
+            return Err(ApiError::not_found(
+                "a current successful dry-run preview is required",
+            ));
+        }
     }
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT item_json FROM preview_items WHERE preview_token=? AND duplicate_action!='skip_duplicate' ORDER BY position",
@@ -446,7 +450,10 @@ struct DuplicateResolution {
     kept_track_id: Option<TrackId>,
 }
 
-async fn load_selected(pool: &SqlitePool, tracks: Vec<Track>) -> Result<Vec<(Track, Candidate)>> {
+async fn load_selected(
+    pool: &SqlitePool,
+    tracks: Vec<Track>,
+) -> ApiResult<Vec<(Track, Candidate)>> {
     let mut out = Vec::with_capacity(tracks.len());
     for track in tracks {
         let (_, candidate) = selected(pool, track.id).await?;
@@ -537,11 +544,11 @@ fn normalize_duplicate_text(value: &str) -> String {
         .collect()
 }
 
-async fn selected(pool: &SqlitePool, id: TrackId) -> Result<(Track, Candidate)> {
+async fn selected(pool: &SqlitePool, id: TrackId) -> ApiResult<(Track, Candidate)> {
     let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id.0).fetch_one(pool).await?;
     let cid = track
         .selected_candidate_id
-        .ok_or_else(|| anyhow!("track has no selected candidate"))?;
+        .ok_or_else(|| ApiError::not_found("track has no selected candidate"))?;
     let row: CandidateRow = sqlx::query_as("SELECT * FROM candidates WHERE id=?")
         .bind(cid.0)
         .fetch_one(pool)
@@ -707,5 +714,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cached, 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_settings_return_422() {
+        let pool = test_pool().await;
+        let state = Arc::new(AppState::new(Config::default(), pool));
+        let mut config = Config::default();
+        config.confidence_threshold = 101.0;
+
+        let error = settings::update_settings(State(state), Json(SettingsRequest { config }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_track_returns_404() {
+        let pool = test_pool().await;
+        let state = Arc::new(AppState::new(Config::default(), pool));
+
+        let error = match tracks::get_track(State(state), Path(TrackId(404))).await {
+            Ok(_) => panic!("expected missing track to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.into_response().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn scan_start_while_running_returns_409() {
+        let pool = test_pool().await;
+        let state = Arc::new(AppState::new(Config::default(), pool));
+        state.workflow.write().await.phase = WorkflowPhase::Scan;
+
+        let error = scan::start_scan(State(state)).await.unwrap_err();
+
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn missing_acoustid_config_returns_403() {
+        let pool = test_pool().await;
+        let state = Arc::new(AppState::new(Config::default(), pool));
+
+        let error = settings::test_acoustid(State(state)).await.unwrap_err();
+
+        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
     }
 }

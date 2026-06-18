@@ -5,7 +5,7 @@ pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_
         s.workflow.read().await.phase,
         WorkflowPhase::Scan | WorkflowPhase::Fetch | WorkflowPhase::Apply
     ) {
-        return Err(anyhow!("workflow is already running").into());
+        return Err(ApiError::conflict("workflow is already running"));
     }
     sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
     invalidate_previews(&s.pool).await?;

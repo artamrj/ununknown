@@ -14,6 +14,8 @@ pub async fn template_preview(
     cfg.acoustid_api_key = base.acoustid_api_key;
     cfg.musicbrainz_user_agent = base.musicbrainz_user_agent;
     cfg.db_path = base.db_path;
+    cfg.validate()
+        .map_err(|error| ApiError::validation(error.to_string()))?;
     let sample_track = Track {
         id: TrackId(0),
         path: format!("{}/Song Title.mp3", cfg.input_dir),
@@ -182,6 +184,12 @@ pub async fn start_apply(
     State(s): State<Arc<AppState>>,
     Json(body): Json<ApplyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    if matches!(
+        s.workflow.read().await.phase,
+        WorkflowPhase::Scan | WorkflowPhase::Fetch | WorkflowPhase::Apply
+    ) {
+        return Err(ApiError::conflict("workflow is already running"));
+    }
     let items = consume_preview(&s.pool, body.preview_token).await?;
     let id = JobId::new();
     {
