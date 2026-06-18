@@ -1,4 +1,4 @@
-use crate::config::PathTemplateConfig;
+use crate::{config::PathTemplateConfig, types::CollisionStrategy};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -122,13 +122,13 @@ pub fn render(
     Ok(path)
 }
 
-pub fn resolve_collision(path: &Path, strategy: &str) -> Result<PathBuf> {
+pub fn resolve_collision(path: &Path, strategy: CollisionStrategy) -> Result<PathBuf> {
     if !path.exists() {
         return Ok(path.to_owned());
     }
     match strategy {
-        "overwrite" => Ok(path.to_owned()),
-        "rename" => {
+        CollisionStrategy::Overwrite => Ok(path.to_owned()),
+        CollisionStrategy::Rename => {
             for n in 1..10_000 {
                 let stem = path.file_stem().and_then(|v| v.to_str()).unwrap_or("file");
                 let ext = path.extension().and_then(|v| v.to_str()).unwrap_or("");
@@ -143,7 +143,7 @@ pub fn resolve_collision(path: &Path, strategy: &str) -> Result<PathBuf> {
             }
             bail!("could not resolve collision")
         }
-        _ => bail!("destination exists"),
+        CollisionStrategy::Skip => bail!("destination exists"),
     }
 }
 

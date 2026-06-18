@@ -1,4 +1,8 @@
-use crate::{config::Config, jobs};
+use crate::{
+    config::Config,
+    jobs,
+    types::{PreviewToken, WorkflowPhase},
+};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -7,7 +11,7 @@ use tokio::sync::{RwLock, broadcast};
 
 #[derive(Clone, Default, Serialize)]
 pub struct Workflow {
-    pub phase: String,
+    pub phase: WorkflowPhase,
     pub message: String,
     pub current_file: Option<String>,
     pub current: usize,
@@ -36,7 +40,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub events: broadcast::Sender<jobs::Event>,
     pub cancelled: RwLock<HashSet<String>>,
-    pub previews: RwLock<HashMap<String, Vec<crate::http::handlers::PreviewItem>>>,
+    pub previews: RwLock<HashMap<PreviewToken, Vec<crate::http::handlers::PreviewItem>>>,
     pub workflow: RwLock<Workflow>,
 }
 
@@ -51,7 +55,7 @@ impl AppState {
             cancelled: Default::default(),
             previews: Default::default(),
             workflow: RwLock::new(Workflow {
-                phase: "idle".into(),
+                phase: WorkflowPhase::Idle,
                 message: "Ready to scan".into(),
                 ..Default::default()
             }),
@@ -76,7 +80,7 @@ impl AppState {
         if overflow > 0 {
             workflow.terminal_log.drain(0..overflow);
         }
-        let phase = workflow.phase.clone();
+        let phase = workflow.phase;
         let current_file = workflow.current_file.clone();
         let current = workflow.current as i64;
         let total = workflow.total as i64;

@@ -1,0 +1,65 @@
+use super::*;
+
+pub async fn current_artwork(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<Response> {
+    let path: String = sqlx::query_scalar("SELECT path FROM tracks WHERE id=?")
+        .bind(id.0)
+        .fetch_one(&s.pool)
+        .await?;
+    let artwork =
+        tokio::task::spawn_blocking(move || crate::domain::audio::artwork(&PathBuf::from(path)))
+            .await
+            .map_err(|error| anyhow!("could not read artwork: {error}"))??;
+    let Some(artwork) = artwork else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    Ok(image_response(artwork.mime, artwork.data))
+}
+pub async fn proposed_artwork(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<CandidateId>,
+) -> ApiResult<Response> {
+    let cover_url: Option<String> =
+        sqlx::query_scalar("SELECT cover_url FROM candidates WHERE id=?")
+            .bind(id.0)
+            .fetch_optional(&s.pool)
+            .await?
+            .flatten();
+    let Some(url) = cover_url else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let cache_dir = PathBuf::from(&s.config.read().await.db_path)
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/cache"))
+        .join("artwork");
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    let cache_path = cache_dir.join(format!("candidate-{id}.img"));
+    let mime_path = cache_dir.join(format!("candidate-{id}.mime"));
+    if let Ok(data) = tokio::fs::read(&cache_path).await {
+        let mime = tokio::fs::read_to_string(&mime_path)
+            .await
+            .unwrap_or_else(|_| "image/jpeg".into());
+        return Ok(image_response(mime, data));
+    }
+    let response = s.client.get(url).send().await?.error_for_status()?;
+    let mime = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_owned();
+    let data = response.bytes().await?.to_vec();
+    tokio::fs::write(&cache_path, &data).await?;
+    tokio::fs::write(&mime_path, &mime).await?;
+    Ok(image_response(mime, data))
+}
+pub(super) fn image_response(mime: impl AsRef<str>, data: Vec<u8>) -> Response {
+    Response::builder()
+        .header(header::CONTENT_TYPE, mime.as_ref())
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from(data))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}

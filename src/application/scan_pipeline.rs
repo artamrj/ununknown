@@ -3,6 +3,7 @@ use crate::{
     domain::audio,
     infrastructure::{media::fingerprint, providers},
     jobs,
+    types::{AutomationMode, WorkflowPhase},
 };
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -38,7 +39,7 @@ struct PersistJob {
 
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
-    set_phase(&state, "scan", "Discovering music", 0, 0, None).await;
+    set_phase(&state, WorkflowPhase::Scan, "Discovering music", 0, 0, None).await;
     state
         .terminal(
             "info",
@@ -67,13 +68,14 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
     {
         let mut w = state.workflow.write().await;
         w.total = total;
-        w.phase = "fetch".into();
+        w.phase = WorkflowPhase::Fetch;
         w.message = "Starting staged matching".into();
     }
     jobs::emit(
         &state,
         "workflow",
         Some("fetch"),
+        Some(WorkflowPhase::Fetch),
         0,
         total as i64,
         "Starting staged matching",
@@ -116,7 +118,11 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cancelled = state.workflow.read().await.cancelled;
     set_phase(
         &state,
-        if cancelled { "idle" } else { "preview" },
+        if cancelled {
+            WorkflowPhase::Idle
+        } else {
+            WorkflowPhase::Preview
+        },
         if cancelled {
             "Scan stopped"
         } else {
@@ -153,7 +159,7 @@ async fn process_file(
         }
         set_phase(
             &state,
-            "fetch",
+            WorkflowPhase::Fetch,
             &format!(
                 "Matching {filename} · attempt {attempt}/{}",
                 cfg.track_attempts
@@ -221,6 +227,7 @@ async fn process_file(
         &state,
         "workflow",
         Some("fetch"),
+        Some(WorkflowPhase::Fetch),
         processed as i64,
         total as i64,
         "Matching tracks",
@@ -315,11 +322,11 @@ async fn process(
             &format!("Provider returned {} candidate(s)", candidates.len()),
         )
         .await;
-    let threshold = match cfg.automation_mode.as_str() {
-        "aggressive" => 75.0,
-        "manual" => 101.0,
-        "custom" => cfg.confidence_threshold,
-        _ => 90.0,
+    let threshold = match cfg.automation_mode {
+        AutomationMode::Aggressive => 75.0,
+        AutomationMode::Manual => 101.0,
+        AutomationMode::Custom => cfg.confidence_threshold,
+        AutomationMode::Safe => 90.0,
     };
     let best = candidates
         .into_iter()
@@ -500,14 +507,14 @@ async fn persist_match(
 
 async fn set_phase(
     state: &Arc<AppState>,
-    phase: &str,
+    phase: WorkflowPhase,
     message: &str,
     current: usize,
     total: usize,
     file: Option<String>,
 ) {
     let mut w = state.workflow.write().await;
-    w.phase = phase.into();
+    w.phase = phase;
     w.message = message.into();
     w.current = current;
     w.total = total;
@@ -516,9 +523,22 @@ async fn set_phase(
     jobs::emit(
         state,
         "workflow",
+        Some(phase_name(phase)),
         Some(phase),
         current as i64,
         total as i64,
         message,
     );
+}
+
+fn phase_name(phase: WorkflowPhase) -> &'static str {
+    match phase {
+        WorkflowPhase::Idle => "idle",
+        WorkflowPhase::Scan => "scan",
+        WorkflowPhase::Fetch => "fetch",
+        WorkflowPhase::Preview => "preview",
+        WorkflowPhase::Apply => "apply",
+        WorkflowPhase::Finish => "finish",
+        WorkflowPhase::Failed => "failed",
+    }
 }

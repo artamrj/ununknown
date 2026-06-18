@@ -1,3 +1,4 @@
+use crate::types::{AutomationMode, CollisionStrategy, OutputMode};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -8,8 +9,8 @@ pub struct Config {
     pub db_path: String,
     pub input_dir: String,
     pub output_dir: String,
-    pub output_mode: String,
-    pub automation_mode: String,
+    pub output_mode: OutputMode,
+    pub automation_mode: AutomationMode,
     pub confidence_threshold: f64,
     pub track_attempts: u32,
     pub metadata_read_concurrency: usize,
@@ -41,7 +42,7 @@ pub struct PathTemplateConfig {
     pub track_padding: usize,
     pub disc_padding: usize,
     pub max_filename_length: usize,
-    pub collision_strategy: String,
+    pub collision_strategy: CollisionStrategy,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,19 +97,8 @@ impl Config {
             "Input folder is required"
         );
         anyhow::ensure!(
-            self.output_mode == "in_place" || !self.output_dir.trim().is_empty(),
+            self.output_mode == OutputMode::InPlace || !self.output_dir.trim().is_empty(),
             "Output folder is required in copy mode"
-        );
-        anyhow::ensure!(
-            matches!(self.output_mode.as_str(), "copy" | "in_place"),
-            "Output mode must be copy or in_place"
-        );
-        anyhow::ensure!(
-            matches!(
-                self.automation_mode.as_str(),
-                "safe" | "aggressive" | "manual" | "custom"
-            ),
-            "Automation mode must be safe, aggressive, manual, or custom"
         );
         anyhow::ensure!(
             (0.0..=100.0).contains(&self.confidence_threshold),
@@ -143,13 +133,6 @@ impl Config {
             "Output template is required"
         );
         anyhow::ensure!(
-            matches!(
-                self.path_templates.collision_strategy.as_str(),
-                "skip" | "overwrite" | "rename"
-            ),
-            "Collision behavior must be skip, overwrite, or rename"
-        );
-        anyhow::ensure!(
             self.path_templates.track_padding <= 8 && self.path_templates.disc_padding <= 8,
             "Number padding cannot exceed 8"
         );
@@ -162,10 +145,10 @@ impl Config {
                 && (1..=365).contains(&self.job_retention_days),
             "Retention must be between 1 and 365 days"
         );
-        let destructive = self.output_mode == "in_place"
+        let destructive = self.output_mode == OutputMode::InPlace
             || self.in_place.rename_files
             || self.in_place.rename_folders
-            || self.path_templates.collision_strategy == "overwrite"
+            || self.path_templates.collision_strategy == CollisionStrategy::Overwrite
             || self.metadata_fields.replace_existing_cover_art;
         anyhow::ensure!(
             self.expert_mode || !destructive,
@@ -200,8 +183,8 @@ impl Default for Config {
             db_path: "/cache/ununknown.sqlite".into(),
             input_dir: "/music/input".into(),
             output_dir: "/music/output".into(),
-            output_mode: "copy".into(),
-            automation_mode: "safe".into(),
+            output_mode: OutputMode::Copy,
+            automation_mode: AutomationMode::Safe,
             confidence_threshold: 90.0,
             track_attempts: 3,
             metadata_read_concurrency: 6,
@@ -232,7 +215,7 @@ impl Default for PathTemplateConfig {
             track_padding: 2,
             disc_padding: 2,
             max_filename_length: 255,
-            collision_strategy: "skip".into(),
+            collision_strategy: CollisionStrategy::Skip,
         }
     }
 }
@@ -278,6 +261,7 @@ impl Default for MetadataFields {
 #[cfg(test)]
 mod tests {
     use super::Config;
+    use crate::types::{AutomationMode, CollisionStrategy, OutputMode};
 
     fn valid_config() -> Config {
         Config {
@@ -293,6 +277,47 @@ mod tests {
         assert_eq!(cfg.fingerprint_concurrency, 3);
         assert_eq!(cfg.acoustid_concurrency, 3);
         assert_eq!(cfg.db_write_batch_size, 25);
+    }
+
+    #[test]
+    fn typed_mode_defaults_match_existing_settings() {
+        let cfg = Config::default();
+        assert_eq!(cfg.output_mode, OutputMode::Copy);
+        assert_eq!(cfg.automation_mode, AutomationMode::Safe);
+        assert_eq!(
+            cfg.path_templates.collision_strategy,
+            CollisionStrategy::Skip
+        );
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap()["output_mode"],
+            serde_json::json!("copy")
+        );
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap()["automation_mode"],
+            serde_json::json!("safe")
+        );
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap()["path_templates"]["collision_strategy"],
+            serde_json::json!("skip")
+        );
+    }
+
+    #[test]
+    fn invalid_typed_modes_are_rejected_by_deserialization() {
+        assert!(
+            serde_json::from_str::<Config>(r#"{"output_mode":"move","automation_mode":"safe"}"#)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<Config>(
+                r#"{"output_mode":"copy","automation_mode":"reckless"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<Config>(r#"{"path_templates":{"collision_strategy":"merge"}}"#)
+                .is_err()
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::app::AppState;
+use crate::{app::AppState, types::WorkflowPhase};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
+    pub phase: Option<WorkflowPhase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -33,6 +33,7 @@ pub fn emit(
     state: &Arc<AppState>,
     kind: &str,
     stage: Option<&str>,
+    phase: Option<WorkflowPhase>,
     current: i64,
     total: i64,
     message: &str,
@@ -43,7 +44,7 @@ pub fn emit(
         level: None,
         file: None,
         timestamp: None,
-        phase: stage.map(str::to_owned),
+        phase,
         current_file: None,
         processed: None,
         matched: None,

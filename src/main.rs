@@ -5,6 +5,7 @@ mod domain;
 mod http;
 mod infrastructure;
 mod jobs;
+mod types;
 
 use anyhow::Result;
 use axum::Router;
