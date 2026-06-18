@@ -44,6 +44,8 @@ pub async fn proposed_artwork(
             .unwrap_or_else(|_| "image/jpeg".into());
         return Ok(image_response(mime, data));
     }
+    let limiter = s.artwork_downloads.read().await.clone();
+    let _permit = limiter.acquire_owned().await?;
     let response = s.client.get(url).send().await?.error_for_status()?;
     let mime = response
         .headers()

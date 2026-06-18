@@ -14,8 +14,9 @@ pub async fn update_settings(
     cfg.db_path = current.db_path;
     cfg.validate()?;
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
+    s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
-    s.previews.write().await.clear();
+    invalidate_previews(&s.pool).await?;
     Ok(Json(serde_json::json!({"saved":true})))
 }
 pub async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -28,8 +29,9 @@ pub async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<se
     };
     cfg.acoustid_api_key = current.acoustid_api_key;
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
+    s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
-    s.previews.write().await.clear();
+    invalidate_previews(&s.pool).await?;
     Ok(Json(serde_json::json!({"reset":true})))
 }
 
@@ -44,9 +46,12 @@ pub async fn reset_settings_section(
             cfg.automation_mode = defaults.automation_mode;
             cfg.confidence_threshold = defaults.confidence_threshold;
             cfg.track_attempts = defaults.track_attempts;
+            cfg.scan_worker_concurrency = defaults.scan_worker_concurrency;
             cfg.metadata_read_concurrency = defaults.metadata_read_concurrency;
             cfg.fingerprint_concurrency = defaults.fingerprint_concurrency;
             cfg.acoustid_concurrency = defaults.acoustid_concurrency;
+            cfg.artwork_download_concurrency = defaults.artwork_download_concurrency;
+            cfg.tag_write_concurrency = defaults.tag_write_concurrency;
             cfg.db_write_batch_size = defaults.db_write_batch_size;
         }
         "metadata" => {
@@ -63,7 +68,9 @@ pub async fn reset_settings_section(
         _ => return Err(anyhow!("unknown settings section").into()),
     }
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
+    s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
+    invalidate_previews(&s.pool).await?;
     Ok(Json(serde_json::json!({"reset":section})))
 }
 pub async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {

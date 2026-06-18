@@ -64,3 +64,38 @@ pub async fn cleanup(pool: &SqlitePool, config: &Config) -> Result<()> {
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let pool = connect(path.to_str().unwrap()).await.unwrap();
+        std::mem::forget(dir);
+        pool
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_only_expired_provider_cache_rows() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('musicbrainz','expired','{}',datetime('now','-1 day'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('musicbrainz','fresh','{}',datetime('now','+1 day'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        cleanup(&pool, &Config::default()).await.unwrap();
+
+        let keys: Vec<String> =
+            sqlx::query_scalar("SELECT cache_key FROM provider_cache ORDER BY cache_key")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(keys, vec!["fresh"]);
+    }
+}

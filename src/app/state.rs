@@ -1,13 +1,9 @@
-use crate::{
-    config::Config,
-    jobs,
-    types::{PreviewToken, WorkflowPhase},
-};
+use crate::{config::Config, jobs, types::WorkflowPhase};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::collections::{HashMap, HashSet};
-use tokio::sync::{RwLock, broadcast};
+use std::{collections::HashSet, sync::Arc};
+use tokio::sync::{RwLock, Semaphore, broadcast};
 
 #[derive(Clone, Default, Serialize)]
 pub struct Workflow {
@@ -40,20 +36,24 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub events: broadcast::Sender<jobs::Event>,
     pub cancelled: RwLock<HashSet<String>>,
-    pub previews: RwLock<HashMap<PreviewToken, Vec<crate::http::handlers::PreviewItem>>>,
+    pub artwork_downloads: RwLock<Arc<Semaphore>>,
+    pub tag_writes: RwLock<Arc<Semaphore>>,
     pub workflow: RwLock<Workflow>,
 }
 
 impl AppState {
     pub fn new(config: Config, pool: SqlitePool) -> Self {
         let (events, _) = broadcast::channel(256);
+        let artwork_download_concurrency = config.artwork_download_concurrency;
+        let tag_write_concurrency = config.tag_write_concurrency;
         Self {
             config: RwLock::new(config),
             pool,
             client: reqwest::Client::new(),
             events,
             cancelled: Default::default(),
-            previews: Default::default(),
+            artwork_downloads: RwLock::new(Arc::new(Semaphore::new(artwork_download_concurrency))),
+            tag_writes: RwLock::new(Arc::new(Semaphore::new(tag_write_concurrency))),
             workflow: RwLock::new(Workflow {
                 phase: WorkflowPhase::Idle,
                 message: "Ready to scan".into(),
@@ -64,6 +64,12 @@ impl AppState {
 
     pub async fn cancelled(&self, id: &str) -> bool {
         self.cancelled.read().await.contains(id)
+    }
+
+    pub async fn refresh_limiters(&self, config: &Config) {
+        *self.artwork_downloads.write().await =
+            Arc::new(Semaphore::new(config.artwork_download_concurrency));
+        *self.tag_writes.write().await = Arc::new(Semaphore::new(config.tag_write_concurrency));
     }
 
     pub async fn terminal(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {

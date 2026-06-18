@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{Mutex, Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
 use walkdir::WalkDir;
@@ -92,16 +92,42 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         persist_rx,
         cfg.db_write_batch_size,
     ));
+    let scan_workers = cfg.scan_worker_concurrency.max(1).min(total.max(1));
+    let (file_tx, file_rx) = mpsc::channel::<FileJob>(scan_workers * 2);
+    let file_rx = Arc::new(Mutex::new(file_rx));
     let mut tasks = JoinSet::new();
-    for (index, path) in files.into_iter().enumerate() {
-        tasks.spawn(process_file(
-            state.clone(),
-            limits.clone(),
-            persist_tx.clone(),
-            FileJob { index, path },
-            total,
-        ));
+    for _ in 0..scan_workers {
+        let state = state.clone();
+        let limits = limits.clone();
+        let persist_tx = persist_tx.clone();
+        let file_rx = file_rx.clone();
+        tasks.spawn(async move {
+            loop {
+                let job = {
+                    let mut rx = file_rx.lock().await;
+                    rx.recv().await
+                };
+                let Some(job) = job else {
+                    break;
+                };
+                process_file(
+                    state.clone(),
+                    limits.clone(),
+                    persist_tx.clone(),
+                    job,
+                    total,
+                )
+                .await;
+            }
+        });
     }
+    for (index, path) in files.into_iter().enumerate() {
+        if state.workflow.read().await.cancelled {
+            break;
+        }
+        file_tx.send(FileJob { index, path }).await?;
+    }
+    drop(file_tx);
     drop(persist_tx);
 
     while let Some(result) = tasks.join_next().await {

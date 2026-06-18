@@ -3,10 +3,7 @@ use super::*;
 pub async fn clear_workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
     sqlx::query("DELETE FROM jobs").execute(&s.pool).await?;
-    sqlx::query("DELETE FROM provider_cache")
-        .execute(&s.pool)
-        .await?;
-    s.previews.write().await.clear();
+    invalidate_previews(&s.pool).await?;
     *s.workflow.write().await = Workflow {
         phase: WorkflowPhase::Idle,
         message: "Ready to scan".into(),

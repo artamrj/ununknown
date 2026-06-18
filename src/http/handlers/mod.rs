@@ -122,7 +122,7 @@ impl CandidateRow {
         }
     }
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PreviewItem {
     track_id: TrackId,
     candidate_id: CandidateId,
@@ -143,7 +143,7 @@ pub struct PreviewItem {
     confidence: f64,
     artwork_action: String,
 }
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MetadataSummary {
     title: Option<String>,
     artist: Option<String>,
@@ -219,6 +219,88 @@ pub struct TrackPage {
     items: Vec<WorkspaceTrack>,
     total: i64,
     counts: HashMap<String, i64>,
+}
+
+async fn invalidate_previews(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("UPDATE previews SET status='stale' WHERE status='ready'")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn store_preview(
+    pool: &SqlitePool,
+    token: PreviewToken,
+    items: &[PreviewItem],
+    summary: serde_json::Value,
+    settings_fingerprint: String,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO previews(token,status,created_at,summary_json,settings_fingerprint) VALUES(?,'ready',?,?,?)",
+    )
+    .bind(token.to_string())
+    .bind(&now)
+    .bind(serde_json::to_string(&summary)?)
+    .bind(settings_fingerprint)
+    .execute(&mut *tx)
+    .await?;
+    for (position, item) in items.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO preview_items(preview_token,position,track_id,candidate_id,duplicate_action,item_json) VALUES(?,?,?,?,?,?)",
+        )
+        .bind(token.to_string())
+        .bind(position as i64)
+        .bind(item.track_id.0)
+        .bind(item.candidate_id.0)
+        .bind(serde_json::to_string(&item.duplicate_action)?.trim_matches('"').to_owned())
+        .bind(serde_json::to_string(item)?)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn consume_preview(pool: &SqlitePool, token: PreviewToken) -> Result<Vec<PreviewItem>> {
+    let mut tx = pool.begin().await?;
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM previews WHERE token=?")
+        .bind(token.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+    match status.as_deref() {
+        Some("ready") => {}
+        Some("started" | "consumed") => {
+            return Err(anyhow!("preview has already been consumed"));
+        }
+        Some("stale") => return Err(anyhow!("preview is stale; run preview again")),
+        Some(_) => return Err(anyhow!("preview is not usable")),
+        None => return Err(anyhow!("a current successful dry-run preview is required")),
+    }
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT item_json FROM preview_items WHERE preview_token=? AND duplicate_action!='skip_duplicate' ORDER BY position",
+    )
+    .bind(token.to_string())
+    .fetch_all(&mut *tx)
+    .await?;
+    let items = rows
+        .into_iter()
+        .map(|row| serde_json::from_str(&row))
+        .collect::<std::result::Result<Vec<PreviewItem>, _>>()?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("UPDATE previews SET status='started',started_at=?,consumed_at=? WHERE token=?")
+        .bind(&now)
+        .bind(&now)
+        .bind(token.to_string())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(items)
+}
+
+fn settings_fingerprint(cfg: &Config) -> Result<String> {
+    Ok(serde_json::to_string(cfg)?)
 }
 
 fn destination(
@@ -473,4 +555,157 @@ async fn fetch_candidates(pool: &SqlitePool, id: TrackId) -> Result<Vec<Candidat
             .fetch_all(pool)
             .await?,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    async fn test_pool() -> SqlitePool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite");
+        let pool = crate::infrastructure::db::connect(path.to_str().unwrap())
+            .await
+            .unwrap();
+        std::mem::forget(dir);
+        pool
+    }
+
+    fn preview_item(track_id: i64, duplicate_action: DuplicateAction) -> PreviewItem {
+        PreviewItem {
+            track_id: TrackId(track_id),
+            candidate_id: CandidateId(track_id + 100),
+            filename: "song.mp3".into(),
+            current_path: "/music/in/song.mp3".into(),
+            destination_path: "/music/out/song.mp3".into(),
+            action: "copy + write tags".into(),
+            warnings: Vec::new(),
+            duplicate_group_id: None,
+            duplicate_action,
+            duplicate_reason: None,
+            kept_track_id: None,
+            old: MetadataSummary {
+                title: None,
+                artist: None,
+                album: None,
+                album_artist: None,
+                track_number: None,
+                disc_number: None,
+                year: None,
+                genre: None,
+                label: None,
+                isrc: None,
+                duration: None,
+                format: Some("mp3".into()),
+            },
+            new: MetadataSummary {
+                title: Some("Song".into()),
+                artist: Some("Artist".into()),
+                album: None,
+                album_artist: None,
+                track_number: None,
+                disc_number: None,
+                year: None,
+                genre: None,
+                label: None,
+                isrc: None,
+                duration: None,
+                format: Some("mp3".into()),
+            },
+            cover_url: None,
+            current_cover_url: None,
+            proposed_cover_url: None,
+            confidence: 95.0,
+            artwork_action: "no artwork change".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_persistence_survives_memory_and_consumes_once() {
+        let pool = test_pool().await;
+        let token = PreviewToken::new();
+        let items = vec![
+            preview_item(1, DuplicateAction::None),
+            preview_item(2, DuplicateAction::SkipDuplicate),
+        ];
+        store_preview(
+            &pool,
+            token,
+            &items,
+            serde_json::json!({"write_count":1,"duplicate_skipped":1}),
+            "settings".into(),
+        )
+        .await
+        .unwrap();
+
+        let persisted: i64 = sqlx::query_scalar("SELECT count(*) FROM preview_items")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(persisted, 2);
+
+        let loaded = consume_preview(&pool, token).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].track_id, TrackId(1));
+        assert!(consume_preview(&pool, token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_and_missing_preview_tokens_are_rejected() {
+        let pool = test_pool().await;
+        assert!(consume_preview(&pool, PreviewToken::new()).await.is_err());
+
+        let token = PreviewToken::new();
+        let items = vec![preview_item(1, DuplicateAction::None)];
+        store_preview(
+            &pool,
+            token,
+            &items,
+            serde_json::json!({"write_count":1,"duplicate_skipped":0}),
+            "settings".into(),
+        )
+        .await
+        .unwrap();
+        invalidate_previews(&pool).await.unwrap();
+        assert!(consume_preview(&pool, token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn clear_workspace_preserves_provider_cache() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('musicbrainz','k','{}',datetime('now','+1 day'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        let _ = workspace::clear_workspace(State(state)).await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cached, 1);
+    }
+
+    #[tokio::test]
+    async fn scan_start_preserves_provider_cache() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('musicbrainz','k','{}',datetime('now','+1 day'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            input_dir: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let state = Arc::new(AppState::new(cfg, pool.clone()));
+        let _ = scan::start_scan(State(state)).await.unwrap();
+        let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(cached, 1);
+    }
 }

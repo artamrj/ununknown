@@ -8,10 +8,7 @@ pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_
         return Err(anyhow!("workflow is already running").into());
     }
     sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
-    sqlx::query("DELETE FROM provider_cache")
-        .execute(&s.pool)
-        .await?;
-    s.previews.write().await.clear();
+    invalidate_previews(&s.pool).await?;
     *s.workflow.write().await = Workflow {
         phase: WorkflowPhase::Scan,
         message: "Discovering music".into(),

@@ -134,6 +134,13 @@ export function SettingsPage({ settings, back }: { settings: any; back: () => vo
           />
           <NumberField
             show={visible}
+            l="Scan workers"
+            d="Maximum tracks processed through the scan pipeline at once."
+            v={f.scan_worker_concurrency}
+            set={(v) => set("scan_worker_concurrency", v)}
+          />
+          <NumberField
+            show={visible}
             l="Fingerprint workers"
             d="Parallel fpcalc processes for local audio fingerprints."
             v={f.fingerprint_concurrency}
@@ -145,6 +152,20 @@ export function SettingsPage({ settings, back }: { settings: any; back: () => vo
             d="Parallel AcoustID requests before MusicBrainz enrichment."
             v={f.acoustid_concurrency}
             set={(v) => set("acoustid_concurrency", v)}
+          />
+          <NumberField
+            show={visible}
+            l="Artwork downloads"
+            d="Parallel cover-art downloads during preview and apply flows."
+            v={f.artwork_download_concurrency}
+            set={(v) => set("artwork_download_concurrency", v)}
+          />
+          <NumberField
+            show={visible}
+            l="Tag writers"
+            d="Parallel blocking metadata writes during apply."
+            v={f.tag_write_concurrency}
+            set={(v) => set("tag_write_concurrency", v)}
           />
           <NumberField
             show={visible}

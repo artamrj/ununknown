@@ -13,9 +13,12 @@ pub struct Config {
     pub automation_mode: AutomationMode,
     pub confidence_threshold: f64,
     pub track_attempts: u32,
+    pub scan_worker_concurrency: usize,
     pub metadata_read_concurrency: usize,
     pub fingerprint_concurrency: usize,
     pub acoustid_concurrency: usize,
+    pub artwork_download_concurrency: usize,
+    pub tag_write_concurrency: usize,
     pub db_write_batch_size: usize,
     pub cover_art_enabled: bool,
     pub overwrite_existing_tags: bool,
@@ -109,6 +112,10 @@ impl Config {
             "Track attempts must be between 1 and 10"
         );
         anyhow::ensure!(
+            (1..=64).contains(&self.scan_worker_concurrency),
+            "Scan workers must be between 1 and 64"
+        );
+        anyhow::ensure!(
             (1..=16).contains(&self.metadata_read_concurrency),
             "Metadata read workers must be between 1 and 16"
         );
@@ -119,6 +126,14 @@ impl Config {
         anyhow::ensure!(
             (1..=8).contains(&self.acoustid_concurrency),
             "AcoustID lookups must be between 1 and 8"
+        );
+        anyhow::ensure!(
+            (1..=8).contains(&self.artwork_download_concurrency),
+            "Artwork downloads must be between 1 and 8"
+        );
+        anyhow::ensure!(
+            (1..=8).contains(&self.tag_write_concurrency),
+            "Tag writers must be between 1 and 8"
         );
         anyhow::ensure!(
             (1..=250).contains(&self.db_write_batch_size),
@@ -187,9 +202,12 @@ impl Default for Config {
             automation_mode: AutomationMode::Safe,
             confidence_threshold: 90.0,
             track_attempts: 3,
+            scan_worker_concurrency: 8,
             metadata_read_concurrency: 6,
             fingerprint_concurrency: 3,
             acoustid_concurrency: 3,
+            artwork_download_concurrency: 3,
+            tag_write_concurrency: 2,
             db_write_batch_size: 25,
             cover_art_enabled: true,
             overwrite_existing_tags: true,
@@ -273,9 +291,12 @@ mod tests {
     #[test]
     fn pipeline_concurrency_defaults_are_conservative() {
         let cfg = Config::default();
+        assert_eq!(cfg.scan_worker_concurrency, 8);
         assert_eq!(cfg.metadata_read_concurrency, 6);
         assert_eq!(cfg.fingerprint_concurrency, 3);
         assert_eq!(cfg.acoustid_concurrency, 3);
+        assert_eq!(cfg.artwork_download_concurrency, 3);
+        assert_eq!(cfg.tag_write_concurrency, 2);
         assert_eq!(cfg.db_write_batch_size, 25);
     }
 
@@ -323,9 +344,12 @@ mod tests {
     #[test]
     fn pipeline_concurrency_validation_accepts_documented_ranges() {
         let mut cfg = valid_config();
+        cfg.scan_worker_concurrency = 64;
         cfg.metadata_read_concurrency = 16;
         cfg.fingerprint_concurrency = 8;
         cfg.acoustid_concurrency = 8;
+        cfg.artwork_download_concurrency = 8;
+        cfg.tag_write_concurrency = 8;
         cfg.db_write_batch_size = 250;
         assert!(cfg.validate().is_ok());
     }
@@ -333,20 +357,29 @@ mod tests {
     #[test]
     fn pipeline_concurrency_validation_rejects_out_of_range_values() {
         for invalid in [
-            ("metadata", 0, 3, 3, 25),
-            ("metadata", 17, 3, 3, 25),
-            ("fingerprint", 6, 0, 3, 25),
-            ("fingerprint", 6, 9, 3, 25),
-            ("acoustid", 6, 3, 0, 25),
-            ("acoustid", 6, 3, 9, 25),
-            ("db", 6, 3, 3, 0),
-            ("db", 6, 3, 3, 251),
+            ("scan", 0, 6, 3, 3, 3, 2, 25),
+            ("scan", 65, 6, 3, 3, 3, 2, 25),
+            ("metadata", 8, 0, 3, 3, 3, 2, 25),
+            ("metadata", 8, 17, 3, 3, 3, 2, 25),
+            ("fingerprint", 8, 6, 0, 3, 3, 2, 25),
+            ("fingerprint", 8, 6, 9, 3, 3, 2, 25),
+            ("acoustid", 8, 6, 3, 0, 3, 2, 25),
+            ("acoustid", 8, 6, 3, 9, 3, 2, 25),
+            ("artwork", 8, 6, 3, 3, 0, 2, 25),
+            ("artwork", 8, 6, 3, 3, 9, 2, 25),
+            ("tag", 8, 6, 3, 3, 3, 0, 25),
+            ("tag", 8, 6, 3, 3, 3, 9, 25),
+            ("db", 8, 6, 3, 3, 3, 2, 0),
+            ("db", 8, 6, 3, 3, 3, 2, 251),
         ] {
-            let (name, metadata, fingerprint, acoustid, db_batch) = invalid;
+            let (name, scan, metadata, fingerprint, acoustid, artwork, tag, db_batch) = invalid;
             let mut cfg = valid_config();
+            cfg.scan_worker_concurrency = scan;
             cfg.metadata_read_concurrency = metadata;
             cfg.fingerprint_concurrency = fingerprint;
             cfg.acoustid_concurrency = acoustid;
+            cfg.artwork_download_concurrency = artwork;
+            cfg.tag_write_concurrency = tag;
             cfg.db_write_batch_size = db_batch;
             assert!(cfg.validate().is_err(), "{name} should be rejected");
         }
@@ -365,9 +398,12 @@ mod tests {
             }"#,
         )
         .unwrap();
+        assert_eq!(cfg.scan_worker_concurrency, 8);
         assert_eq!(cfg.metadata_read_concurrency, 6);
         assert_eq!(cfg.fingerprint_concurrency, 3);
         assert_eq!(cfg.acoustid_concurrency, 3);
+        assert_eq!(cfg.artwork_download_concurrency, 3);
+        assert_eq!(cfg.tag_write_concurrency, 2);
         assert_eq!(cfg.db_write_batch_size, 25);
     }
 }

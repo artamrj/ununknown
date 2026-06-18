@@ -160,31 +160,29 @@ pub async fn apply_preview(
         });
     }
     let token = PreviewToken::new();
-    let apply_items: Vec<PreviewItem> = items
-        .iter()
-        .filter(|item| item.duplicate_action != DuplicateAction::SkipDuplicate)
-        .cloned()
-        .collect();
-    s.previews.write().await.insert(token.clone(), apply_items);
+    let summary = serde_json::json!({
+        "write_count": items.iter().filter(|item| item.duplicate_action != DuplicateAction::SkipDuplicate).count(),
+        "duplicate_skipped": duplicate_skipped
+    });
+    store_preview(
+        &s.pool,
+        token,
+        &items,
+        summary.clone(),
+        settings_fingerprint(&cfg)?,
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "preview_token":token,
         "items":items,
-        "summary":{
-            "write_count": items.iter().filter(|item| item.duplicate_action != DuplicateAction::SkipDuplicate).count(),
-            "duplicate_skipped": duplicate_skipped
-        }
+        "summary":summary
     })))
 }
 pub async fn start_apply(
     State(s): State<Arc<AppState>>,
     Json(body): Json<ApplyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let items = s
-        .previews
-        .write()
-        .await
-        .remove(&body.preview_token)
-        .ok_or_else(|| anyhow!("a current successful dry-run preview is required"))?;
+    let items = consume_preview(&s.pool, body.preview_token).await?;
     let id = JobId::new();
     {
         let mut w = s.workflow.write().await;
@@ -219,6 +217,8 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
         let (_, candidate) = selected(&s.pool, item.track_id).await?;
         let artwork = if cfg.cover_art_enabled {
             if let Some(url) = &candidate.cover_url {
+                let limiter = s.artwork_downloads.read().await.clone();
+                let _permit = limiter.acquire_owned().await?;
                 crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
                     .await
                     .ok()
@@ -247,9 +247,12 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
         } else {
             None
         };
+        let write_limiter = s.tag_writes.read().await.clone();
+        let write_permit = write_limiter.acquire_owned().await?;
         let result = tokio::task::spawn_blocking({
             let cfg = cfg.clone();
             move || {
+                let _permit = write_permit;
                 tag_writer::write(&write_target, &candidate, &cfg, artwork)?;
                 if let Some(mtime) = original_mtime {
                     filetime::set_file_mtime(&write_target, mtime)?;
