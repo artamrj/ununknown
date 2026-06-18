@@ -409,11 +409,18 @@ async fn identify(
     if !cfg.acoustid_api_key.is_empty() {
         let hits = {
             let _permit = limits.acoustid.acquire().await?;
-            providers::acoustid::lookup(&state.client, &cfg.acoustid_api_key, fingerprint, duration)
-                .await?
+            providers::acoustid::lookup(
+                &state.pool,
+                &state.client,
+                &cfg.acoustid_api_key,
+                fingerprint,
+                duration,
+            )
+            .await?
         };
         for hit in hits.into_iter().take(3) {
             let mut candidate = providers::musicbrainz::recording(
+                &state.pool,
                 &state.client,
                 &cfg.musicbrainz_user_agent,
                 &hit.recording_id,
@@ -436,6 +443,7 @@ async fn identify(
             .filter(|value| !value.trim().is_empty());
         if let Some(title) = title {
             for mut candidate in providers::musicbrainz::search(
+                &state.pool,
                 &state.client,
                 &cfg.musicbrainz_user_agent,
                 title,

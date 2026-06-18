@@ -21,12 +21,12 @@ pub async fn proposed_artwork(
     State(s): State<Arc<AppState>>,
     Path(id): Path<CandidateId>,
 ) -> ApiResult<Response> {
-    let cover_url: Option<String> =
-        sqlx::query_scalar("SELECT cover_url FROM candidates WHERE id=?")
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT cover_url,musicbrainz_release_id FROM candidates WHERE id=?")
             .bind(id.0)
             .fetch_optional(&s.pool)
-            .await?
-            .flatten();
+            .await?;
+    let (cover_url, release_id) = row.unwrap_or_default();
     let Some(url) = cover_url else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
@@ -46,14 +46,25 @@ pub async fn proposed_artwork(
     }
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await?;
-    let response = s.client.get(url).send().await?.error_for_status()?;
-    let mime = response
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_owned();
-    let data = response.bytes().await?.to_vec();
+    let (mime, data) = if let Some(release_id) = release_id.as_deref() {
+        (
+            "image/jpeg".to_owned(),
+            crate::infrastructure::providers::cover_art_archive::fetch_cached(
+                &s.pool, &s.client, release_id, &url,
+            )
+            .await?,
+        )
+    } else {
+        let response = s.client.get(url).send().await?.error_for_status()?;
+        let mime = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("image/jpeg")
+            .to_owned();
+        let data = response.bytes().await?.to_vec();
+        (mime, data)
+    };
     tokio::fs::write(&cache_path, &data).await?;
     tokio::fs::write(&mime_path, &mime).await?;
     Ok(image_response(mime, data))

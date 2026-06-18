@@ -219,9 +219,17 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
             if let Some(url) = &candidate.cover_url {
                 let limiter = s.artwork_downloads.read().await.clone();
                 let _permit = limiter.acquire_owned().await?;
-                crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
+                if let Some(release_id) = candidate.release_id.as_deref() {
+                    crate::infrastructure::providers::cover_art_archive::fetch_cached(
+                        &s.pool, &s.client, release_id, url,
+                    )
                     .await
                     .ok()
+                } else {
+                    crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
+                        .await
+                        .ok()
+                }
             } else {
                 None
             }
