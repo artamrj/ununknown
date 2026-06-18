@@ -12,6 +12,10 @@ pub struct Config {
     pub automation_mode: String,
     pub confidence_threshold: f64,
     pub track_attempts: u32,
+    pub metadata_read_concurrency: usize,
+    pub fingerprint_concurrency: usize,
+    pub acoustid_concurrency: usize,
+    pub db_write_batch_size: usize,
     pub cover_art_enabled: bool,
     pub overwrite_existing_tags: bool,
     pub expert_mode: bool,
@@ -115,6 +119,22 @@ impl Config {
             "Track attempts must be between 1 and 10"
         );
         anyhow::ensure!(
+            (1..=16).contains(&self.metadata_read_concurrency),
+            "Metadata read workers must be between 1 and 16"
+        );
+        anyhow::ensure!(
+            (1..=8).contains(&self.fingerprint_concurrency),
+            "Fingerprint workers must be between 1 and 8"
+        );
+        anyhow::ensure!(
+            (1..=8).contains(&self.acoustid_concurrency),
+            "AcoustID lookups must be between 1 and 8"
+        );
+        anyhow::ensure!(
+            (1..=250).contains(&self.db_write_batch_size),
+            "DB write batch size must be between 1 and 250"
+        );
+        anyhow::ensure!(
             Self::valid_musicbrainz_user_agent(&self.musicbrainz_user_agent),
             "MusicBrainz contact must include an email address or website, for example: Ununknown/0.1 (you@example.com)"
         );
@@ -184,6 +204,10 @@ impl Default for Config {
             automation_mode: "safe".into(),
             confidence_threshold: 90.0,
             track_attempts: 3,
+            metadata_read_concurrency: 6,
+            fingerprint_concurrency: 3,
+            acoustid_concurrency: 3,
+            db_write_batch_size: 25,
             cover_art_enabled: true,
             overwrite_existing_tags: true,
             expert_mode: false,
@@ -248,5 +272,77 @@ impl Default for MetadataFields {
             embed_cover_art: true,
             replace_existing_cover_art: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    fn valid_config() -> Config {
+        Config {
+            musicbrainz_user_agent: "Ununknown/0.1 (test@example.com)".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pipeline_concurrency_defaults_are_conservative() {
+        let cfg = Config::default();
+        assert_eq!(cfg.metadata_read_concurrency, 6);
+        assert_eq!(cfg.fingerprint_concurrency, 3);
+        assert_eq!(cfg.acoustid_concurrency, 3);
+        assert_eq!(cfg.db_write_batch_size, 25);
+    }
+
+    #[test]
+    fn pipeline_concurrency_validation_accepts_documented_ranges() {
+        let mut cfg = valid_config();
+        cfg.metadata_read_concurrency = 16;
+        cfg.fingerprint_concurrency = 8;
+        cfg.acoustid_concurrency = 8;
+        cfg.db_write_batch_size = 250;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn pipeline_concurrency_validation_rejects_out_of_range_values() {
+        for invalid in [
+            ("metadata", 0, 3, 3, 25),
+            ("metadata", 17, 3, 3, 25),
+            ("fingerprint", 6, 0, 3, 25),
+            ("fingerprint", 6, 9, 3, 25),
+            ("acoustid", 6, 3, 0, 25),
+            ("acoustid", 6, 3, 9, 25),
+            ("db", 6, 3, 3, 0),
+            ("db", 6, 3, 3, 251),
+        ] {
+            let (name, metadata, fingerprint, acoustid, db_batch) = invalid;
+            let mut cfg = valid_config();
+            cfg.metadata_read_concurrency = metadata;
+            cfg.fingerprint_concurrency = fingerprint;
+            cfg.acoustid_concurrency = acoustid;
+            cfg.db_write_batch_size = db_batch;
+            assert!(cfg.validate().is_err(), "{name} should be rejected");
+        }
+    }
+
+    #[test]
+    fn missing_json_pipeline_concurrency_uses_defaults() {
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "input_dir": "/music/input",
+                "output_dir": "/music/output",
+                "output_mode": "copy",
+                "automation_mode": "safe",
+                "confidence_threshold": 90.0,
+                "track_attempts": 3
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.metadata_read_concurrency, 6);
+        assert_eq!(cfg.fingerprint_concurrency, 3);
+        assert_eq!(cfg.acoustid_concurrency, 3);
+        assert_eq!(cfg.db_write_batch_size, 25);
     }
 }

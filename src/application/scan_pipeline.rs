@@ -11,7 +11,30 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio::{
+    sync::{Semaphore, mpsc, oneshot},
+    task::JoinSet,
+};
 use walkdir::WalkDir;
+
+struct PipelineLimits {
+    metadata: Arc<Semaphore>,
+    fingerprint: Arc<Semaphore>,
+    acoustid: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
+struct FileJob {
+    index: usize,
+    path: PathBuf,
+}
+
+struct PersistJob {
+    path: PathBuf,
+    info: audio::AudioInfo,
+    candidate: providers::Candidate,
+    result: oneshot::Sender<Result<()>>,
+}
 
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
@@ -45,7 +68,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         let mut w = state.workflow.write().await;
         w.total = total;
         w.phase = "fetch".into();
-        w.message = "Starting sequential matching".into();
+        w.message = "Starting staged matching".into();
     }
     jobs::emit(
         &state,
@@ -53,82 +76,43 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         Some("fetch"),
         0,
         total as i64,
-        "Starting sequential matching",
+        "Starting staged matching",
     );
 
+    let limits = Arc::new(PipelineLimits {
+        metadata: Arc::new(Semaphore::new(cfg.metadata_read_concurrency)),
+        fingerprint: Arc::new(Semaphore::new(cfg.fingerprint_concurrency)),
+        acoustid: Arc::new(Semaphore::new(cfg.acoustid_concurrency)),
+    });
+    let (persist_tx, persist_rx) = mpsc::channel(cfg.db_write_batch_size.max(1));
+    let writer = tokio::spawn(db_writer(
+        state.clone(),
+        persist_rx,
+        cfg.db_write_batch_size,
+    ));
+    let mut tasks = JoinSet::new();
     for (index, path) in files.into_iter().enumerate() {
-        if state.workflow.read().await.cancelled {
-            break;
-        }
-        let filename = path
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("audio")
-            .to_owned();
-        for attempt in 1..=cfg.track_attempts {
-            set_phase(
-                &state,
-                "fetch",
-                &format!(
-                    "Matching {filename} · attempt {attempt}/{}",
-                    cfg.track_attempts
-                ),
-                index,
-                total,
-                Some(filename.clone()),
-            )
-            .await;
-            match process(&state, &path).await {
-                Ok(true) => {
-                    state
-                        .terminal(
-                            "ok",
-                            "fetch",
-                            Some(&filename),
-                            "Matched and stored for Preview",
-                        )
-                        .await;
-                    break;
-                }
-                Ok(false) => {
-                    state
-                        .terminal(
-                            "warn",
-                            "fetch",
-                            Some(&filename),
-                            "No selected match; moving to next file",
-                        )
-                        .await;
-                    break;
-                }
-                Err(error) if attempt < cfg.track_attempts => {
-                    tracing::warn!(path=%path.display(), attempt, "track attempt failed: {error:#}");
-                    state
-                        .terminal(
-                            "warn",
-                            "fetch",
-                            Some(&filename),
-                            &format!("Attempt {attempt} failed: {error:#}; retrying"),
-                        )
-                        .await;
-                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
-                }
-                Err(error) => {
-                    tracing::warn!(path=%path.display(), "track failed after retries: {error:#}");
-                    state.workflow.write().await.failed += 1;
-                    state
-                        .terminal(
-                            "error",
-                            "fetch",
-                            Some(&filename),
-                            &format!("Failed after retries: {error:#}"),
-                        )
-                        .await;
-                }
-            }
-        }
-        state.workflow.write().await.processed = index + 1;
+        tasks.spawn(process_file(
+            state.clone(),
+            limits.clone(),
+            persist_tx.clone(),
+            FileJob { index, path },
+            total,
+        ));
     }
+    drop(persist_tx);
+
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!("scan worker task failed: {error:#}");
+            state.workflow.write().await.failed += 1;
+        }
+        if state.workflow.read().await.cancelled {
+            tasks.abort_all();
+        }
+    }
+    let writer_result = writer.await?;
+    writer_result?;
     let cancelled = state.workflow.read().await.cancelled;
     set_phase(
         &state,
@@ -146,7 +130,109 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-async fn process(state: &Arc<AppState>, path: &Path) -> Result<bool> {
+async fn process_file(
+    state: Arc<AppState>,
+    limits: Arc<PipelineLimits>,
+    persist_tx: mpsc::Sender<PersistJob>,
+    job: FileJob,
+    total: usize,
+) {
+    if state.workflow.read().await.cancelled {
+        return;
+    }
+    let cfg = state.config.read().await.clone();
+    let filename = job
+        .path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or("audio")
+        .to_owned();
+    for attempt in 1..=cfg.track_attempts {
+        if state.workflow.read().await.cancelled {
+            return;
+        }
+        set_phase(
+            &state,
+            "fetch",
+            &format!(
+                "Matching {filename} · attempt {attempt}/{}",
+                cfg.track_attempts
+            ),
+            job.index,
+            total,
+            Some(filename.clone()),
+        )
+        .await;
+        match process(&state, &limits, &persist_tx, &job.path).await {
+            Ok(true) => {
+                state
+                    .terminal(
+                        "ok",
+                        "fetch",
+                        Some(&filename),
+                        "Matched and stored for Preview",
+                    )
+                    .await;
+                break;
+            }
+            Ok(false) => {
+                state
+                    .terminal(
+                        "warn",
+                        "fetch",
+                        Some(&filename),
+                        "No selected match; moving to next file",
+                    )
+                    .await;
+                break;
+            }
+            Err(error) if attempt < cfg.track_attempts => {
+                tracing::warn!(path=%job.path.display(), attempt, "track attempt failed: {error:#}");
+                state
+                    .terminal(
+                        "warn",
+                        "fetch",
+                        Some(&filename),
+                        &format!("Attempt {attempt} failed: {error:#}; retrying"),
+                    )
+                    .await;
+                tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+            }
+            Err(error) => {
+                tracing::warn!(path=%job.path.display(), "track failed after retries: {error:#}");
+                state.workflow.write().await.failed += 1;
+                state
+                    .terminal(
+                        "error",
+                        "fetch",
+                        Some(&filename),
+                        &format!("Failed after retries: {error:#}"),
+                    )
+                    .await;
+            }
+        }
+    }
+    let mut workflow = state.workflow.write().await;
+    workflow.processed += 1;
+    workflow.current = workflow.processed;
+    let processed = workflow.processed;
+    drop(workflow);
+    jobs::emit(
+        &state,
+        "workflow",
+        Some("fetch"),
+        processed as i64,
+        total as i64,
+        "Matching tracks",
+    );
+}
+
+async fn process(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    persist_tx: &mpsc::Sender<PersistJob>,
+    path: &Path,
+) -> Result<bool> {
     let filename = path.file_name().and_then(|v| v.to_str()).unwrap_or("audio");
     state
         .terminal(
@@ -156,11 +242,14 @@ async fn process(state: &Arc<AppState>, path: &Path) -> Result<bool> {
             "Reading existing tags and audio properties",
         )
         .await;
-    let info = tokio::task::spawn_blocking({
-        let p = path.to_path_buf();
-        move || audio::read(&p)
-    })
-    .await??;
+    let info = {
+        let _permit = limits.metadata.acquire().await?;
+        tokio::task::spawn_blocking({
+            let p = path.to_path_buf();
+            move || audio::read(&p)
+        })
+        .await??
+    };
     state
         .terminal(
             "ok",
@@ -182,7 +271,10 @@ async fn process(state: &Arc<AppState>, path: &Path) -> Result<bool> {
             "Running fpcalc fingerprint",
         )
         .await;
-    let (fp, duration) = fingerprint::calculate(path).await?;
+    let (fp, duration) = {
+        let _permit = limits.fingerprint.acquire().await?;
+        fingerprint::calculate(path).await?
+    };
     state
         .terminal("ok", "fingerprint", Some(filename), "Fingerprint generated")
         .await;
@@ -214,7 +306,7 @@ async fn process(state: &Arc<AppState>, path: &Path) -> Result<bool> {
             "MusicBrainz lookups are queued at one request per second",
         )
         .await;
-    let candidates = providers::identify(&state.client, &cfg, &fp, duration, &info).await?;
+    let candidates = identify(state, &cfg, limits, &fp, duration, &info).await?;
     state
         .terminal(
             "info",
@@ -255,13 +347,121 @@ async fn process(state: &Arc<AppState>, path: &Path) -> Result<bool> {
             ),
         )
         .await;
-    persist_match(state, path, &info, &candidate).await?;
+    let (result_tx, result_rx) = oneshot::channel();
+    persist_tx
+        .send(PersistJob {
+            path: path.to_path_buf(),
+            info,
+            candidate,
+            result: result_tx,
+        })
+        .await
+        .map_err(|_| anyhow!("DB writer stopped"))?;
+    result_rx
+        .await
+        .map_err(|_| anyhow!("DB writer stopped"))??;
     state.workflow.write().await.matched += 1;
     Ok(true)
 }
 
-async fn persist_match(
+async fn identify(
     state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
+    fingerprint: &str,
+    duration: f64,
+    current: &audio::AudioInfo,
+) -> Result<Vec<providers::Candidate>> {
+    let mut out = Vec::new();
+    if !cfg.acoustid_api_key.is_empty() {
+        let hits = {
+            let _permit = limits.acoustid.acquire().await?;
+            providers::acoustid::lookup(&state.client, &cfg.acoustid_api_key, fingerprint, duration)
+                .await?
+        };
+        for hit in hits.into_iter().take(3) {
+            let mut candidate = providers::musicbrainz::recording(
+                &state.client,
+                &cfg.musicbrainz_user_agent,
+                &hit.recording_id,
+            )
+            .await?;
+            candidate.score = crate::domain::matcher::score(
+                hit.score,
+                current,
+                &candidate.title,
+                &candidate.artist,
+                duration,
+            );
+            out.push(candidate);
+        }
+    }
+    if out.is_empty() {
+        let title = current
+            .title
+            .as_deref()
+            .filter(|value| !value.trim().is_empty());
+        if let Some(title) = title {
+            for mut candidate in providers::musicbrainz::search(
+                &state.client,
+                &cfg.musicbrainz_user_agent,
+                title,
+                current.artist.as_deref(),
+            )
+            .await?
+            {
+                candidate.score = crate::domain::matcher::text_score(
+                    current,
+                    &candidate.title,
+                    &candidate.artist,
+                );
+                out.push(candidate);
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn db_writer(
+    state: Arc<AppState>,
+    mut rx: mpsc::Receiver<PersistJob>,
+    batch_size: usize,
+) -> Result<()> {
+    let batch_size = batch_size.max(1);
+    while let Some(first) = rx.recv().await {
+        let mut batch = vec![first];
+        while batch.len() < batch_size {
+            match rx.try_recv() {
+                Ok(job) => batch.push(job),
+                Err(_) => break,
+            }
+        }
+        let mut tx = state.pool.begin().await?;
+        let mut results = Vec::with_capacity(batch.len());
+        for job in &batch {
+            results.push(persist_match(&mut tx, &job.path, &job.info, &job.candidate).await);
+        }
+        let failed = results
+            .iter()
+            .find_map(|result| result.as_ref().err().map(|error| anyhow!("{error:#}")));
+        let failed = match failed {
+            Some(error) => Some(error),
+            None => tx.commit().await.err().map(|error| anyhow!("{error:#}")),
+        };
+        for (job, result) in batch.into_iter().zip(results) {
+            let response = match (&failed, result) {
+                (Some(error), _) => Err(anyhow!("{error:#}")),
+                (None, Ok(())) => Ok(()),
+                (None, Err(error)) => Err(error),
+            };
+            let _ = job.result.send(response);
+        }
+    }
+    Ok(())
+}
+
+async fn persist_match(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     path: &Path,
     info: &audio::AudioInfo,
     c: &providers::Candidate,
@@ -274,26 +474,26 @@ async fn persist_match(
         .ok_or_else(|| anyhow!("invalid filename"))?;
     let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM tracks WHERE path=?")
         .bind(text.as_ref())
-        .fetch_optional(&state.pool)
+        .fetch_optional(&mut **tx)
         .await?;
     let id = if let Some(id) = existing {
         sqlx::query("DELETE FROM candidates WHERE track_id=?")
             .bind(id)
-            .execute(&state.pool)
+            .execute(&mut **tx)
             .await?;
         sqlx::query("UPDATE tracks SET filename=?,format=?,duration=?,current_title=?,current_artist=?,current_album=?,current_album_artist=?,current_track_number=?,status='selected',error=NULL,is_missing=0,last_seen_at=?,last_scanned_at=?,stage='ready',updated_at=?,selected_candidate_id=NULL WHERE id=?")
-            .bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(id).execute(&state.pool).await?;
+            .bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(id).execute(&mut **tx).await?;
         id
     } else {
         sqlx::query("INSERT INTO tracks(path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'selected',0,?,?,?,'ready',?)")
-            .bind(text.as_ref()).bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(&now).execute(&state.pool).await?.last_insert_rowid()
+            .bind(text.as_ref()).bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(&now).execute(&mut **tx).await?.last_insert_rowid()
     };
     let cid=sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,musicbrainz_recording_id,musicbrainz_release_id,musicbrainz_artist_id,musicbrainz_album_artist_id,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(id).bind("musicbrainz").bind(&c.title).bind(&c.artist).bind(&c.album).bind(&c.album_artist).bind(c.track_number).bind(c.track_total).bind(c.disc_number).bind(c.disc_total).bind(&c.year).bind(&c.genre).bind(&c.composer).bind(&c.label).bind(&c.isrc).bind(&c.cover_url).bind(&c.recording_id).bind(&c.release_id).bind(&c.artist_id).bind(&c.album_artist_id).bind(c.score).bind(&c.raw_json).execute(&state.pool).await?.last_insert_rowid();
+        .bind(id).bind("musicbrainz").bind(&c.title).bind(&c.artist).bind(&c.album).bind(&c.album_artist).bind(c.track_number).bind(c.track_total).bind(c.disc_number).bind(c.disc_total).bind(&c.year).bind(&c.genre).bind(&c.composer).bind(&c.label).bind(&c.isrc).bind(&c.cover_url).bind(&c.recording_id).bind(&c.release_id).bind(&c.artist_id).bind(&c.album_artist_id).bind(c.score).bind(&c.raw_json).execute(&mut **tx).await?.last_insert_rowid();
     sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
         .bind(cid)
         .bind(id)
-        .execute(&state.pool)
+        .execute(&mut **tx)
         .await?;
     Ok(())
 }

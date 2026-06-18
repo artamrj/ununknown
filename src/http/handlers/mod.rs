@@ -265,6 +265,11 @@ pub async fn reset_settings_section(
         "matching" => {
             cfg.automation_mode = defaults.automation_mode;
             cfg.confidence_threshold = defaults.confidence_threshold;
+            cfg.track_attempts = defaults.track_attempts;
+            cfg.metadata_read_concurrency = defaults.metadata_read_concurrency;
+            cfg.fingerprint_concurrency = defaults.fingerprint_concurrency;
+            cfg.acoustid_concurrency = defaults.acoustid_concurrency;
+            cfg.db_write_batch_size = defaults.db_write_batch_size;
         }
         "metadata" => {
             cfg.metadata_fields = defaults.metadata_fields;

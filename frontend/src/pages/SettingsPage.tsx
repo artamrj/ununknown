@@ -125,6 +125,34 @@ export function SettingsPage({ settings, back }: { settings: any; back: () => vo
             v={f.track_attempts}
             set={(v) => set("track_attempts", v)}
           />
+          <NumberField
+            show={visible}
+            l="Metadata read workers"
+            d="Parallel tag and audio property readers."
+            v={f.metadata_read_concurrency}
+            set={(v) => set("metadata_read_concurrency", v)}
+          />
+          <NumberField
+            show={visible}
+            l="Fingerprint workers"
+            d="Parallel fpcalc processes for local audio fingerprints."
+            v={f.fingerprint_concurrency}
+            set={(v) => set("fingerprint_concurrency", v)}
+          />
+          <NumberField
+            show={visible}
+            l="AcoustID lookups"
+            d="Parallel AcoustID requests before MusicBrainz enrichment."
+            v={f.acoustid_concurrency}
+            set={(v) => set("acoustid_concurrency", v)}
+          />
+          <NumberField
+            show={visible}
+            l="DB write batch size"
+            d="Selected matches grouped per persistence transaction."
+            v={f.db_write_batch_size}
+            set={(v) => set("db_write_batch_size", v)}
+          />
         </Section>
         <Reset onClick={() => reset("matching")} />
       </>
