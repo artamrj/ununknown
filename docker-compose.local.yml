@@ -8,8 +8,8 @@ services:
       UNUNKNOWN_DB: /cache/ununknown.sqlite
       UNUNKNOWN_INPUT_DIR: /music/input
       UNUNKNOWN_OUTPUT_DIR: /music/output
-      UNUNKNOWN_ACOUSTID_API_KEY: ${UNUNKNOWN_ACOUSTID_API_KEY:-}
-      UNUNKNOWN_MUSICBRAINZ_USER_AGENT: ${UNUNKNOWN_MUSICBRAINZ_USER_AGENT:-Ununknown/0.4.5 (test@email.test)}
+      UNUNKNOWN_ACOUSTID_API_KEY: ${UNUNKNOWN_ACOUSTID_API_KEY}
+      UNUNKNOWN_MUSICBRAINZ_USER_AGENT: ${UNUNKNOWN_MUSICBRAINZ_USER_AGENT}
     volumes:
       - ./.local/cache:/cache
       - ./.local/input:/music/input

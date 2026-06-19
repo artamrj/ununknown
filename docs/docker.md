@@ -10,7 +10,8 @@ Build from the current checkout:
 
 ```bash
 mkdir -p .local/cache .local/input .local/output
-docker compose -f docker-compose.local.yml up --build
+cp .env.example .env.local
+docker compose --env-file .env.local -f docker-compose.local.yml up --build
 ```
 
 Open `http://localhost:7331`.
@@ -20,9 +21,8 @@ Put music files in `.local/input`. Corrected files are written to `.local/output
 Optional environment variables:
 
 ```bash
-export UNUNKNOWN_ACOUSTID_API_KEY=your_key_here
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT='Ununknown/0.4.5 (https://github.com/artamrj/ununknown)'
-docker compose -f docker-compose.local.yml up --build
+$EDITOR .env.local
+docker compose --env-file .env.local -f docker-compose.local.yml up --build
 ```
 
 Useful local checks:

@@ -7,3 +7,4 @@
 /music
 /config/config.toml
 .DS_Store
+.env.local
