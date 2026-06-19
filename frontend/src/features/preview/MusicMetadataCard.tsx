@@ -28,15 +28,19 @@ export function MusicMetadataCard({
     );
   };
   return (
-    <section className="music-card">
+    <section className="metadata-card">
       <CoverImage src={cover} title={data.title} />
       <div className="music-meta">
-        <em>
-          {label}
-          {confidence !== undefined ? ` · ${Math.round(confidence)}%` : ""}
-        </em>
-        <h3>{data.title || "Unknown title"}</h3>
-        <strong>{data.artist || "Unknown artist"}</strong>
+        <header>
+          <em>{label}</em>
+          {confidence !== undefined && <span>{Math.round(confidence)}%</span>}
+        </header>
+        <h3 className={changedFrom && changedFrom.title !== data.title ? "changed" : ""}>
+          {data.title || "Unknown title"}
+        </h3>
+        <strong className={changedFrom && changedFrom.artist !== data.artist ? "changed" : ""}>
+          {data.artist || "Unknown artist"}
+        </strong>
         <div className="meta-grid">
           <span>
             <b>File</b>
@@ -46,12 +50,7 @@ export function MusicMetadataCard({
           {field("album_artist", "Album artist")}
           {field("year", "Date")}
         </div>
-        {path && (
-          <p className="path-line">
-            <span>Output</span>
-            <b>{path}</b>
-          </p>
-        )}
+        {path && <p className="path-line">{path}</p>}
       </div>
     </section>
   );

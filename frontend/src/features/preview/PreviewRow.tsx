@@ -9,7 +9,7 @@ export function PreviewRow({ item }: { item: PreviewItem }) {
   return (
     <article className={`preview-row ${skip ? "duplicate-skip" : ""}`}>
       <MusicMetadataCard
-        label="Current"
+        label="Actual"
         filename={item.filename}
         data={oldData}
         cover={item.current_cover_url}
@@ -18,7 +18,7 @@ export function PreviewRow({ item }: { item: PreviewItem }) {
         <span>{skip ? "skip" : "→"}</span>
       </div>
       <MusicMetadataCard
-        label="Proposed"
+        label="New"
         filename={item.filename}
         data={newData}
         cover={item.proposed_cover_url || item.cover_url}

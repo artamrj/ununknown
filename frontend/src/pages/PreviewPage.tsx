@@ -23,7 +23,7 @@ export function PreviewPage({
   const writeCount = preview?.summary?.write_count ?? items.length;
   const empty = workflow.phase !== "finish" && !items.length;
   return (
-    <section className="results state-card preview-v4">
+    <section className="preview-workspace preview-v4">
       <header>
         <div>
           <span className="eyebrow">{workflow.phase === "finish" ? "Finished" : "Preview"}</span>
@@ -61,12 +61,6 @@ export function PreviewPage({
       {workflow.phase !== "finish" && !empty && <PreviewVirtualList items={items} />}
       {workflow.phase !== "finish" && preview && (
         <div className="apply-bar">
-          <span>
-            Dry-run ready for {writeCount} writes
-            {preview.summary?.duplicate_skipped
-              ? ` · ${preview.summary.duplicate_skipped} duplicates skipped`
-              : ""}
-          </span>
           <Button disabled={!writeCount || applyPending} onClick={onApply}>
             {applyPending ? "Applying..." : "Apply changes"}
           </Button>
