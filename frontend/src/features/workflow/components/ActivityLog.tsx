@@ -1,12 +1,12 @@
 import { useEffect, useRef } from "react";
-import type { TerminalLine } from "@/api";
+import type { ActivityLogLine } from "@/api";
 import type { EventStatus } from "@/shared/hooks/useEvents";
 
-export function Terminal({
+export function ActivityLog({
   lines,
   status = "connected",
 }: {
-  lines: TerminalLine[];
+  lines: ActivityLogLine[];
   status?: EventStatus;
 }) {
   const body = useRef<HTMLDivElement>(null);
@@ -15,9 +15,9 @@ export function Terminal({
   }, [lines.length]);
   const recent = lines.slice(-500);
   return (
-    <aside className={`terminal-card ${status}`}>
+    <aside className={`activity-log-card ${status}`}>
       <header>
-        <span /> Developer log{" "}
+        <span /> Activity log{" "}
         <small>
           {status} · {recent.length} lines
         </small>
@@ -51,7 +51,7 @@ export function Terminal({
               <strong>
                 {status === "reconnecting"
                   ? "Reconnecting to live events..."
-                  : "Waiting for scan output..."}
+                  : "Waiting for activity..."}
               </strong>
             </span>
           </p>

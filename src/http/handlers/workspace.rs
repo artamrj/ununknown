@@ -18,5 +18,11 @@ pub async fn workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_j
         workflow.phase = WorkflowPhase::Preview;
         workflow.message = "Restored matched preview".into();
     }
-    Ok(Json(serde_json::to_value(workflow)?))
+    let mut value = serde_json::to_value(workflow)?;
+    if let serde_json::Value::Object(fields) = &mut value {
+        if let Some(activity_log) = fields.get("activity_log").cloned() {
+            fields.insert("terminal_log".into(), activity_log);
+        }
+    }
+    Ok(Json(value))
 }

@@ -8,7 +8,7 @@ pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_
     previews::invalidate(&s.pool).await?;
     s.reset_workflow(WorkflowPhase::Scan, "Discovering music")
         .await;
-    s.terminal(
+    s.log(
         "info",
         "scan",
         None,

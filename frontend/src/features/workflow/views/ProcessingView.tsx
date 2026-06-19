@@ -1,6 +1,6 @@
 import type { WorkflowViewProps } from "@/features/workflow/types";
 import { ProcessingStatusCard } from "@/features/workflow/components/ProcessingStatusCard";
-import { Terminal } from "@/features/workflow/components/Terminal";
+import { ActivityLog } from "@/features/workflow/components/ActivityLog";
 
 export function ProcessingView({ workflow, eventStatus, onStop }: WorkflowViewProps) {
   return (
@@ -16,7 +16,7 @@ export function ProcessingView({ workflow, eventStatus, onStop }: WorkflowViewPr
         failed={workflow.failed}
         onStop={onStop}
       />
-      <Terminal lines={workflow.terminal_log || []} status={eventStatus} />
+      <ActivityLog lines={workflow.activity_log || []} status={eventStatus} />
     </section>
   );
 }

@@ -87,7 +87,7 @@ workspace-changing action invalidates them.
 - `src/main.rs`: process startup, router mounting, server bind.
 - `src/config.rs`: settings, defaults, validation, secret hiding.
 - `src/types.rs`: public wire enums and ID wrapper types.
-- `src/app/`: shared runtime state, workflow counters, terminal log, events.
+- `src/app/`: shared runtime state, workflow counters, activity log, events.
 - `src/application/`: high-level workflows such as scan and preview storage.
 - `src/domain/`: app rules that do not depend on HTTP, such as matching and path
   templates.
@@ -107,7 +107,7 @@ workspace-changing action invalidates them.
   artwork downloads, and tag writes.
 - `tokio::spawn` starts scan/apply workflows without blocking HTTP requests.
 - `spawn_blocking` is used for local media reads that are not async.
-- Server-sent events let the frontend receive workflow and terminal updates from
+- Server-sent events let the frontend receive workflow and activity log updates from
   `/api/events`.
 
 ## Read Next

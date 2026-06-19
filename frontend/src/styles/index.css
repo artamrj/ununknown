@@ -979,7 +979,7 @@ select:focus-visible {
   grid-template-columns: minmax(0, 1fr) 430px;
   gap: 18px;
 }
-.terminal-card {
+.activity-log-card {
   background: #101828;
   color: #d0d5dd;
   border-radius: 16px;
@@ -987,7 +987,7 @@ select:focus-visible {
   box-shadow: 0 14px 40px #10182824;
   border: 1px solid #1d2939;
 }
-.terminal-card header {
+.activity-log-card header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -996,7 +996,7 @@ select:focus-visible {
   font-size: 12px;
   font-weight: 800;
 }
-.terminal-card header span {
+.activity-log-card header span {
   width: 9px;
   height: 9px;
   border-radius: 50%;
@@ -1005,36 +1005,36 @@ select:focus-visible {
     14px 0 #fdb022,
     28px 0 #f04438;
 }
-.terminal-card > div {
+.activity-log-card > div {
   height: 365px;
   overflow: auto;
   padding: 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
 }
-.terminal-card p {
+.activity-log-card p {
   display: grid;
   grid-template-columns: 70px 88px 1fr;
   gap: 8px;
   margin: 0 0 7px;
   line-height: 1.45;
 }
-.terminal-card time {
+.activity-log-card time {
   color: #667085;
 }
-.terminal-card b {
+.activity-log-card b {
   color: #7cd4fd;
 }
-.terminal-card .ok span {
+.activity-log-card .ok span {
   color: #abefc6;
 }
-.terminal-card .warn span {
+.activity-log-card .warn span {
   color: #fedf89;
 }
-.terminal-card .error span {
+.activity-log-card .error span {
   color: #fecdca;
 }
-.terminal-card .muted span {
+.activity-log-card .muted span {
   color: #98a2b3;
 }
 .preview-workspace {
@@ -1063,6 +1063,25 @@ select:focus-visible {
 }
 .preview-v4 {
   padding: 0;
+}
+.preview-tabs {
+  display: flex;
+  gap: 3px;
+  border-bottom: 1px solid #e5e7eb;
+  overflow-x: auto;
+}
+.preview-tabs button {
+  border: 0;
+  background: transparent;
+  color: #667085;
+  padding: 10px 13px;
+  font-size: 12px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.preview-tabs button.active {
+  color: #3948c6;
+  border-bottom: 2px solid #4f5ee8;
 }
 .compare-list {
   display: grid;
@@ -1169,7 +1188,7 @@ select:focus-visible {
   .run-grid {
     grid-template-columns: 1fr;
   }
-  .terminal-card > div {
+  .activity-log-card > div {
     height: 280px;
   }
   .preview-row {
@@ -1194,7 +1213,7 @@ select:focus-visible {
   margin: 6px 0 0;
   color: #667085;
 }
-.empty-preview .terminal-card > div {
+.empty-preview .activity-log-card > div {
   height: 320px;
 }
 
@@ -1269,24 +1288,24 @@ select:focus-visible {
   justify-self: start;
   margin-top: 8px;
 }
-.terminal-card {
+.activity-log-card {
   border-radius: 12px;
   box-shadow: none;
 }
-.terminal-card header {
+.activity-log-card header {
   padding: 8px 10px;
   font-size: 11px;
 }
-.terminal-card header small {
+.activity-log-card header small {
   margin-left: auto;
   color: #98a2b3;
   font-weight: 600;
 }
-.terminal-card > div {
+.activity-log-card > div {
   height: 265px;
   padding: 8px;
 }
-.terminal-card p {
+.activity-log-card p {
   grid-template-columns: 168px 48px 82px minmax(0, 1fr);
   gap: 6px;
   margin: 0;
@@ -1294,12 +1313,12 @@ select:focus-visible {
   border-bottom: 1px solid #1d2939;
   font-size: 10.5px;
 }
-.terminal-card p code {
+.activity-log-card p code {
   color: #7cd4fd;
   font-family: inherit;
   overflow-wrap: anywhere;
 }
-.terminal-card p span {
+.activity-log-card p span {
   min-width: 0;
   overflow: visible;
   white-space: normal;
@@ -1307,20 +1326,20 @@ select:focus-visible {
   display: grid;
   gap: 3px;
 }
-.terminal-card p span strong {
+.activity-log-card p span strong {
   color: #e4e7ec;
   font-weight: 650;
 }
-.terminal-card p span em {
+.activity-log-card p span em {
   color: #98a2b3;
   font-style: normal;
 }
-.terminal-card p span small,
-.terminal-card p span i {
+.activity-log-card p span small,
+.activity-log-card p span i {
   color: #98a2b3;
   font-style: normal;
 }
-.terminal-card p pre {
+.activity-log-card p pre {
   margin: 2px 0 0;
   padding: 6px 8px;
   background: #0b1220;
@@ -1380,6 +1399,73 @@ select:focus-visible {
 .empty-preview {
   margin-top: 14px;
 }
+.review-list-state {
+  padding: 24px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #fff;
+  color: #667085;
+  font-size: 13px;
+}
+.review-track-list {
+  display: grid;
+  gap: 8px;
+}
+.review-track-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.3fr) minmax(180px, 0.9fr) 150px minmax(220px, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 9px;
+}
+.review-track-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.review-track-row strong,
+.review-track-row b,
+.review-track-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-track-row strong,
+.review-track-row b {
+  color: #101828;
+  font-size: 12px;
+}
+.review-track-row span {
+  color: #667085;
+  font-size: 11px;
+}
+.review-track-row code {
+  width: fit-content;
+  color: #3444c5;
+  background: #eef2ff;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  text-transform: capitalize;
+}
+.review-track-row pre {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #fee4e2;
+  border-radius: 7px;
+  background: #fffbfa;
+  color: #b42318;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .apply-bar {
   bottom: 10px;
   margin-top: 12px;
@@ -1402,8 +1488,11 @@ select:focus-visible {
   .process .button {
     grid-column: 1/3;
   }
-  .terminal-card > div {
+  .activity-log-card > div {
     height: 240px;
+  }
+  .review-track-row {
+    grid-template-columns: 1fr;
   }
   .compact-preview-head {
     display: none;
@@ -1427,21 +1516,21 @@ select:focus-visible {
   border-radius: 999px;
   transition: width 0.2s ease;
 }
-.terminal-card.connected header span {
+.activity-log-card.connected header span {
   background: #12b76a;
   box-shadow:
     14px 0 #fdb022,
     28px 0 #f04438;
 }
-.terminal-card.reconnecting header span,
-.terminal-card.connecting header span {
+.activity-log-card.reconnecting header span,
+.activity-log-card.connecting header span {
   background: #fdb022;
   box-shadow:
     14px 0 #fdb022,
     28px 0 #f04438;
 }
-.terminal-card.reconnecting header small,
-.terminal-card.connecting header small {
+.activity-log-card.reconnecting header small,
+.activity-log-card.connecting header small {
   color: #fedf89;
 }
 .preview-row footer {

@@ -116,7 +116,7 @@ Router
   broadcast channel, artwork/tag-write concurrency limiters, and workflow
   progress.
 - `Workflow` is the frontend-facing process state.
-- `TerminalLine` is a compact log entry exposed in the UI and over SSE.
+- `ActivityLogLine` is a compact log entry exposed in the UI and over SSE.
 
 `src/application/`
 
@@ -186,11 +186,11 @@ It contains:
 - `message`: current human-readable status.
 - `current_file`: file currently being processed.
 - counters for current, total, processed, matched, unmatched, and failed.
-- `terminal_log`: last 500 terminal lines.
+- `activity_log`: last 500 activity log lines.
 - `cancelled`: internal flag skipped during serialization.
 
-`AppState::terminal` appends a terminal line, trims the log to 500 entries, and
-emits a `terminal` event so the frontend can update without waiting for polling.
+`AppState::log` appends an activity log line, trims the log to 500 entries, and
+emits an `activity_log` event so the frontend can update without waiting for polling.
 
 ### Configuration Model
 
@@ -319,7 +319,7 @@ Events:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/events` | Streams workflow and terminal updates as server-sent events. |
+| `GET` | `/events` | Streams workflow and activity log updates as server-sent events. |
 
 ### API Error Handling
 
@@ -359,7 +359,7 @@ When accepted, it:
 1. Deletes existing rows from `tracks`.
 2. Invalidates ready persisted previews.
 3. Resets workflow to `scan`.
-4. Writes a terminal message.
+4. Writes a activity log message.
 5. Spawns `scan_pipeline::run` in a Tokio task.
 
 Files are discovered first and sorted. They are then processed by a bounded
@@ -852,7 +852,7 @@ Build scripts:
   - `MetadataSummary`
   - `PreviewItem`
   - `Preview`
-  - `TerminalLine`
+  - `ActivityLogLine`
   - `Workflow`
 
 ### Live Updates
@@ -869,7 +869,7 @@ On each event:
 
 - The hook parses the server event JSON.
 - It updates the TanStack Query cache for `["workspace"]`.
-- Terminal events append to `terminal_log` and keep the last 500 lines.
+- Activity log events append to `activity_log` and keep the last 500 lines.
 - Preview, finish, failed, and done-like events invalidate workspace and track
   queries.
 - Connection state is exposed as `connecting`, `connected`, or `reconnecting`.
@@ -900,9 +900,9 @@ state refresh path when SSE reconnects.
 
 - Displays active scan/fetch/apply progress and counters.
 
-`Terminal`
+`ActivityLog`
 
-- Displays backend terminal lines from `Workflow.terminal_log`.
+- Displays backend activity log lines from `Workflow.activity_log`.
 
 `PreviewPage`
 
@@ -1031,7 +1031,7 @@ frontend/src/hooks/useEvents.ts
 frontend/src/layouts/Workspace.tsx
 frontend/src/layouts/Flow.tsx
 frontend/src/layouts/ProcessingCard.tsx
-frontend/src/layouts/Terminal.tsx
+frontend/src/features/workflow/components/ActivityLog.tsx
 frontend/src/pages/SettingsPage.tsx
 frontend/src/pages/PreviewPage.tsx
 frontend/src/features/settings/

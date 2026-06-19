@@ -80,7 +80,7 @@ export type Preview = {
   summary?: { write_count: number; duplicate_skipped: number };
 };
 
-export type TerminalLine = {
+export type ActivityLogLine = {
   timestamp: string;
   level: string;
   stage: string;
@@ -103,5 +103,5 @@ export type Workflow = {
   matched: number;
   unmatched: number;
   failed: number;
-  terminal_log: TerminalLine[];
+  activity_log: ActivityLogLine[];
 };

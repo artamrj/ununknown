@@ -1,5 +1,5 @@
 import type { WorkflowViewProps } from "@/features/workflow/types";
-import { Terminal } from "@/features/workflow/components/Terminal";
+import { ActivityLog } from "@/features/workflow/components/ActivityLog";
 import { Button } from "@/shared/components/Button";
 
 export function FailedView({ workflow, eventStatus, onScan }: WorkflowViewProps) {
@@ -11,7 +11,7 @@ export function FailedView({ workflow, eventStatus, onScan }: WorkflowViewProps)
         <p>{workflow.message}</p>
         <Button onClick={onScan}>Start new scan</Button>
       </div>
-      <Terminal lines={workflow.terminal_log || []} status={eventStatus} />
+      <ActivityLog lines={workflow.activity_log || []} status={eventStatus} />
     </section>
   );
 }

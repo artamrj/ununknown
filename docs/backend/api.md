@@ -96,11 +96,11 @@ usable. The apply workflow writes only items whose duplicate action is not
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/events` | Streams workflow and terminal events with server-sent events. |
+| `GET` | `/api/events` | Streams workflow and activity log events with server-sent events. |
 
 Events use the `jobs::Event` shape:
 
-- `kind`: event kind, such as workflow or terminal.
+- `kind`: event kind, such as workflow or activity_log.
 - `stage`: scan, fetch, metadata, artwork, apply, or similar.
 - `phase`: workflow phase when present.
 - `current`, `total`, and `message`: progress values.

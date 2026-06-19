@@ -4,7 +4,7 @@ export type {
   MetadataSummary,
   Preview,
   PreviewItem,
-  TerminalLine,
+  ActivityLogLine,
   Track,
   TrackPage,
   Workflow,

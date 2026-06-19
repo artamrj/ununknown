@@ -211,6 +211,7 @@ pub struct TrackQuery {
     page: Option<i64>,
     page_size: Option<i64>,
     status: Option<String>,
+    view: Option<String>,
     search: Option<String>,
 }
 #[derive(Serialize)]
@@ -448,7 +449,7 @@ fn normalize_duplicate_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::extract::State;
+    use axum::extract::{Query, State};
     use sqlx::SqlitePool;
     use std::sync::Arc;
 
@@ -610,6 +611,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fingerprints, 1);
+    }
+
+    #[tokio::test]
+    async fn track_views_filter_unmatched_and_failed_rows() {
+        let pool = test_pool().await;
+        let now = "2026-06-19T12:00:00Z";
+        for (path, filename, stage, selected, status, error) in [
+            (
+                "/music/selected.mp3",
+                "selected.mp3",
+                "ready",
+                Some(10),
+                "selected",
+                None,
+            ),
+            (
+                "/music/unmatched.mp3",
+                "unmatched.mp3",
+                "ready",
+                None,
+                "selected",
+                None,
+            ),
+            (
+                "/music/review.mp3",
+                "review.mp3",
+                "review",
+                None,
+                "needs_review",
+                None,
+            ),
+            (
+                "/music/failed.mp3",
+                "failed.mp3",
+                "failed",
+                None,
+                "provider_error",
+                Some("provider failed"),
+            ),
+        ] {
+            sqlx::query("INSERT INTO tracks(path,filename,status,error,first_seen_at,last_seen_at,last_scanned_at,stage,selected_candidate_id) VALUES(?,?,?,?,?,?,?,?,?)")
+                .bind(path)
+                .bind(filename)
+                .bind(status)
+                .bind(error)
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .bind(stage)
+                .bind(selected)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let state = Arc::new(AppState::new(Config::default(), pool));
+        let unmatched = tracks::list_tracks(
+            State(state.clone()),
+            Query(TrackQuery {
+                page: None,
+                page_size: None,
+                status: None,
+                view: Some("unmatched".into()),
+                search: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let failed = tracks::list_tracks(
+            State(state),
+            Query(TrackQuery {
+                page: None,
+                page_size: None,
+                status: None,
+                view: Some("failed".into()),
+                search: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let unmatched: Vec<_> = unmatched
+            .items
+            .into_iter()
+            .map(|track| track.track.filename)
+            .collect();
+        let failed: Vec<_> = failed
+            .items
+            .into_iter()
+            .map(|track| track.track.filename)
+            .collect();
+        assert_eq!(unmatched, ["review.mp3", "unmatched.mp3"]);
+        assert_eq!(failed, ["failed.mp3"]);
     }
 
     #[tokio::test]

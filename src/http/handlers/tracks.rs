@@ -7,11 +7,40 @@ pub async fn list_tracks(
     let page = q.page.unwrap_or(1).max(1);
     let size = q.page_size.unwrap_or(100).clamp(20, 200);
     let status = q.status.unwrap_or_default();
+    let view_filter = match q.view.as_deref().unwrap_or_default() {
+        "" => "",
+        "failed" => " AND stage='failed'",
+        "unmatched" => " AND stage IN ('ready','review') AND selected_candidate_id IS NULL",
+        view => return Err(ApiError::validation(format!("unknown track view: {view}"))),
+    };
     let search = format!("%{}%", q.search.unwrap_or_default());
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?)")
-        .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).fetch_one(&s.pool).await?;
-    let tracks: Vec<Track> = sqlx::query_as(&format!("SELECT {} FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?) ORDER BY path LIMIT ? OFFSET ?", queries::TRACK_FIELDS))
-        .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).bind(size).bind((page-1)*size).fetch_all(&s.pool).await?;
+    let total_query = format!(
+        "SELECT count(*) FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?){view_filter}"
+    );
+    let total: i64 = sqlx::query_scalar(&total_query)
+        .bind(&status)
+        .bind(&status)
+        .bind(&search)
+        .bind(&search)
+        .bind(&search)
+        .bind(&search)
+        .fetch_one(&s.pool)
+        .await?;
+    let tracks_query = format!(
+        "SELECT {} FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?){view_filter} ORDER BY path LIMIT ? OFFSET ?",
+        queries::TRACK_FIELDS
+    );
+    let tracks: Vec<Track> = sqlx::query_as(&tracks_query)
+        .bind(&status)
+        .bind(&status)
+        .bind(&search)
+        .bind(&search)
+        .bind(&search)
+        .bind(&search)
+        .bind(size)
+        .bind((page - 1) * size)
+        .fetch_all(&s.pool)
+        .await?;
     let mut result = Vec::with_capacity(tracks.len());
     for track in tracks {
         let candidates = queries::candidates(&s.pool, track.id).await?;

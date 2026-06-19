@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::TerminalEntry;
+use crate::app::ActivityLogEntry;
 use chrono::Utc;
 
 pub async fn stop_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -252,8 +252,8 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         if s.workflow_cancelled().await {
             break;
         }
-        s.terminal_entry(
-            TerminalEntry::new("info", "apply", "Applying metadata changes")
+        s.log_entry(
+            ActivityLogEntry::new("info", "apply", "Applying metadata changes")
                 .file(item.filename.clone())
                 .context(serde_json::json!({
                     "track_id": item.track_id,
@@ -275,8 +275,8 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
                     .await
                     {
                         Ok(bytes) => {
-                            s.terminal_entry(
-                                TerminalEntry::new("ok", "artwork", "Downloaded cover art")
+                            s.log_entry(
+                                ActivityLogEntry::new("ok", "artwork", "Downloaded cover art")
                                     .file(item.filename.clone())
                                     .context(serde_json::json!({"release_id": release_id})),
                             )
@@ -284,13 +284,15 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
                             Some(bytes)
                         }
                         Err(error) => {
-                            s.terminal_entry(
-                                TerminalEntry::new("warn", "artwork", "Cover art download failed")
-                                    .file(item.filename.clone())
-                                    .error(error.as_ref())
-                                    .context(
-                                        serde_json::json!({"release_id": release_id, "url": url}),
-                                    ),
+                            s.log_entry(
+                                ActivityLogEntry::new(
+                                    "warn",
+                                    "artwork",
+                                    "Cover art download failed",
+                                )
+                                .file(item.filename.clone())
+                                .error(error.as_ref())
+                                .context(serde_json::json!({"release_id": release_id, "url": url})),
                             )
                             .await;
                             None
@@ -302,11 +304,15 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
                     {
                         Ok(bytes) => Some(bytes),
                         Err(error) => {
-                            s.terminal_entry(
-                                TerminalEntry::new("warn", "artwork", "Cover art download failed")
-                                    .file(item.filename.clone())
-                                    .error(error.as_ref())
-                                    .context(serde_json::json!({"url": url})),
+                            s.log_entry(
+                                ActivityLogEntry::new(
+                                    "warn",
+                                    "artwork",
+                                    "Cover art download failed",
+                                )
+                                .file(item.filename.clone())
+                                .error(error.as_ref())
+                                .context(serde_json::json!({"url": url})),
                             )
                             .await;
                             None
@@ -324,19 +330,23 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         let target = if cfg.output_mode == OutputMode::Copy {
             if let Some(p) = dest.parent() {
                 if let Err(error) = tokio::fs::create_dir_all(p).await {
-                    s.terminal_entry(
-                        TerminalEntry::new("error", "apply", "Failed to create output directory")
-                            .file(item.filename.clone())
-                            .error(&error)
-                            .context(serde_json::json!({"directory": p.display().to_string()})),
+                    s.log_entry(
+                        ActivityLogEntry::new(
+                            "error",
+                            "apply",
+                            "Failed to create output directory",
+                        )
+                        .file(item.filename.clone())
+                        .error(&error)
+                        .context(serde_json::json!({"directory": p.display().to_string()})),
                     )
                     .await;
                     return Err(error.into());
                 }
             }
             if let Err(error) = tokio::fs::copy(&src, &dest).await {
-                s.terminal_entry(
-                    TerminalEntry::new("error", "apply", "Failed to copy source file")
+                s.log_entry(
+                    ActivityLogEntry::new("error", "apply", "Failed to copy source file")
                         .file(item.filename.clone())
                         .error(&error)
                         .context(serde_json::json!({
@@ -390,8 +400,8 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
                 ("applied", None)
             }
             Err(e) => {
-                s.terminal_entry(
-                    TerminalEntry::new("error", "apply", "Tag writing failed")
+                s.log_entry(
+                    ActivityLogEntry::new("error", "apply", "Tag writing failed")
                         .file(item.filename.clone())
                         .error(e.as_ref())
                         .context(serde_json::json!({"target": target.display().to_string()})),
@@ -428,8 +438,8 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         )
         .await;
         if status == "applied" {
-            s.terminal_entry(
-                TerminalEntry::new("ok", "apply", "Applied metadata changes")
+            s.log_entry(
+                ActivityLogEntry::new("ok", "apply", "Applied metadata changes")
                     .file(item.filename.clone())
                     .context(serde_json::json!({"output": final_path.display().to_string()})),
             )

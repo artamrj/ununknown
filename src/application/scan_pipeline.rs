@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppState, TerminalEntry},
+    app::{ActivityLogEntry, AppState},
     domain::audio,
     infrastructure::{fingerprint_cache, media::fingerprint, providers},
     types::{AutomationMode, WorkflowPhase},
@@ -42,7 +42,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         .set_workflow(WorkflowPhase::Scan, "scan", "Discovering music", 0, 0, None)
         .await;
     state
-        .terminal(
+        .log(
             "info",
             "scan",
             None,
@@ -67,7 +67,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
     files.sort();
     let total = files.len();
     state
-        .terminal(
+        .log(
             "info",
             "scan",
             None,
@@ -76,15 +76,15 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         .await;
     for error in walk_errors {
         state
-            .terminal_entry(
-                TerminalEntry::new("error", "scan", "Input folder walk error").error_text(error),
+            .log_entry(
+                ActivityLogEntry::new("error", "scan", "Input folder walk error").error_text(error),
             )
             .await;
     }
     if total == 0 {
         state
-            .terminal_entry(
-                TerminalEntry::new("warn", "scan", "No supported audio files found")
+            .log_entry(
+                ActivityLogEntry::new("warn", "scan", "No supported audio files found")
                     .detail(format!("Input folder scanned: {}", cfg.input_dir)),
             )
             .await;
@@ -216,7 +216,7 @@ async fn process_file(
         match process(&state, &limits, &persist_tx, &job.path).await {
             Ok(true) => {
                 state
-                    .terminal(
+                    .log(
                         "ok",
                         "fetch",
                         Some(&filename),
@@ -227,7 +227,7 @@ async fn process_file(
             }
             Ok(false) => {
                 state
-                    .terminal(
+                    .log(
                         "warn",
                         "fetch",
                         Some(&filename),
@@ -239,8 +239,8 @@ async fn process_file(
             Err(error) if attempt < cfg.track_attempts => {
                 tracing::warn!(path=%job.path.display(), attempt, "track attempt failed: {error:#}");
                 state
-                    .terminal_entry(
-                        TerminalEntry::new("warn", "fetch", "Track attempt failed; retrying")
+                    .log_entry(
+                        ActivityLogEntry::new("warn", "fetch", "Track attempt failed; retrying")
                             .file(filename.clone())
                             .attempt(attempt as i64)
                             .error_text(format!("{error:#}"))
@@ -256,8 +256,8 @@ async fn process_file(
                 tracing::warn!(path=%job.path.display(), "track failed after retries: {error:#}");
                 state.increment_failed().await;
                 state
-                    .terminal_entry(
-                        TerminalEntry::new("error", "fetch", "Track failed after retries")
+                    .log_entry(
+                        ActivityLogEntry::new("error", "fetch", "Track failed after retries")
                             .file(filename.clone())
                             .attempt(attempt as i64)
                             .error_text(format!("{error:#}"))
@@ -291,7 +291,7 @@ async fn process(
 ) -> Result<bool> {
     let filename = path.file_name().and_then(|v| v.to_str()).unwrap_or("audio");
     state
-        .terminal(
+        .log(
             "info",
             "metadata",
             Some(filename),
@@ -310,7 +310,7 @@ async fn process(
         .with_context(|| format!("failed to read metadata from {}", path.display()))?
     };
     state
-        .terminal(
+        .log(
             "ok",
             "metadata",
             Some(filename),
@@ -323,14 +323,14 @@ async fn process(
         )
         .await;
     state
-        .terminal_entry(
-            TerminalEntry::new("info", "metadata", "Metadata read timing")
+        .log_entry(
+            ActivityLogEntry::new("info", "metadata", "Metadata read timing")
                 .file(filename.to_owned())
                 .duration_ms(started.elapsed().as_millis() as i64),
         )
         .await;
     state
-        .terminal(
+        .log(
             "info",
             "fingerprint",
             Some(filename),
@@ -359,8 +359,8 @@ async fn process(
         ),
     };
     state
-        .terminal_entry(
-            TerminalEntry::new("ok", "fingerprint", message)
+        .log_entry(
+            ActivityLogEntry::new("ok", "fingerprint", message)
                 .file(filename.to_owned())
                 .detail(detail)
                 .duration_ms(started.elapsed().as_millis() as i64),
@@ -369,7 +369,7 @@ async fn process(
     let cfg = state.config.read().await.clone();
     if cfg.acoustid_api_key.is_empty() {
         state
-            .terminal(
+            .log(
                 "warn",
                 "acoustid",
                 Some(filename),
@@ -378,7 +378,7 @@ async fn process(
             .await;
     } else {
         state
-            .terminal(
+            .log(
                 "info",
                 "acoustid",
                 Some(filename),
@@ -387,7 +387,7 @@ async fn process(
             .await;
     }
     state
-        .terminal(
+        .log(
             "info",
             "musicbrainz",
             Some(filename),
@@ -396,7 +396,7 @@ async fn process(
         .await;
     let candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
     state
-        .terminal(
+        .log(
             "info",
             "musicbrainz",
             Some(filename),
@@ -409,7 +409,7 @@ async fn process(
     if cfg.automation_mode == AutomationMode::Manual {
         state.increment_unmatched().await;
         state
-            .terminal(
+            .log(
                 "warn",
                 "match",
                 Some(filename),
@@ -427,7 +427,7 @@ async fn process(
     let Some(candidate) = best.filter(|c| c.score >= threshold) else {
         state.increment_unmatched().await;
         state
-            .terminal(
+            .log(
                 "warn",
                 "match",
                 Some(filename),
@@ -437,7 +437,7 @@ async fn process(
         return Ok(false);
     };
     state
-        .terminal(
+        .log(
             "ok",
             "match",
             Some(filename),
@@ -488,8 +488,8 @@ async fn identify(
             .await?
         };
         state
-            .terminal_entry(
-                TerminalEntry::new(
+            .log_entry(
+                ActivityLogEntry::new(
                     "info",
                     "acoustid",
                     format!("AcoustID returned {} hit(s)", hits.len()),
@@ -508,8 +508,8 @@ async fn identify(
             )
             .await?;
             state
-                .terminal_entry(
-                    TerminalEntry::new("info", "musicbrainz", "Fetched recording details")
+                .log_entry(
+                    ActivityLogEntry::new("info", "musicbrainz", "Fetched recording details")
                         .file(filename.to_owned())
                         .duration_ms(started.elapsed().as_millis() as i64)
                         .context(serde_json::json!({"recording_id": hit.recording_id})),
@@ -549,8 +549,8 @@ async fn identify(
                 out.push(candidate);
             }
             state
-                .terminal_entry(
-                    TerminalEntry::new(
+                .log_entry(
+                    ActivityLogEntry::new(
                         "info",
                         "musicbrainz",
                         format!("Tag search returned {} candidate(s)", out.len()),
@@ -593,8 +593,8 @@ async fn db_writer(
         };
         if let Some(error) = &failed {
             state
-                .terminal_entry(
-                    TerminalEntry::new("error", "db", "Failed to persist matched candidates")
+                .log_entry(
+                    ActivityLogEntry::new("error", "db", "Failed to persist matched candidates")
                         .error(error.as_ref())
                         .context(serde_json::json!({"batch_size": batch.len()})),
                 )

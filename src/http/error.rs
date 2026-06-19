@@ -34,20 +34,12 @@ impl ApiError {
         Self::Provider(message.into())
     }
 
-    pub fn io(message: impl Into<String>) -> Self {
-        Self::Io(message.into())
-    }
-
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden(message.into())
     }
 
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(message.into())
-    }
-
-    pub fn internal(error: impl Into<anyhow::Error>) -> Self {
-        Self::Internal(error.into())
     }
 
     fn status(&self) -> StatusCode {
@@ -165,11 +157,11 @@ mod tests {
             ),
             (ApiError::forbidden("secret issue"), StatusCode::FORBIDDEN),
             (
-                ApiError::io("disk failed"),
+                ApiError::Io("disk failed".into()),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
             (
-                ApiError::internal(anyhow::anyhow!("bug")),
+                ApiError::Internal(anyhow::anyhow!("bug")),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ];

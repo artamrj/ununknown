@@ -16,13 +16,13 @@ pub struct Workflow {
     pub matched: usize,
     pub unmatched: usize,
     pub failed: usize,
-    pub terminal_log: Vec<TerminalLine>,
+    pub activity_log: Vec<ActivityLogLine>,
     #[serde(skip)]
     pub cancelled: bool,
 }
 
 #[derive(Clone, Default, Serialize)]
-pub struct TerminalLine {
+pub struct ActivityLogLine {
     pub timestamp: String,
     pub level: String,
     pub stage: String,
@@ -41,7 +41,7 @@ pub struct TerminalLine {
 }
 
 #[derive(Clone, Default)]
-pub struct TerminalEntry {
+pub struct ActivityLogEntry {
     pub level: String,
     pub stage: String,
     pub file: Option<String>,
@@ -53,7 +53,7 @@ pub struct TerminalEntry {
     pub context: Option<serde_json::Value>,
 }
 
-impl TerminalEntry {
+impl ActivityLogEntry {
     pub fn new(level: &str, stage: &str, message: impl Into<String>) -> Self {
         Self {
             level: level.into(),
@@ -265,14 +265,14 @@ impl AppState {
         *self.tag_writes.write().await = Arc::new(Semaphore::new(config.tag_write_concurrency));
     }
 
-    pub async fn terminal(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {
-        let mut entry = TerminalEntry::new(level, stage, message);
+    pub async fn log(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {
+        let mut entry = ActivityLogEntry::new(level, stage, message);
         entry.file = file.map(str::to_owned);
-        self.terminal_entry(entry).await;
+        self.log_entry(entry).await;
     }
 
-    pub async fn terminal_entry(&self, entry: TerminalEntry) {
-        let line = TerminalLine {
+    pub async fn log_entry(&self, entry: ActivityLogEntry) {
+        let line = ActivityLogLine {
             timestamp: Utc::now().to_rfc3339(),
             level: entry.level,
             stage: entry.stage,
@@ -285,10 +285,10 @@ impl AppState {
             context: entry.context,
         };
         let mut workflow = self.workflow.write().await;
-        workflow.terminal_log.push(line.clone());
-        let overflow = workflow.terminal_log.len().saturating_sub(500);
+        workflow.activity_log.push(line.clone());
+        let overflow = workflow.activity_log.len().saturating_sub(500);
         if overflow > 0 {
-            workflow.terminal_log.drain(0..overflow);
+            workflow.activity_log.drain(0..overflow);
         }
         let phase = workflow.phase;
         let current_file = workflow.current_file.clone();
@@ -300,7 +300,7 @@ impl AppState {
         let failed = workflow.failed as i64;
         drop(workflow);
         let _ = self.events.send(jobs::Event {
-            kind: "terminal".into(),
+            kind: "activity_log".into(),
             stage: Some(line.stage.clone()),
             level: Some(line.level),
             file: line.file,
@@ -328,8 +328,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_line_serializes_structured_debug_fields() {
-        let line = TerminalLine {
+    fn activity_log_line_serializes_structured_debug_fields() {
+        let line = ActivityLogLine {
             timestamp: "2026-06-19T12:00:00Z".into(),
             level: "error".into(),
             stage: "fingerprint".into(),

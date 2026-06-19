@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { TerminalLine, Workflow } from "@/api";
+import type { ActivityLogLine, Workflow } from "@/api";
 
 type ServerEvent = {
   kind: string;
@@ -36,7 +36,7 @@ const emptyWorkflow = (): Workflow => ({
   matched: 0,
   unmatched: 0,
   failed: 0,
-  terminal_log: [],
+  activity_log: [],
 });
 
 export function useEvents(): EventStatus {
@@ -49,8 +49,8 @@ export function useEvents(): EventStatus {
       const event = JSON.parse(message.data) as ServerEvent;
       queryClient.setQueryData<Workflow>(["workspace"], (current) => {
         current = current || emptyWorkflow();
-        if (event.kind === "terminal") {
-          const line: TerminalLine = {
+        if (event.kind === "activity_log" || event.kind === "terminal") {
+          const line: ActivityLogLine = {
             timestamp: event.timestamp || new Date().toISOString(),
             level: event.level || "info",
             stage: event.stage || "fetch",
@@ -75,7 +75,7 @@ export function useEvents(): EventStatus {
             matched: event.matched ?? current.matched,
             unmatched: event.unmatched ?? current.unmatched,
             failed: event.failed ?? current.failed,
-            terminal_log: [...(current.terminal_log || []), line].slice(-500),
+            activity_log: [...(current.activity_log || []), line].slice(-500),
           };
         }
         const phase =

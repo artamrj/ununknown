@@ -14,11 +14,11 @@ shared workflow state and emit events to `/api/events`.
 - `current_file`: file currently being processed.
 - progress counters: `current`, `total`, `processed`, `matched`, `unmatched`,
   and `failed`.
-- `terminal_log`: recent terminal-style log lines.
+- `activity_log`: recent activity log lines.
 - `cancelled`: internal flag used by scan/apply stop endpoints.
 
-`AppState::terminal_entry()` appends a terminal line, keeps the latest 500
-lines, and emits a terminal event.
+`AppState::log_entry()` appends an activity log line, keeps the latest 500
+lines, and emits an activity_log event.
 
 ## Scan
 
@@ -115,7 +115,7 @@ For each preview item, apply:
      otherwise.
 5. Writes tags through `src/infrastructure/media/tag_writer.rs`.
 6. Uses semaphores to limit artwork downloads and tag writes.
-7. Emits terminal and workflow events.
+7. Emits activity log and workflow events.
 
 Some formats, such as WAV and AIFF, are treated cautiously in preview warnings.
 
@@ -129,7 +129,7 @@ before the workflow stops.
 ## Events
 
 `/api/events` streams `jobs::Event` values as server-sent events. Events are
-sent for workflow progress and terminal log entries.
+sent for workflow progress and activity log entries.
 
 The frontend uses this stream to update progress bars, counts, current file,
-and terminal output without repeatedly polling the workspace endpoint.
+and activity log output without repeatedly polling the workspace endpoint.

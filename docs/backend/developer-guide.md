@@ -94,7 +94,7 @@ not depend on provider-specific JSON.
 Use the shared `reqwest::Client` from `AppState`. Cache expensive or repeated
 responses in `provider_cache` when useful.
 
-Provider errors should become useful terminal events during scan/apply so the
+Provider errors should become useful activity log events during scan/apply so the
 frontend can show what failed.
 
 ## Debug Failed Scans
@@ -106,7 +106,7 @@ Check these first:
 - Does `fpcalc` exist? In Docker, run `which fpcalc` inside the container.
 - Is `UNUNKNOWN_ACOUSTID_API_KEY` configured if fingerprint matching is needed?
 - Is `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` valid?
-- Look at `/api/workspace` and the terminal log from `/api/events`.
+- Look at `/api/workspace` and the activity log from `/api/events`.
 
 `POST /api/scan/start` clears the previous temporary track workspace. Do not use
 it if you are trying to inspect old track rows.
