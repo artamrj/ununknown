@@ -44,6 +44,7 @@ pub async fn template_preview(
     };
     let sample_candidate = Candidate {
         id: Some(0),
+        provider: "musicbrainz".into(),
         title: "Song Title".into(),
         artist: "Artist".into(),
         album: Some("Album".into()),

@@ -1,12 +1,17 @@
 pub mod acoustid;
 pub mod cover_art_archive;
+pub mod discogs;
+pub mod lastfm;
 pub mod musicbrainz;
+pub mod theaudiodb;
+pub mod wikidata;
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: Option<i64>,
+    pub provider: String,
     pub title: String,
     pub artist: String,
     pub album: Option<String>,

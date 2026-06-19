@@ -74,20 +74,6 @@ pub fn score(input: CandidateInput<'_>) -> ScoreBreakdown {
     }
 }
 
-pub fn text_score(current: &AudioInfo, title: &str, artist: &str) -> f64 {
-    let title_score = current
-        .title
-        .as_deref()
-        .map(|value| text_similarity(value, title))
-        .unwrap_or_default();
-    let artist_score = current
-        .artist
-        .as_deref()
-        .map(|value| text_similarity(value, artist))
-        .unwrap_or_default();
-    ((title_score * 60.0) + (artist_score * 30.0)).clamp(0.0, 90.0)
-}
-
 pub fn auto_selectable(
     top_score: f64,
     second_score: Option<f64>,

@@ -2,7 +2,7 @@ use crate::{
     app::{ActivityLogEntry, AppState},
     domain::audio,
     infrastructure::{fingerprint_cache, media::fingerprint, providers},
-    types::{AutomationMode, WorkflowPhase},
+    types::{AutomationMode, MatchingStrategy, ProviderMode, WorkflowPhase},
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
@@ -503,113 +503,575 @@ async fn identify(
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
     let mut out = Vec::new();
-    if !cfg.acoustid_key().is_empty()
-        && cfg.metadata_sources.acoustid.enabled
-        && cfg.metadata_sources.musicbrainz.enabled
-    {
-        let started = Instant::now();
-        let hits = {
-            let _permit = limits.acoustid.acquire().await?;
-            providers::acoustid::lookup(
-                &state.pool,
-                &state.client,
-                cfg.acoustid_key(),
+    let primary_modes = [ProviderMode::Primary, ProviderMode::Parallel];
+    let fallback_modes = [ProviderMode::Fallback];
+    let all_modes = [
+        ProviderMode::Primary,
+        ProviderMode::Fallback,
+        ProviderMode::Parallel,
+    ];
+
+    match cfg.matching_strategy {
+        MatchingStrategy::Aggressive => {
+            out.extend(
+                query_candidate_modes(
+                    state,
+                    cfg,
+                    limits,
+                    fingerprint,
+                    duration,
+                    current,
+                    filename,
+                    &all_modes,
+                )
+                .await?,
+            );
+        }
+        MatchingStrategy::Safe => {
+            out.extend(
+                query_candidate_modes(
+                    state,
+                    cfg,
+                    limits,
+                    fingerprint,
+                    duration,
+                    current,
+                    filename,
+                    &primary_modes,
+                )
+                .await?,
+            );
+            if out.is_empty() {
+                out.extend(
+                    query_candidate_modes(
+                        state,
+                        cfg,
+                        limits,
+                        fingerprint,
+                        duration,
+                        current,
+                        filename,
+                        &fallback_modes,
+                    )
+                    .await?,
+                );
+            }
+        }
+        MatchingStrategy::Balanced => {
+            out.extend(
+                query_candidate_modes(
+                    state,
+                    cfg,
+                    limits,
+                    fingerprint,
+                    duration,
+                    current,
+                    filename,
+                    &primary_modes,
+                )
+                .await?,
+            );
+            let best = out
+                .iter()
+                .map(|candidate| candidate.score)
+                .fold(0.0, f64::max);
+            if out.is_empty() || best < 85.0 {
+                out.extend(
+                    query_candidate_modes(
+                        state,
+                        cfg,
+                        limits,
+                        fingerprint,
+                        duration,
+                        current,
+                        filename,
+                        &fallback_modes,
+                    )
+                    .await?,
+                );
+            }
+        }
+    }
+    apply_enrichment_sources(state, cfg, current, filename, &mut out).await;
+    apply_source_agreement(&mut out)?;
+    Ok(out)
+}
+
+async fn query_candidate_modes(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
+    fingerprint: &str,
+    duration: f64,
+    current: &audio::AudioInfo,
+    filename: &str,
+    modes: &[ProviderMode],
+) -> Result<Vec<providers::Candidate>> {
+    let mut out = Vec::new();
+    if modes.contains(&cfg.metadata_sources.acoustid.mode) {
+        out.extend(
+            query_musicbrainz_acoustid(
+                state,
+                cfg,
+                limits,
                 fingerprint,
                 duration,
-            )
-            .await?
-        };
-        state
-            .log_entry(
-                ActivityLogEntry::new(
-                    "info",
-                    "acoustid",
-                    format!("AcoustID returned {} hit(s)", hits.len()),
-                )
-                .file(filename.to_owned())
-                .duration_ms(started.elapsed().as_millis() as i64),
-            )
-            .await;
-        for hit in hits.into_iter().take(3) {
-            let started = Instant::now();
-            let mut candidate = providers::musicbrainz::recording(
-                &state.pool,
-                &state.client,
-                cfg.musicbrainz_user_agent(),
-                &hit.recording_id,
-            )
-            .await?;
-            state
-                .log_entry(
-                    ActivityLogEntry::new("info", "musicbrainz", "Fetched recording details")
-                        .file(filename.to_owned())
-                        .duration_ms(started.elapsed().as_millis() as i64)
-                        .context(serde_json::json!({"recording_id": hit.recording_id})),
-                )
-                .await;
-            let candidate_duration = candidate.duration_delta;
-            let duration_delta = candidate_duration.map(|value| (current.duration - value).abs());
-            let breakdown = crate::domain::matcher::score(crate::domain::matcher::CandidateInput {
-                acoustid_score: hit.score,
                 current,
-                title: &candidate.title,
-                artist: &candidate.artist,
-                album: candidate.album.as_deref(),
-                candidate_duration,
-                is_compilation: candidate.is_compilation,
-                compilation_preference: cfg.compilation_preference,
-            });
-            candidate.score = breakdown.final_score;
-            candidate.duration_delta = duration_delta;
-            candidate.score_breakdown = Some(serde_json::to_string(&breakdown)?);
-            out.push(candidate);
-        }
-    }
-    if out.is_empty() && cfg.metadata_sources.musicbrainz.enabled {
-        let title = current
-            .title
-            .as_deref()
-            .filter(|value| !value.trim().is_empty());
-        if let Some(title) = title {
-            let started = Instant::now();
-            for mut candidate in providers::musicbrainz::search(
-                &state.pool,
-                &state.client,
-                cfg.musicbrainz_user_agent(),
-                title,
-                current.artist.as_deref(),
+                filename,
             )
-            .await?
-            {
-                candidate.score = crate::domain::matcher::text_score(
-                    current,
-                    &candidate.title,
-                    &candidate.artist,
-                );
-                candidate.score_breakdown = Some(
-                    serde_json::json!({
-                        "source": "musicbrainz_text_search",
-                        "final_score": candidate.score
-                    })
-                    .to_string(),
-                );
-                out.push(candidate);
-            }
-            state
-                .log_entry(
-                    ActivityLogEntry::new(
-                        "info",
-                        "musicbrainz",
-                        format!("Tag search returned {} candidate(s)", out.len()),
-                    )
-                    .file(filename.to_owned())
-                    .duration_ms(started.elapsed().as_millis() as i64)
-                    .context(serde_json::json!({"title": title, "artist": current.artist})),
-                )
-                .await;
-        }
+            .await?,
+        );
+    }
+    if modes.contains(&cfg.metadata_sources.musicbrainz.mode) {
+        out.extend(query_musicbrainz_text(state, cfg, current, filename).await?);
+    }
+    if modes.contains(&cfg.metadata_sources.discogs.mode) {
+        out.extend(query_discogs(state, cfg, current, filename).await);
+    }
+    if modes.contains(&cfg.metadata_sources.lastfm.mode) {
+        out.extend(query_lastfm(state, cfg, current, filename).await);
+    }
+    if modes.contains(&cfg.metadata_sources.theaudiodb.mode) {
+        out.extend(query_theaudiodb(state, cfg, current, filename).await);
+    }
+    if modes.contains(&cfg.metadata_sources.wikidata.mode) {
+        out.extend(query_wikidata(state, cfg, current, filename).await);
     }
     Ok(out)
+}
+
+async fn query_musicbrainz_acoustid(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
+    fingerprint: &str,
+    duration: f64,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Result<Vec<providers::Candidate>> {
+    let mut out = Vec::new();
+    if !cfg.metadata_sources.acoustid.enabled || !cfg.metadata_sources.musicbrainz.enabled {
+        return Ok(out);
+    }
+    if cfg.acoustid_key().is_empty() {
+        log_provider_skip(state, filename, "acoustid", "AcoustID API key is missing").await;
+        return Ok(out);
+    }
+    let started = Instant::now();
+    let hits = {
+        let _permit = limits.acoustid.acquire().await?;
+        providers::acoustid::lookup(
+            &state.pool,
+            &state.client,
+            cfg.acoustid_key(),
+            fingerprint,
+            duration,
+        )
+        .await?
+    };
+    state
+        .log_entry(
+            ActivityLogEntry::new(
+                "info",
+                "acoustid",
+                format!("AcoustID returned {} hit(s)", hits.len()),
+            )
+            .file(filename.to_owned())
+            .duration_ms(started.elapsed().as_millis() as i64),
+        )
+        .await;
+    for hit in hits.into_iter().take(3) {
+        let started = Instant::now();
+        let mut candidate = providers::musicbrainz::recording(
+            &state.pool,
+            &state.client,
+            cfg.musicbrainz_user_agent(),
+            &hit.recording_id,
+        )
+        .await?;
+        state
+            .log_entry(
+                ActivityLogEntry::new("info", "musicbrainz", "Fetched recording details")
+                    .file(filename.to_owned())
+                    .duration_ms(started.elapsed().as_millis() as i64)
+                    .context(serde_json::json!({"recording_id": hit.recording_id})),
+            )
+            .await;
+        let candidate_duration = candidate.duration_delta;
+        let duration_delta = candidate_duration.map(|value| (current.duration - value).abs());
+        let breakdown = crate::domain::matcher::score(crate::domain::matcher::CandidateInput {
+            acoustid_score: hit.score,
+            current,
+            title: &candidate.title,
+            artist: &candidate.artist,
+            album: candidate.album.as_deref(),
+            candidate_duration,
+            is_compilation: candidate.is_compilation,
+            compilation_preference: cfg.compilation_preference,
+        });
+        candidate.score = breakdown.final_score;
+        candidate.duration_delta = duration_delta;
+        candidate.score_breakdown = Some(serde_json::to_string(&breakdown)?);
+        out.push(candidate);
+    }
+    Ok(out)
+}
+
+async fn query_musicbrainz_text(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Result<Vec<providers::Candidate>> {
+    let mut out = Vec::new();
+    if !cfg.metadata_sources.musicbrainz.enabled {
+        return Ok(out);
+    }
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(out);
+    };
+    let started = Instant::now();
+    for mut candidate in providers::musicbrainz::search(
+        &state.pool,
+        &state.client,
+        cfg.musicbrainz_user_agent(),
+        title,
+        current.artist.as_deref(),
+    )
+    .await?
+    {
+        score_text_candidate(&mut candidate, current, "musicbrainz_text_search")?;
+        out.push(candidate);
+    }
+    state
+        .log_entry(
+            ActivityLogEntry::new(
+                "info",
+                "musicbrainz",
+                format!("MusicBrainz tag search returned {} candidate(s)", out.len()),
+            )
+            .file(filename.to_owned())
+            .duration_ms(started.elapsed().as_millis() as i64)
+            .context(serde_json::json!({"title": title, "artist": current.artist})),
+        )
+        .await;
+    Ok(out)
+}
+
+async fn query_discogs(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if !cfg.metadata_sources.discogs.enabled {
+        return Vec::new();
+    }
+    let token = cfg
+        .metadata_sources
+        .discogs
+        .token
+        .as_str()
+        .trim()
+        .is_empty()
+        .then_some(cfg.metadata_sources.discogs.api_key.as_str())
+        .unwrap_or(cfg.metadata_sources.discogs.token.as_str());
+    if token.trim().is_empty() {
+        log_provider_skip(
+            state,
+            filename,
+            "discogs",
+            "Discogs token/API key is missing",
+        )
+        .await;
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match providers::discogs::search(&state.pool, &state.client, Some(token), current).await {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "discogs_release_search");
+            }
+            log_provider_count(state, filename, "discogs", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            log_provider_error(state, filename, "discogs", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn query_lastfm(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if !cfg.metadata_sources.lastfm.enabled {
+        return Vec::new();
+    }
+    let api_key = cfg.metadata_sources.lastfm.api_key.trim();
+    if api_key.is_empty() {
+        log_provider_skip(state, filename, "lastfm", "Last.fm API key is missing").await;
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match providers::lastfm::search(&state.pool, &state.client, api_key, current).await {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "lastfm_track_search");
+            }
+            log_provider_count(state, filename, "lastfm", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            log_provider_error(state, filename, "lastfm", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn query_theaudiodb(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if !cfg.metadata_sources.theaudiodb.enabled {
+        return Vec::new();
+    }
+    let api_key = cfg.metadata_sources.theaudiodb.api_key.trim();
+    if api_key.is_empty() {
+        log_provider_skip(
+            state,
+            filename,
+            "theaudiodb",
+            "TheAudioDB API key is missing",
+        )
+        .await;
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match providers::theaudiodb::search(&state.pool, &state.client, api_key, current).await {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "theaudiodb_track_search");
+            }
+            log_provider_count(state, filename, "theaudiodb", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            log_provider_error(state, filename, "theaudiodb", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn query_wikidata(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if !cfg.metadata_sources.wikidata.enabled {
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match providers::wikidata::search(&state.pool, &state.client, current).await {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "wikidata_sparql");
+            }
+            log_provider_count(state, filename, "wikidata", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            log_provider_error(state, filename, "wikidata", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn apply_enrichment_sources(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+    candidates: &mut [providers::Candidate],
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    let mut enrichment = Vec::new();
+    if cfg.metadata_sources.discogs.mode == ProviderMode::EnrichmentOnly {
+        enrichment.extend(query_discogs(state, cfg, current, filename).await);
+    }
+    if cfg.metadata_sources.lastfm.mode == ProviderMode::EnrichmentOnly {
+        enrichment.extend(query_lastfm(state, cfg, current, filename).await);
+    }
+    if cfg.metadata_sources.theaudiodb.mode == ProviderMode::EnrichmentOnly {
+        enrichment.extend(query_theaudiodb(state, cfg, current, filename).await);
+    }
+    if cfg.metadata_sources.wikidata.mode == ProviderMode::EnrichmentOnly {
+        enrichment.extend(query_wikidata(state, cfg, current, filename).await);
+    }
+    if enrichment.is_empty() {
+        return;
+    }
+    for candidate in candidates {
+        let mut sources = candidate_source_list(candidate);
+        for evidence in &enrichment {
+            if candidate_agrees(candidate, evidence) {
+                sources.push(provider_display_name(&evidence.provider).to_owned());
+                candidate.score = (candidate.score + 2.0).min(99.0);
+                if candidate.genre.is_none() {
+                    candidate.genre = evidence.genre.clone();
+                }
+                if candidate.cover_url.is_none() {
+                    candidate.cover_url = evidence.cover_url.clone();
+                }
+            }
+        }
+        set_score_sources(candidate, sources).ok();
+    }
+}
+
+fn score_text_candidate(
+    candidate: &mut providers::Candidate,
+    current: &audio::AudioInfo,
+    source: &str,
+) -> Result<()> {
+    let score = crate::domain::matcher::score(crate::domain::matcher::CandidateInput {
+        acoustid_score: 1.0,
+        current,
+        title: &candidate.title,
+        artist: &candidate.artist,
+        album: candidate.album.as_deref(),
+        candidate_duration: candidate.duration_delta,
+        is_compilation: candidate.is_compilation,
+        compilation_preference: crate::types::CompilationPreference::Allow,
+    });
+    candidate.score = score.final_score.min(90.0);
+    let mut value = serde_json::to_value(&score)?;
+    value["source"] = serde_json::Value::String(source.to_owned());
+    value["sources"] = serde_json::json!([provider_display_name(&candidate.provider)]);
+    candidate.score_breakdown = Some(value.to_string());
+    Ok(())
+}
+
+fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()> {
+    let snapshot = candidates.to_vec();
+    for candidate in candidates {
+        let mut sources = candidate_source_list(candidate);
+        for other in &snapshot {
+            if other.provider == candidate.provider {
+                continue;
+            }
+            if candidate_agrees(candidate, other) {
+                sources.push(provider_display_name(&other.provider).to_owned());
+                candidate.score = (candidate.score + 3.0).min(99.0);
+            } else if text_close(&candidate.title, &other.title, 0.55)
+                && !text_close(&candidate.artist, &other.artist, 0.55)
+            {
+                candidate.score = (candidate.score - 4.0).max(0.0);
+            }
+        }
+        set_score_sources(candidate, sources)?;
+    }
+    Ok(())
+}
+
+fn candidate_agrees(left: &providers::Candidate, right: &providers::Candidate) -> bool {
+    text_close(&left.title, &right.title, 0.82)
+        && text_close(&left.artist, &right.artist, 0.75)
+        && match (left.album.as_deref(), right.album.as_deref()) {
+            (Some(left_album), Some(right_album)) => text_close(left_album, right_album, 0.65),
+            _ => true,
+        }
+}
+
+fn text_close(left: &str, right: &str, threshold: f64) -> bool {
+    if left.trim().is_empty() || right.trim().is_empty() {
+        return false;
+    }
+    strsim::normalized_levenshtein(&left.to_ascii_lowercase(), &right.to_ascii_lowercase())
+        >= threshold
+}
+
+fn candidate_source_list(candidate: &providers::Candidate) -> Vec<String> {
+    let mut out = vec![provider_display_name(&candidate.provider).to_owned()];
+    if let Some(value) = candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        && let Some(sources) = value["sources"].as_array()
+    {
+        out.extend(
+            sources
+                .iter()
+                .filter_map(|source| source.as_str().map(str::to_owned)),
+        );
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn set_score_sources(candidate: &mut providers::Candidate, sources: Vec<String>) -> Result<()> {
+    let mut value = candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    value["sources"] = serde_json::to_value(sources)?;
+    value["source_agreement"] = serde_json::json!(value["sources"].as_array().map_or(0, Vec::len));
+    value["final_score"] = serde_json::json!(candidate.score);
+    candidate.score_breakdown = Some(value.to_string());
+    Ok(())
+}
+
+async fn log_provider_count(
+    state: &Arc<AppState>,
+    filename: &str,
+    provider: &str,
+    count: usize,
+    started: Instant,
+) {
+    state
+        .log_entry(
+            ActivityLogEntry::new(
+                "info",
+                provider,
+                format!("{provider} returned {count} candidate(s)"),
+            )
+            .file(filename.to_owned())
+            .duration_ms(started.elapsed().as_millis() as i64),
+        )
+        .await;
+}
+
+async fn log_provider_skip(state: &Arc<AppState>, filename: &str, provider: &str, reason: &str) {
+    state.log("warn", provider, Some(filename), reason).await;
+}
+
+async fn log_provider_error(
+    state: &Arc<AppState>,
+    filename: &str,
+    provider: &str,
+    error: anyhow::Error,
+) {
+    state
+        .log_entry(
+            ActivityLogEntry::new("error", provider, "Provider lookup failed")
+                .file(filename.to_owned())
+                .error_text(format!("{error:#}")),
+        )
+        .await;
 }
 
 async fn db_writer(
@@ -703,7 +1165,11 @@ async fn insert_candidate(
 ) -> Result<i64> {
     let candidate_id = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,musicbrainz_recording_id,musicbrainz_release_id,release_country,release_date,release_type,release_secondary_types,is_compilation,duration_delta,score_breakdown,musicbrainz_artist_id,musicbrainz_album_artist_id,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(track_id)
-        .bind("musicbrainz")
+        .bind(if c.provider.is_empty() {
+            "musicbrainz"
+        } else {
+            c.provider.as_str()
+        })
         .bind(&c.title)
         .bind(&c.artist)
         .bind(&c.album)
@@ -737,10 +1203,14 @@ async fn insert_candidate(
     insert_candidate_source(
         tx,
         candidate_id,
-        "MusicBrainz",
+        provider_display_name(if c.provider.is_empty() {
+            "musicbrainz"
+        } else {
+            c.provider.as_str()
+        }),
         Some(c.score),
         serde_json::json!({
-            "reason": "Canonical recording and release metadata",
+            "reason": provider_reason(if c.provider.is_empty() { "musicbrainz" } else { c.provider.as_str() }),
             "recording_id": c.recording_id,
             "release_id": c.release_id
         }),
@@ -764,6 +1234,27 @@ async fn insert_candidate(
         .await?;
     }
     Ok(candidate_id)
+}
+
+fn provider_display_name(provider: &str) -> &str {
+    match provider {
+        "acoustid" => "AcoustID",
+        "discogs" => "Discogs",
+        "lastfm" => "Last.fm",
+        "theaudiodb" => "TheAudioDB",
+        "wikidata" => "Wikidata",
+        _ => "MusicBrainz",
+    }
+}
+
+fn provider_reason(provider: &str) -> &str {
+    match provider {
+        "discogs" => "Release, label, catalog, and physical media metadata",
+        "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
+        "theaudiodb" => "Track, album, genre, and image enrichment",
+        "wikidata" => "Structured identifier and external-link evidence",
+        _ => "Canonical recording and release metadata",
+    }
 }
 
 async fn insert_candidate_source(
@@ -1013,6 +1504,7 @@ mod tests {
             ..Default::default()
         };
         let candidates = vec![providers::Candidate {
+            provider: "musicbrainz".into(),
             title: "Song".into(),
             artist: "Artist".into(),
             album: Some("Album".into()),
@@ -1034,5 +1526,78 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(providers, ["AcoustID", "MusicBrainz"]);
+    }
+
+    #[test]
+    fn source_agreement_adds_provider_evidence_and_score() {
+        let mut candidates = vec![
+            providers::Candidate {
+                provider: "discogs".into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: Some("Album".into()),
+                score: 82.0,
+                score_breakdown: Some(serde_json::json!({"sources":["Discogs"]}).to_string()),
+                ..Default::default()
+            },
+            providers::Candidate {
+                provider: "lastfm".into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: Some("Album".into()),
+                score: 80.0,
+                score_breakdown: Some(serde_json::json!({"sources":["Last.fm"]}).to_string()),
+                ..Default::default()
+            },
+        ];
+
+        apply_source_agreement(&mut candidates).unwrap();
+
+        assert!(candidates[0].score > 82.0);
+        let why: serde_json::Value =
+            serde_json::from_str(candidates[0].score_breakdown.as_deref().unwrap()).unwrap();
+        assert!(
+            why["sources"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("Discogs"))
+        );
+        assert!(
+            why["sources"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("Last.fm"))
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_review_keeps_non_musicbrainz_provider() {
+        let pool = test_pool().await;
+        let path = Path::new("/music/input/discogs-review.mp3");
+        let info = audio::AudioInfo {
+            title: Some("Song".into()),
+            artist: Some("Artist".into()),
+            duration: 180.0,
+            format: "mp3".into(),
+            ..Default::default()
+        };
+        let candidates = vec![providers::Candidate {
+            provider: "discogs".into(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            score: 84.0,
+            raw_json: "{}".into(),
+            ..Default::default()
+        }];
+
+        persist_review(&pool, path, &info, &candidates, "Review required")
+            .await
+            .unwrap();
+
+        let provider: String = sqlx::query_scalar("SELECT provider FROM candidates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(provider, "discogs");
     }
 }

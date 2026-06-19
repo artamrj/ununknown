@@ -105,6 +105,7 @@ impl CandidateRow {
     pub(super) fn value(&self) -> Candidate {
         Candidate {
             id: Some(self.id.0),
+            provider: self.provider.clone(),
             title: self.title.clone().unwrap_or_default(),
             artist: self.artist.clone().unwrap_or_default(),
             album: self.album.clone(),

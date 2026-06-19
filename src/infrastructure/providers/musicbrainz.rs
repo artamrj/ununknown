@@ -119,6 +119,7 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
             })
         });
     Candidate {
+        provider: "musicbrainz".into(),
         title: raw["title"].as_str().unwrap_or("Unknown Title").into(),
         artist: artist
             .and_then(|v| v["name"].as_str())
@@ -222,6 +223,7 @@ fn candidate_from_search(raw: &Value) -> Candidate {
         .and_then(|value| value["id"].as_str())
         .map(str::to_owned);
     Candidate {
+        provider: "musicbrainz".into(),
         title: raw["title"].as_str().unwrap_or("Unknown Title").into(),
         artist: artist
             .and_then(|value| value["name"].as_str())

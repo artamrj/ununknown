@@ -249,8 +249,11 @@ function CandidateOption({
   onSelect: () => void;
 }) {
   const why = parseWhy(candidate.score_breakdown);
+  const sourceBadges = Array.isArray(why?.sources)
+    ? why.sources.map((source) => String(source))
+    : [providerLabel(candidate.provider)];
   const badges = [
-    providerLabel(candidate.provider),
+    ...sourceBadges,
     why?.acoustid ? "AcoustID" : undefined,
     candidate.is_compilation ? "Compilation" : undefined,
   ].filter(Boolean);
@@ -292,7 +295,11 @@ function CandidateOption({
         <dl>
           <div>
             <dt>Fingerprint match</dt>
-            <dd>{why?.acoustid ? `${Math.round(why.acoustid * 100)}%` : "Not used"}</dd>
+            <dd>
+              {typeof why?.acoustid === "number"
+                ? `${Math.round(why.acoustid * 100)}%`
+                : "Not used"}
+            </dd>
           </div>
           <div>
             <dt>Duration match</dt>
@@ -308,7 +315,7 @@ function CandidateOption({
           </div>
           <div>
             <dt>Source agreement</dt>
-            <dd>{badges.filter((badge) => badge !== "Compilation").join(" + ")}</dd>
+            <dd>{sourceBadges.length ? sourceBadges.join(" + ") : "None"}</dd>
           </div>
         </dl>
       </details>
@@ -319,13 +326,13 @@ function CandidateOption({
 function parseWhy(value?: string) {
   if (!value) return undefined;
   try {
-    return JSON.parse(value) as Record<string, number>;
+    return JSON.parse(value) as Record<string, unknown>;
   } catch {
     return undefined;
   }
 }
 
-function quality(value?: number) {
+function quality(value?: unknown) {
   if (typeof value !== "number") return "Unknown";
   if (value >= 0.85) return "Good";
   if (value >= 0.55) return "Medium";
@@ -339,6 +346,7 @@ function providerLabel(value?: string) {
     discogs: "Discogs",
     acoustid: "AcoustID",
     lastfm: "Last.fm",
+    theaudiodb: "TheAudioDB",
     wikidata: "Wikidata",
   };
   return known[value] || value;
