@@ -577,39 +577,9 @@ select:focus-visible {
   gap: 20px;
 }
 .preview-list {
-  margin-top: 24px;
-  border: 1px solid #e4e7ec;
-  border-radius: 12px;
-  overflow: hidden;
-}
-.preview-list article {
   display: grid;
-  grid-template-columns: 1fr 30px 1fr;
-  gap: 14px;
-  padding: 12px 14px;
-  border-bottom: 1px solid #eef0f3;
-  align-items: center;
-}
-.preview-list article:last-child {
-  border: 0;
-}
-.preview-list strong,
-.preview-list span {
-  display: block;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.preview-list strong {
-  font-size: 12px;
-}
-.preview-list span {
-  font-size: 11px;
-  color: #7b8493;
-  margin-top: 3px;
-}
-.preview-list b {
-  color: #98a2b3;
+  gap: 8px;
+  margin-top: 8px;
 }
 .apply-bar {
   position: sticky;
@@ -652,12 +622,6 @@ select:focus-visible {
   .results > header,
   .preview-workspace > header {
     display: block;
-  }
-  .preview-list article {
-    grid-template-columns: 1fr;
-  }
-  .preview-list b {
-    display: none;
   }
   .apply-bar {
     align-items: center;
@@ -840,13 +804,6 @@ select:focus-visible {
 .duplicate-skip {
   background: #fafafa;
   opacity: 0.68;
-}
-.preview-list em {
-  display: block;
-  color: #a15c00;
-  font-size: 11px;
-  font-style: normal;
-  margin-top: 4px;
 }
 @media (max-width: 850px) {
   .choice-grid,
@@ -1114,12 +1071,14 @@ select:focus-visible {
 }
 .preview-row {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px minmax(0, 1fr);
   align-items: center;
+  gap: 10px;
   min-width: 0;
 }
 .metadata-card {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-columns: 56px minmax(0, 1fr);
   gap: 8px;
   height: 100%;
   min-width: 0;
@@ -1130,8 +1089,9 @@ select:focus-visible {
   box-shadow: 0 6px 18px #18223008;
 }
 .cover {
-  width: 40px;
-  height: 40px;
+  width: 56px;
+  height: 100%;
+  min-height: 0;
   border-radius: 8px;
   background: linear-gradient(135deg, #4f5ee8, #12b76a);
   display: grid;
@@ -1484,107 +1444,57 @@ select:focus-visible {
 .terminal-card.connecting header small {
   color: #fedf89;
 }
-.virtual-preview {
-  overflow: auto;
-  margin-top: 8px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  contain: strict;
-}
-.virtual-preview > div {
-  min-width: 0;
-}
-.virtual-row {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  padding: 4px 0;
-  will-change: transform;
-}
-.virtual-row .preview-row {
-  height: 74px;
-  overflow: hidden;
-  grid-template-columns: minmax(0, 1fr) 38px minmax(0, 1fr);
-  gap: 10px;
-  padding: 0;
-  border-radius: 12px;
-  contain: layout paint;
-}
-.preview-count {
-  margin-top: 8px;
-  color: #667085;
-  font-size: 11px;
-  text-align: center;
-}
-.virtual-preview .preview-row footer {
+.preview-row footer {
   display: none;
 }
 @media (max-width: 980px) {
   .live-progress {
     grid-column: 1/3;
   }
-  .virtual-preview {
-    height: 560px;
-  }
-  .virtual-row {
-    position: absolute;
-  }
-  .virtual-row .preview-row {
-    height: 74px;
-    overflow: hidden;
+  .preview-row {
     grid-template-columns: 1fr 30px 1fr;
     gap: 6px;
   }
-  .virtual-row .meta-grid {
+  .preview-row .meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .virtual-row .metadata-card {
-    grid-template-columns: 38px minmax(0, 1fr);
+  .preview-row .metadata-card {
+    grid-template-columns: 50px minmax(0, 1fr);
     padding: 7px;
   }
-  .virtual-row .cover {
-    width: 38px;
-    height: 38px;
+  .preview-row .cover {
+    width: 50px;
+    height: 100%;
     font-size: 14px;
   }
-  .virtual-row .change-arrow span {
+  .preview-row .change-arrow span {
     width: 24px;
     height: 24px;
     font-size: 12px;
   }
 }
 @media (max-width: 700px) {
-  .virtual-preview {
-    height: 560px;
-  }
-  .virtual-row {
-    padding: 5px 0;
-  }
-  .virtual-row .preview-row {
-    height: 142px;
+  .preview-row {
     grid-template-columns: 1fr;
     gap: 4px;
   }
-  .virtual-row .metadata-card {
-    grid-template-columns: 36px minmax(0, 1fr);
+  .preview-row .metadata-card {
+    grid-template-columns: 44px minmax(0, 1fr);
     padding: 7px;
   }
-  .virtual-row .cover {
-    width: 36px;
-    height: 36px;
+  .preview-row .cover {
+    width: 44px;
+    height: 100%;
     border-radius: 8px;
     font-size: 14px;
   }
-  .virtual-row .change-arrow {
+  .preview-row .change-arrow {
     display: none;
   }
-  .virtual-row .meta-grid {
+  .preview-row .meta-grid {
     display: none !important;
   }
-  .virtual-row .music-meta h3 {
+  .preview-row .music-meta h3 {
     font-size: 12px;
   }
 }

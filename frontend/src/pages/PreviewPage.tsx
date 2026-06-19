@@ -1,7 +1,7 @@
 import type { Preview, Workflow } from "../api";
 import type { EventStatus } from "../hooks";
 import { Button } from "../components";
-import { PreviewVirtualList } from "../features/preview";
+import { PreviewList } from "../features/preview";
 import { Terminal } from "../layouts/Terminal";
 
 export function PreviewPage({
@@ -58,7 +58,7 @@ export function PreviewPage({
           <Terminal lines={workflow.terminal_log || []} status={eventStatus} />
         </div>
       )}
-      {workflow.phase !== "finish" && !empty && <PreviewVirtualList items={items} />}
+      {workflow.phase !== "finish" && !empty && <PreviewList items={items} />}
       {workflow.phase !== "finish" && preview && (
         <div className="apply-bar">
           <Button disabled={!writeCount || applyPending} onClick={onApply}>
