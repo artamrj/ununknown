@@ -20,6 +20,7 @@ export function App() {
   });
   const scan = useMutation({
     mutationFn: () => api<any>("/scan/start", { method: "POST", body: "{}" }),
+    onMutate: () => setPreview(undefined),
     onSuccess: () => queryClient.invalidateQueries(),
     onError: (error) => setToast(error.message),
   });

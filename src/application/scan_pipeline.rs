@@ -1,7 +1,7 @@
 use crate::{
     app::{AppState, TerminalEntry},
     domain::audio,
-    infrastructure::{media::fingerprint, providers},
+    infrastructure::{fingerprint_cache, media::fingerprint, providers},
     types::{AutomationMode, WorkflowPhase},
 };
 use anyhow::{Context, Result, anyhow};
@@ -338,16 +338,31 @@ async fn process(
         )
         .await;
     let started = Instant::now();
-    let (fp, duration) = {
+    let fingerprint_result = {
         let _permit = limits.fingerprint.acquire().await?;
-        fingerprint::calculate(path)
-            .await
-            .with_context(|| format!("failed to fingerprint {}", path.display()))?
+        fingerprint_cache::get_or_calculate(&state.pool, path, || async {
+            fingerprint::calculate(path)
+                .await
+                .with_context(|| format!("failed to fingerprint {}", path.display()))
+        })
+        .await?
+    };
+    let (fp, duration) = (fingerprint_result.fingerprint, fingerprint_result.duration);
+    let (message, detail) = match fingerprint_result.source {
+        fingerprint_cache::FingerprintSource::Cache => (
+            "Fingerprint reused from cache",
+            "File size and modified time matched the cached fingerprint",
+        ),
+        fingerprint_cache::FingerprintSource::Generated => (
+            "Fingerprint generated",
+            "Cached fingerprint was missing or stale",
+        ),
     };
     state
         .terminal_entry(
-            TerminalEntry::new("ok", "fingerprint", "Fingerprint generated")
+            TerminalEntry::new("ok", "fingerprint", message)
                 .file(filename.to_owned())
+                .detail(detail)
                 .duration_ms(started.elapsed().as_millis() as i64),
         )
         .await;

@@ -41,9 +41,13 @@ export function PreviewPage({
         </div>
         <Button
           kind="quiet"
-          onClick={() => confirm("Clear this preview and start a new scan?") && onScan()}
+          onClick={() =>
+            confirm(
+              "Clear this preview and rescan files? Fingerprints for unchanged files will be reused.",
+            ) && onScan()
+          }
         >
-          Start new scan
+          Rescan
         </Button>
       </header>
       {empty && (

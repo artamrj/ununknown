@@ -594,6 +594,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query("INSERT INTO fingerprint_cache(path,file_size,file_mtime,fingerprint,duration,updated_at) VALUES('/music/a.mp3',10,20,'fp',30,datetime('now'))")
+            .execute(&pool)
+            .await
+            .unwrap();
         let state = Arc::new(AppState::new(Config::default(), pool.clone()));
         let _ = workspace::clear_workspace(State(state)).await.unwrap();
         let cached: i64 = sqlx::query_scalar("SELECT count(*) FROM provider_cache")
@@ -601,12 +605,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cached, 1);
+        let fingerprints: i64 = sqlx::query_scalar("SELECT count(*) FROM fingerprint_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fingerprints, 1);
     }
 
     #[tokio::test]
-    async fn scan_start_preserves_provider_cache() {
+    async fn scan_start_preserves_provider_and_fingerprint_cache() {
         let pool = test_pool().await;
         sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('musicbrainz','k','{}',datetime('now','+1 day'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO fingerprint_cache(path,file_size,file_mtime,fingerprint,duration,updated_at) VALUES('/music/a.mp3',10,20,'fp',30,datetime('now'))")
             .execute(&pool)
             .await
             .unwrap();
@@ -622,6 +635,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cached, 1);
+        let fingerprints: i64 = sqlx::query_scalar("SELECT count(*) FROM fingerprint_cache")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(fingerprints, 1);
     }
 
     #[tokio::test]
