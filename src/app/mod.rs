@@ -1,3 +1,3 @@
 pub mod state;
 
-pub use state::{AppState, TerminalEntry, Workflow};
+pub use state::{AppState, TerminalEntry};

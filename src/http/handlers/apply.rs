@@ -1,8 +1,9 @@
 use super::*;
 use crate::app::TerminalEntry;
+use chrono::Utc;
 
 pub async fn stop_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    s.workflow.write().await.cancelled = true;
+    s.cancel_workflow().await;
     Ok(Json(serde_json::json!({"stopping":true})))
 }
 
@@ -62,7 +63,7 @@ pub async fn template_preview(
         raw_json: "{}".into(),
     };
     let (track, candidate) = if let Some(id) = body.track_id {
-        selected(&s.pool, id).await?
+        queries::selected(&s.pool, id).await?
     } else {
         (sample_track, sample_candidate)
     };
@@ -104,9 +105,14 @@ pub async fn apply_preview(
     State(s): State<Arc<AppState>>,
     Json(_): Json<serde_json::Value>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let tracks:Vec<Track>=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0").fetch_all(&s.pool).await?;
+    let tracks: Vec<Track> = sqlx::query_as(&format!(
+        "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0",
+        queries::TRACK_FIELDS
+    ))
+    .fetch_all(&s.pool)
+    .await?;
     let cfg = s.config.read().await.clone();
-    let selected = load_selected(&s.pool, tracks).await?;
+    let selected = queries::selected_for_tracks(&s.pool, tracks).await?;
     let duplicates = duplicate_actions(&selected);
     let duplicate_skipped = duplicates
         .values()
@@ -167,12 +173,19 @@ pub async fn apply_preview(
         "write_count": items.iter().filter(|item| item.duplicate_action != DuplicateAction::SkipDuplicate).count(),
         "duplicate_skipped": duplicate_skipped
     });
-    store_preview(
+    previews::store(
         &s.pool,
         token,
         &items,
         summary.clone(),
-        settings_fingerprint(&cfg)?,
+        previews::settings_fingerprint(&cfg)?,
+        |item| {
+            Ok(serde_json::to_string(&item.duplicate_action)?
+                .trim_matches('"')
+                .to_owned())
+        },
+        |item| item.track_id.0,
+        |item| item.candidate_id.0,
     )
     .await?;
     Ok(Json(serde_json::json!({
@@ -185,42 +198,58 @@ pub async fn start_apply(
     State(s): State<Arc<AppState>>,
     Json(body): Json<ApplyRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if matches!(
-        s.workflow.read().await.phase,
-        WorkflowPhase::Scan | WorkflowPhase::Fetch | WorkflowPhase::Apply
-    ) {
+    if s.workflow_running().await {
         return Err(ApiError::conflict("workflow is already running"));
     }
     let items = consume_preview(&s.pool, body.preview_token).await?;
     let id = JobId::new();
-    {
-        let mut w = s.workflow.write().await;
-        w.phase = WorkflowPhase::Apply;
-        w.message = "Applying matched metadata".into();
-        w.cancelled = false;
-    }
+    s.start_apply_workflow().await;
     let state = s.clone();
-    let job = id;
     tokio::spawn(async move {
-        let result = apply(state.clone(), job.clone(), items).await;
-        let mut w = state.workflow.write().await;
-        w.phase = if result.is_ok() {
-            WorkflowPhase::Finish
+        let result = apply(state.clone(), items).await;
+        if state.workflow_cancelled().await {
+            state
+                .finish_workflow(WorkflowPhase::Idle, "idle", "Apply stopped")
+                .await;
+        } else if let Err(error) = result {
+            state
+                .finish_workflow(WorkflowPhase::Failed, "failed", error.to_string())
+                .await;
         } else {
-            WorkflowPhase::Failed
-        };
-        w.message = result
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "Apply complete".into());
+            state
+                .finish_workflow(WorkflowPhase::Finish, "finish", "Apply complete")
+                .await;
+        }
     });
     Ok(Json(serde_json::json!({"job_id":id})))
 }
-pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Result<()> {
+fn consume_preview(
+    pool: &sqlx::SqlitePool,
+    token: PreviewToken,
+) -> impl std::future::Future<Output = ApiResult<Vec<PreviewItem>>> + '_ {
+    async move {
+        previews::consume(pool, token)
+            .await
+            .map_err(|error| match error {
+                previews::PreviewError::AlreadyConsumed => {
+                    ApiError::conflict("preview has already been consumed")
+                }
+                previews::PreviewError::Stale => {
+                    ApiError::conflict("preview is stale; run preview again")
+                }
+                previews::PreviewError::NotUsable => ApiError::conflict("preview is not usable"),
+                previews::PreviewError::Missing => {
+                    ApiError::not_found("a current successful dry-run preview is required")
+                }
+            })
+    }
+}
+
+pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
     let total = items.len() as i64;
     let cfg = s.config.read().await.clone();
     for (i, item) in items.into_iter().enumerate() {
-        if s.cancelled(&job.to_string()).await {
+        if s.workflow_cancelled().await {
             break;
         }
         s.terminal_entry(
@@ -234,7 +263,7 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
                 })),
         )
         .await;
-        let (_, candidate) = selected(&s.pool, item.track_id).await?;
+        let (_, candidate) = queries::selected(&s.pool, item.track_id).await?;
         let artwork = if cfg.cover_art_enabled {
             if let Some(url) = &candidate.cover_url {
                 let limiter = s.artwork_downloads.read().await.clone();
@@ -389,21 +418,15 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
         .bind(item.track_id.0)
         .execute(&s.pool)
         .await?;
-        {
-            let mut w = s.workflow.write().await;
-            w.current = i + 1;
-            w.total = total as usize;
-            w.current_file = Some(item.current_path.clone());
-        }
-        jobs::emit(
-            &s,
-            "workflow",
-            Some("apply"),
-            Some(WorkflowPhase::Apply),
-            i as i64 + 1,
-            total,
+        s.set_workflow(
+            WorkflowPhase::Apply,
+            "apply",
             status,
-        );
+            i + 1,
+            total as usize,
+            Some(item.current_path.clone()),
+        )
+        .await;
         if status == "applied" {
             s.terminal_entry(
                 TerminalEntry::new("ok", "apply", "Applied metadata changes")

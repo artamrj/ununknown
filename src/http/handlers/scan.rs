@@ -1,19 +1,13 @@
 use super::*;
 
 pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    if matches!(
-        s.workflow.read().await.phase,
-        WorkflowPhase::Scan | WorkflowPhase::Fetch | WorkflowPhase::Apply
-    ) {
+    if s.workflow_running().await {
         return Err(ApiError::conflict("workflow is already running"));
     }
     sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
-    invalidate_previews(&s.pool).await?;
-    *s.workflow.write().await = Workflow {
-        phase: WorkflowPhase::Scan,
-        message: "Discovering music".into(),
-        ..Default::default()
-    };
+    previews::invalidate(&s.pool).await?;
+    s.reset_workflow(WorkflowPhase::Scan, "Discovering music")
+        .await;
     s.terminal(
         "info",
         "scan",
@@ -24,24 +18,15 @@ pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(error) = scan_pipeline::run(state.clone()).await {
-            let mut w = state.workflow.write().await;
-            w.phase = WorkflowPhase::Failed;
-            w.message = error.to_string();
-            jobs::emit(
-                &state,
-                "workflow",
-                Some("failed"),
-                Some(WorkflowPhase::Failed),
-                0,
-                0,
-                &error.to_string(),
-            );
+            state
+                .finish_workflow(WorkflowPhase::Failed, "failed", error.to_string())
+                .await;
         }
     });
     Ok(Json(serde_json::json!({"started":true})))
 }
 pub async fn stop_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    s.workflow.write().await.cancelled = true;
+    s.cancel_workflow().await;
     Ok(Json(serde_json::json!({"stopping":true})))
 }
 pub async fn list_jobs(State(s): State<Arc<AppState>>) -> ApiResult<Json<Vec<serde_json::Value>>> {

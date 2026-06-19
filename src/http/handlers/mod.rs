@@ -1,11 +1,10 @@
 use crate::{
-    app::{AppState, Workflow},
-    application::scan_pipeline,
+    app::AppState,
+    application::{previews, scan_pipeline},
     config::Config,
     domain::path_templates::{self, TemplateValues},
     http::error::{ApiError, ApiResult},
     infrastructure::{media::tag_writer, providers::Candidate},
-    jobs,
     types::{
         CandidateId, DuplicateAction, JobId, OutputMode, PreviewToken, TrackId, TrackStage,
         WorkflowPhase,
@@ -19,15 +18,15 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response, Sse, sse::Event},
 };
-use chrono::Utc;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::FromRow;
 use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc};
 
 mod apply;
 mod artwork;
 mod events;
+mod queries;
 mod scan;
 mod settings;
 mod tracks;
@@ -96,7 +95,7 @@ pub struct CandidateRow {
     raw_json: Option<String>,
 }
 impl CandidateRow {
-    fn value(&self) -> Candidate {
+    pub(super) fn value(&self) -> Candidate {
         Candidate {
             id: Some(self.id.0),
             title: self.title.clone().unwrap_or_default(),
@@ -219,92 +218,6 @@ pub struct TrackPage {
     items: Vec<WorkspaceTrack>,
     total: i64,
     counts: HashMap<String, i64>,
-}
-
-async fn invalidate_previews(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("UPDATE previews SET status='stale' WHERE status='ready'")
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-async fn store_preview(
-    pool: &SqlitePool,
-    token: PreviewToken,
-    items: &[PreviewItem],
-    summary: serde_json::Value,
-    settings_fingerprint: String,
-) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO previews(token,status,created_at,summary_json,settings_fingerprint) VALUES(?,'ready',?,?,?)",
-    )
-    .bind(token.to_string())
-    .bind(&now)
-    .bind(serde_json::to_string(&summary)?)
-    .bind(settings_fingerprint)
-    .execute(&mut *tx)
-    .await?;
-    for (position, item) in items.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO preview_items(preview_token,position,track_id,candidate_id,duplicate_action,item_json) VALUES(?,?,?,?,?,?)",
-        )
-        .bind(token.to_string())
-        .bind(position as i64)
-        .bind(item.track_id.0)
-        .bind(item.candidate_id.0)
-        .bind(serde_json::to_string(&item.duplicate_action)?.trim_matches('"').to_owned())
-        .bind(serde_json::to_string(item)?)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-async fn consume_preview(pool: &SqlitePool, token: PreviewToken) -> ApiResult<Vec<PreviewItem>> {
-    let mut tx = pool.begin().await?;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM previews WHERE token=?")
-        .bind(token.to_string())
-        .fetch_optional(&mut *tx)
-        .await?;
-    match status.as_deref() {
-        Some("ready") => {}
-        Some("started" | "consumed") => {
-            return Err(ApiError::conflict("preview has already been consumed"));
-        }
-        Some("stale") => return Err(ApiError::conflict("preview is stale; run preview again")),
-        Some(_) => return Err(ApiError::conflict("preview is not usable")),
-        None => {
-            return Err(ApiError::not_found(
-                "a current successful dry-run preview is required",
-            ));
-        }
-    }
-    let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT item_json FROM preview_items WHERE preview_token=? AND duplicate_action!='skip_duplicate' ORDER BY position",
-    )
-    .bind(token.to_string())
-    .fetch_all(&mut *tx)
-    .await?;
-    let items = rows
-        .into_iter()
-        .map(|row| serde_json::from_str(&row))
-        .collect::<std::result::Result<Vec<PreviewItem>, _>>()?;
-    let now = Utc::now().to_rfc3339();
-    sqlx::query("UPDATE previews SET status='started',started_at=?,consumed_at=? WHERE token=?")
-        .bind(&now)
-        .bind(&now)
-        .bind(token.to_string())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(items)
-}
-
-fn settings_fingerprint(cfg: &Config) -> Result<String> {
-    Ok(serde_json::to_string(cfg)?)
 }
 
 fn destination(
@@ -450,18 +363,6 @@ struct DuplicateResolution {
     kept_track_id: Option<TrackId>,
 }
 
-async fn load_selected(
-    pool: &SqlitePool,
-    tracks: Vec<Track>,
-) -> ApiResult<Vec<(Track, Candidate)>> {
-    let mut out = Vec::with_capacity(tracks.len());
-    for track in tracks {
-        let (_, candidate) = selected(pool, track.id).await?;
-        out.push((track, candidate));
-    }
-    Ok(out)
-}
-
 fn duplicate_actions(selected: &[(Track, Candidate)]) -> HashMap<TrackId, DuplicateResolution> {
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     for (index, (track, candidate)) in selected.iter().enumerate() {
@@ -544,30 +445,11 @@ fn normalize_duplicate_text(value: &str) -> String {
         .collect()
 }
 
-async fn selected(pool: &SqlitePool, id: TrackId) -> ApiResult<(Track, Candidate)> {
-    let track:Track=sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id.0).fetch_one(pool).await?;
-    let cid = track
-        .selected_candidate_id
-        .ok_or_else(|| ApiError::not_found("track has no selected candidate"))?;
-    let row: CandidateRow = sqlx::query_as("SELECT * FROM candidates WHERE id=?")
-        .bind(cid.0)
-        .fetch_one(pool)
-        .await?;
-    Ok((track, row.value()))
-}
-async fn fetch_candidates(pool: &SqlitePool, id: TrackId) -> Result<Vec<CandidateRow>> {
-    Ok(
-        sqlx::query_as("SELECT * FROM candidates WHERE track_id=? ORDER BY score DESC")
-            .bind(id.0)
-            .fetch_all(pool)
-            .await?,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::extract::State;
+    use sqlx::SqlitePool;
     use std::sync::Arc;
 
     async fn test_pool() -> SqlitePool {
@@ -637,12 +519,19 @@ mod tests {
             preview_item(1, DuplicateAction::None),
             preview_item(2, DuplicateAction::SkipDuplicate),
         ];
-        store_preview(
+        previews::store(
             &pool,
             token,
             &items,
             serde_json::json!({"write_count":1,"duplicate_skipped":1}),
             "settings".into(),
+            |item| {
+                Ok(serde_json::to_string(&item.duplicate_action)?
+                    .trim_matches('"')
+                    .to_owned())
+            },
+            |item| item.track_id.0,
+            |item| item.candidate_id.0,
         )
         .await
         .unwrap();
@@ -653,30 +542,49 @@ mod tests {
             .unwrap();
         assert_eq!(persisted, 2);
 
-        let loaded = consume_preview(&pool, token).await.unwrap();
+        let loaded: Vec<PreviewItem> = previews::consume(&pool, token).await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].track_id, TrackId(1));
-        assert!(consume_preview(&pool, token).await.is_err());
+        assert!(
+            previews::consume::<PreviewItem>(&pool, token)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn stale_and_missing_preview_tokens_are_rejected() {
         let pool = test_pool().await;
-        assert!(consume_preview(&pool, PreviewToken::new()).await.is_err());
+        assert!(
+            previews::consume::<PreviewItem>(&pool, PreviewToken::new())
+                .await
+                .is_err()
+        );
 
         let token = PreviewToken::new();
         let items = vec![preview_item(1, DuplicateAction::None)];
-        store_preview(
+        previews::store(
             &pool,
             token,
             &items,
             serde_json::json!({"write_count":1,"duplicate_skipped":0}),
             "settings".into(),
+            |item| {
+                Ok(serde_json::to_string(&item.duplicate_action)?
+                    .trim_matches('"')
+                    .to_owned())
+            },
+            |item| item.track_id.0,
+            |item| item.candidate_id.0,
         )
         .await
         .unwrap();
-        invalidate_previews(&pool).await.unwrap();
-        assert!(consume_preview(&pool, token).await.is_err());
+        previews::invalidate(&pool).await.unwrap();
+        assert!(
+            previews::consume::<PreviewItem>(&pool, token)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -750,7 +658,9 @@ mod tests {
     async fn scan_start_while_running_returns_409() {
         let pool = test_pool().await;
         let state = Arc::new(AppState::new(Config::default(), pool));
-        state.workflow.write().await.phase = WorkflowPhase::Scan;
+        state
+            .set_workflow(WorkflowPhase::Scan, "scan", "Scanning", 0, 0, None)
+            .await;
 
         let error = scan::start_scan(State(state)).await.unwrap_err();
 

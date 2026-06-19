@@ -2,7 +2,7 @@ use crate::{config::Config, jobs, types::WorkflowPhase};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore, broadcast};
 
 #[derive(Clone, Default, Serialize)]
@@ -104,7 +104,6 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub client: reqwest::Client,
     pub events: broadcast::Sender<jobs::Event>,
-    pub cancelled: RwLock<HashSet<String>>,
     pub artwork_downloads: RwLock<Arc<Semaphore>>,
     pub tag_writes: RwLock<Arc<Semaphore>>,
     pub workflow: RwLock<Workflow>,
@@ -120,7 +119,6 @@ impl AppState {
             pool,
             client: reqwest::Client::new(),
             events,
-            cancelled: Default::default(),
             artwork_downloads: RwLock::new(Arc::new(Semaphore::new(artwork_download_concurrency))),
             tag_writes: RwLock::new(Arc::new(Semaphore::new(tag_write_concurrency))),
             workflow: RwLock::new(Workflow {
@@ -131,8 +129,134 @@ impl AppState {
         }
     }
 
-    pub async fn cancelled(&self, id: &str) -> bool {
-        self.cancelled.read().await.contains(id)
+    pub async fn workflow_running(&self) -> bool {
+        matches!(
+            self.workflow.read().await.phase,
+            WorkflowPhase::Scan | WorkflowPhase::Fetch | WorkflowPhase::Apply
+        )
+    }
+
+    pub async fn reset_workflow(&self, phase: WorkflowPhase, message: impl Into<String>) {
+        *self.workflow.write().await = Workflow {
+            phase,
+            message: message.into(),
+            ..Default::default()
+        };
+    }
+
+    pub async fn cancel_workflow(&self) {
+        self.workflow.write().await.cancelled = true;
+    }
+
+    pub async fn workflow_cancelled(&self) -> bool {
+        self.workflow.read().await.cancelled
+    }
+
+    pub async fn start_apply_workflow(&self) {
+        let mut workflow = self.workflow.write().await;
+        workflow.phase = WorkflowPhase::Apply;
+        workflow.message = "Applying matched metadata".into();
+        workflow.current = 0;
+        workflow.total = 0;
+        workflow.current_file = None;
+        workflow.cancelled = false;
+    }
+
+    pub async fn finish_workflow(
+        &self,
+        phase: WorkflowPhase,
+        stage: &'static str,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        let (current, total) = {
+            let mut workflow = self.workflow.write().await;
+            workflow.phase = phase;
+            workflow.message = message.clone();
+            workflow.cancelled = false;
+            (workflow.current as i64, workflow.total as i64)
+        };
+        let _ = self.events.send(jobs::Event {
+            kind: "workflow".into(),
+            stage: Some(stage.into()),
+            level: None,
+            file: None,
+            timestamp: None,
+            detail: None,
+            error: None,
+            attempt: None,
+            duration_ms: None,
+            context: None,
+            phase: Some(phase),
+            current_file: None,
+            processed: None,
+            matched: None,
+            unmatched: None,
+            failed: None,
+            current,
+            total,
+            message,
+        });
+    }
+
+    pub async fn set_workflow(
+        &self,
+        phase: WorkflowPhase,
+        stage: &'static str,
+        message: impl Into<String>,
+        current: usize,
+        total: usize,
+        file: Option<String>,
+    ) {
+        let message = message.into();
+        let mut workflow = self.workflow.write().await;
+        workflow.phase = phase;
+        workflow.message = message.clone();
+        workflow.current = current;
+        workflow.total = total;
+        workflow.current_file = file;
+        drop(workflow);
+        let _ = self.events.send(jobs::Event {
+            kind: "workflow".into(),
+            stage: Some(stage.into()),
+            level: None,
+            file: None,
+            timestamp: None,
+            detail: None,
+            error: None,
+            attempt: None,
+            duration_ms: None,
+            context: None,
+            phase: Some(phase),
+            current_file: None,
+            processed: None,
+            matched: None,
+            unmatched: None,
+            failed: None,
+            current: current as i64,
+            total: total as i64,
+            message,
+        });
+    }
+
+    pub async fn increment_failed(&self) {
+        self.workflow.write().await.failed += 1;
+    }
+
+    pub async fn increment_matched(&self) {
+        self.workflow.write().await.matched += 1;
+    }
+
+    pub async fn increment_unmatched(&self) {
+        self.workflow.write().await.unmatched += 1;
+    }
+
+    pub async fn finish_track(&self, total: usize) -> usize {
+        let mut workflow = self.workflow.write().await;
+        workflow.processed += 1;
+        workflow.current = workflow.processed;
+        workflow.total = total;
+        workflow.processed
     }
 
     pub async fn refresh_limiters(&self, config: &Config) {
@@ -225,5 +349,26 @@ mod tests {
         assert_eq!(value["attempt"], 2);
         assert_eq!(value["duration_ms"], 1234);
         assert_eq!(value["context"]["path"], "/music/input/track.flac");
+    }
+
+    #[tokio::test]
+    async fn workflow_controller_updates_state_and_cancellation() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let state = AppState::new(Config::default(), pool);
+
+        assert!(!state.workflow_running().await);
+        state
+            .set_workflow(WorkflowPhase::Scan, "scan", "Scanning", 0, 10, None)
+            .await;
+        assert!(state.workflow_running().await);
+
+        state.cancel_workflow().await;
+        assert!(state.workflow_cancelled().await);
+
+        state
+            .finish_workflow(WorkflowPhase::Idle, "idle", "Scan stopped")
+            .await;
+        assert!(!state.workflow_running().await);
+        assert!(!state.workflow_cancelled().await);
     }
 }

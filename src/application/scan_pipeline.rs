@@ -2,7 +2,6 @@ use crate::{
     app::{AppState, TerminalEntry},
     domain::audio,
     infrastructure::{media::fingerprint, providers},
-    jobs,
     types::{AutomationMode, WorkflowPhase},
 };
 use anyhow::{Context, Result, anyhow};
@@ -39,7 +38,9 @@ struct PersistJob {
 
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
-    set_phase(&state, WorkflowPhase::Scan, "Discovering music", 0, 0, None).await;
+    state
+        .set_workflow(WorkflowPhase::Scan, "scan", "Discovering music", 0, 0, None)
+        .await;
     state
         .terminal(
             "info",
@@ -88,21 +89,16 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             )
             .await;
     }
-    {
-        let mut w = state.workflow.write().await;
-        w.total = total;
-        w.phase = WorkflowPhase::Fetch;
-        w.message = "Starting staged matching".into();
-    }
-    jobs::emit(
-        &state,
-        "workflow",
-        Some("fetch"),
-        Some(WorkflowPhase::Fetch),
-        0,
-        total as i64,
-        "Starting staged matching",
-    );
+    state
+        .set_workflow(
+            WorkflowPhase::Fetch,
+            "fetch",
+            "Starting staged matching",
+            0,
+            total,
+            None,
+        )
+        .await;
 
     let limits = Arc::new(PipelineLimits {
         metadata: Arc::new(Semaphore::new(cfg.metadata_read_concurrency)),
@@ -145,7 +141,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         });
     }
     for (index, path) in files.into_iter().enumerate() {
-        if state.workflow.read().await.cancelled {
+        if state.workflow_cancelled().await {
             break;
         }
         file_tx.send(FileJob { index, path }).await?;
@@ -156,32 +152,30 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
     while let Some(result) = tasks.join_next().await {
         if let Err(error) = result {
             tracing::warn!("scan worker task failed: {error:#}");
-            state.workflow.write().await.failed += 1;
+            state.increment_failed().await;
         }
-        if state.workflow.read().await.cancelled {
+        if state.workflow_cancelled().await {
             tasks.abort_all();
         }
     }
     let writer_result = writer.await?;
     writer_result?;
-    let cancelled = state.workflow.read().await.cancelled;
-    set_phase(
-        &state,
-        if cancelled {
-            WorkflowPhase::Idle
-        } else {
-            WorkflowPhase::Preview
-        },
-        if cancelled {
-            "Scan stopped"
-        } else {
-            "Matching complete"
-        },
-        total,
-        total,
-        None,
-    )
-    .await;
+    let cancelled = state.workflow_cancelled().await;
+    state
+        .finish_workflow(
+            if cancelled {
+                WorkflowPhase::Idle
+            } else {
+                WorkflowPhase::Preview
+            },
+            if cancelled { "idle" } else { "preview" },
+            if cancelled {
+                "Scan stopped"
+            } else {
+                "Matching complete"
+            },
+        )
+        .await;
     Ok(())
 }
 
@@ -192,7 +186,7 @@ async fn process_file(
     job: FileJob,
     total: usize,
 ) {
-    if state.workflow.read().await.cancelled {
+    if state.workflow_cancelled().await {
         return;
     }
     let cfg = state.config.read().await.clone();
@@ -203,21 +197,22 @@ async fn process_file(
         .unwrap_or("audio")
         .to_owned();
     for attempt in 1..=cfg.track_attempts {
-        if state.workflow.read().await.cancelled {
+        if state.workflow_cancelled().await {
             return;
         }
-        set_phase(
-            &state,
-            WorkflowPhase::Fetch,
-            &format!(
-                "Matching {filename} · attempt {attempt}/{}",
-                cfg.track_attempts
-            ),
-            job.index,
-            total,
-            Some(filename.clone()),
-        )
-        .await;
+        state
+            .set_workflow(
+                WorkflowPhase::Fetch,
+                "fetch",
+                format!(
+                    "Matching {filename} · attempt {attempt}/{}",
+                    cfg.track_attempts
+                ),
+                job.index,
+                total,
+                Some(filename.clone()),
+            )
+            .await;
         match process(&state, &limits, &persist_tx, &job.path).await {
             Ok(true) => {
                 state
@@ -259,7 +254,7 @@ async fn process_file(
             }
             Err(error) => {
                 tracing::warn!(path=%job.path.display(), "track failed after retries: {error:#}");
-                state.workflow.write().await.failed += 1;
+                state.increment_failed().await;
                 state
                     .terminal_entry(
                         TerminalEntry::new("error", "fetch", "Track failed after retries")
@@ -275,20 +270,17 @@ async fn process_file(
             }
         }
     }
-    let mut workflow = state.workflow.write().await;
-    workflow.processed += 1;
-    workflow.current = workflow.processed;
-    let processed = workflow.processed;
-    drop(workflow);
-    jobs::emit(
-        &state,
-        "workflow",
-        Some("fetch"),
-        Some(WorkflowPhase::Fetch),
-        processed as i64,
-        total as i64,
-        "Matching tracks",
-    );
+    let processed = state.finish_track(total).await;
+    state
+        .set_workflow(
+            WorkflowPhase::Fetch,
+            "fetch",
+            "Matching tracks",
+            processed,
+            total,
+            None,
+        )
+        .await;
 }
 
 async fn process(
@@ -400,7 +392,7 @@ async fn process(
         .into_iter()
         .max_by(|a, b| a.score.total_cmp(&b.score));
     if cfg.automation_mode == AutomationMode::Manual {
-        state.workflow.write().await.unmatched += 1;
+        state.increment_unmatched().await;
         state
             .terminal(
                 "warn",
@@ -418,7 +410,7 @@ async fn process(
         AutomationMode::Manual => unreachable!("manual mode returns before threshold selection"),
     };
     let Some(candidate) = best.filter(|c| c.score >= threshold) else {
-        state.workflow.write().await.unmatched += 1;
+        state.increment_unmatched().await;
         state
             .terminal(
                 "warn",
@@ -453,7 +445,7 @@ async fn process(
     result_rx
         .await
         .map_err(|_| anyhow!("DB writer stopped"))??;
-    state.workflow.write().await.matched += 1;
+    state.increment_matched().await;
     Ok(true)
 }
 
@@ -641,42 +633,4 @@ async fn persist_match(
         .execute(&mut **tx)
         .await?;
     Ok(())
-}
-
-async fn set_phase(
-    state: &Arc<AppState>,
-    phase: WorkflowPhase,
-    message: &str,
-    current: usize,
-    total: usize,
-    file: Option<String>,
-) {
-    let mut w = state.workflow.write().await;
-    w.phase = phase;
-    w.message = message.into();
-    w.current = current;
-    w.total = total;
-    w.current_file = file;
-    drop(w);
-    jobs::emit(
-        state,
-        "workflow",
-        Some(phase_name(phase)),
-        Some(phase),
-        current as i64,
-        total as i64,
-        message,
-    );
-}
-
-fn phase_name(phase: WorkflowPhase) -> &'static str {
-    match phase {
-        WorkflowPhase::Idle => "idle",
-        WorkflowPhase::Scan => "scan",
-        WorkflowPhase::Fetch => "fetch",
-        WorkflowPhase::Preview => "preview",
-        WorkflowPhase::Apply => "apply",
-        WorkflowPhase::Finish => "finish",
-        WorkflowPhase::Failed => "failed",
-    }
 }

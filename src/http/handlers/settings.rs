@@ -17,7 +17,7 @@ pub async fn update_settings(
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
-    invalidate_previews(&s.pool).await?;
+    previews::invalidate(&s.pool).await?;
     Ok(Json(serde_json::json!({"saved":true})))
 }
 pub async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
@@ -32,7 +32,7 @@ pub async fn reset_settings(State(s): State<Arc<AppState>>) -> ApiResult<Json<se
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
-    invalidate_previews(&s.pool).await?;
+    previews::invalidate(&s.pool).await?;
     Ok(Json(serde_json::json!({"reset":true})))
 }
 
@@ -71,7 +71,7 @@ pub async fn reset_settings_section(
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     s.refresh_limiters(&cfg).await;
     *s.config.write().await = cfg;
-    invalidate_previews(&s.pool).await?;
+    previews::invalidate(&s.pool).await?;
     Ok(Json(serde_json::json!({"reset":section})))
 }
 pub async fn test_acoustid(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {

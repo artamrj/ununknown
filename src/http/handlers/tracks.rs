@@ -10,11 +10,11 @@ pub async fn list_tracks(
     let search = format!("%{}%", q.search.unwrap_or_default());
     let total: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?)")
         .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).fetch_one(&s.pool).await?;
-    let tracks: Vec<Track> = sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?) ORDER BY path LIMIT ? OFFSET ?")
+    let tracks: Vec<Track> = sqlx::query_as(&format!("SELECT {} FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?) ORDER BY path LIMIT ? OFFSET ?", queries::TRACK_FIELDS))
         .bind(&status).bind(&status).bind(&search).bind(&search).bind(&search).bind(&search).bind(size).bind((page-1)*size).fetch_all(&s.pool).await?;
     let mut result = Vec::with_capacity(tracks.len());
     for track in tracks {
-        let candidates = fetch_candidates(&s.pool, track.id).await?;
+        let candidates = queries::candidates(&s.pool, track.id).await?;
         result.push(WorkspaceTrack { track, candidates });
     }
     let rows: Vec<(String, i64)> =
@@ -31,14 +31,14 @@ pub async fn get_track(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
 ) -> ApiResult<Json<Track>> {
-    Ok(Json(sqlx::query_as("SELECT id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at FROM tracks WHERE id=?").bind(id.0).fetch_one(&s.pool).await?))
+    Ok(Json(queries::track(&s.pool, id).await?))
 }
 
 pub async fn candidates(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
 ) -> ApiResult<Json<Vec<CandidateRow>>> {
-    Ok(Json(fetch_candidates(&s.pool, id).await?))
+    Ok(Json(queries::candidates(&s.pool, id).await?))
 }
 pub async fn select_candidate(
     State(s): State<Arc<AppState>>,
@@ -49,7 +49,7 @@ pub async fn select_candidate(
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("track not found"));
     }
-    invalidate_previews(&s.pool).await?;
+    previews::invalidate(&s.pool).await?;
     Ok(Json(serde_json::json!({"selected":true})))
 }
 pub async fn edit_candidate(
@@ -62,7 +62,7 @@ pub async fn edit_candidate(
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("candidate not found"));
     }
-    invalidate_previews(&s.pool).await?;
+    previews::invalidate(&s.pool).await?;
     Ok(Json(serde_json::json!({"saved":true})))
 }
 pub async fn retry_track(

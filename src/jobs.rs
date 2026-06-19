@@ -1,6 +1,5 @@
-use crate::{app::AppState, types::WorkflowPhase};
+use crate::types::WorkflowPhase;
 use serde::Serialize;
-use std::sync::Arc;
 
 #[derive(Clone, Serialize)]
 pub struct Event {
@@ -37,36 +36,4 @@ pub struct Event {
     pub current: i64,
     pub total: i64,
     pub message: String,
-}
-
-pub fn emit(
-    state: &Arc<AppState>,
-    kind: &str,
-    stage: Option<&str>,
-    phase: Option<WorkflowPhase>,
-    current: i64,
-    total: i64,
-    message: &str,
-) {
-    let _ = state.events.send(Event {
-        kind: kind.into(),
-        stage: stage.map(str::to_owned),
-        level: None,
-        file: None,
-        timestamp: None,
-        detail: None,
-        error: None,
-        attempt: None,
-        duration_ms: None,
-        context: None,
-        phase,
-        current_file: None,
-        processed: None,
-        matched: None,
-        unmatched: None,
-        failed: None,
-        current,
-        total,
-        message: message.into(),
-    });
 }
