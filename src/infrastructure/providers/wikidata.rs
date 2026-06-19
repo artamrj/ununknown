@@ -22,15 +22,21 @@ pub async fn search(
         return Ok(Vec::new());
     };
     let artist = current.artist.as_deref().unwrap_or_default();
-    let query = sparql(title, artist);
     let key = search_key(&format!("{artist} {title}"));
     let raw = if let Some(value) = ProviderCache::get(pool, "wikidata", &key).await? {
         value
     } else {
         let value: Value = client
-            .get("https://query.wikidata.org/sparql")
-            .query(&[("format", "json"), ("query", query.as_str())])
+            .get("https://www.wikidata.org/w/api.php")
+            .query(&[
+                ("action", "wbsearchentities"),
+                ("format", "json"),
+                ("language", "en"),
+                ("limit", "5"),
+                ("search", &format!("{artist} {title}")),
+            ])
             .header("User-Agent", "Ununknown/0.6.0")
+            .timeout(std::time::Duration::from_secs(4))
             .send()
             .await?
             .error_for_status()?
@@ -49,47 +55,21 @@ pub async fn search(
     Ok(candidates_from_query(&raw))
 }
 
-fn sparql(title: &str, artist: &str) -> String {
-    format!(
-        r#"
-SELECT ?work ?workLabel ?artistLabel WHERE {{
-  ?work rdfs:label ?workLabel.
-  FILTER(LANG(?workLabel) = "en")
-  FILTER(CONTAINS(LCASE(STR(?workLabel)), LCASE("{}")))
-  OPTIONAL {{ ?work wdt:P175 ?artist. ?artist rdfs:label ?artistLabel FILTER(LANG(?artistLabel) = "en") }}
-  FILTER("{}" = "" || CONTAINS(LCASE(STR(?artistLabel)), LCASE("{}")))
-  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-}}
-LIMIT 5
-"#,
-        escape(title),
-        escape(artist),
-        escape(artist)
-    )
-}
-
-fn escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn candidates_from_query(raw: &Value) -> Vec<Candidate> {
-    raw["results"]["bindings"]
+    raw["search"]
         .as_array()
         .into_iter()
         .flatten()
         .take(5)
         .map(|row| Candidate {
             provider: "wikidata".into(),
-            title: row["workLabel"]["value"]
-                .as_str()
-                .unwrap_or("Unknown Title")
-                .into(),
-            artist: row["artistLabel"]["value"]
+            title: row["label"].as_str().unwrap_or("Unknown Title").into(),
+            artist: row["description"]
                 .as_str()
                 .unwrap_or("Unknown Artist")
                 .into(),
-            release_id: row["work"]["value"].as_str().map(str::to_owned),
-            score_breakdown: Some(serde_json::json!({"source": "wikidata_sparql"}).to_string()),
+            release_id: row["id"].as_str().map(|value| format!("wikidata:{value}")),
+            score_breakdown: Some(serde_json::json!({"source": "wikidata_search"}).to_string()),
             raw_json: row.to_string(),
             ..Default::default()
         })
@@ -101,16 +81,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_wikidata_bindings() {
+    fn parses_wikidata_search() {
         let raw = serde_json::json!({
-            "results": {"bindings": [{
-                "work": {"value": "http://www.wikidata.org/entity/Q1"},
-                "workLabel": {"value": "Song"},
-                "artistLabel": {"value": "Artist"}
-            }]}
+            "search": [{
+                "id": "Q1",
+                "label": "Song",
+                "description": "song by Artist"
+            }]
         });
         let candidates = candidates_from_query(&raw);
         assert_eq!(candidates[0].provider, "wikidata");
         assert_eq!(candidates[0].title, "Song");
+        assert_eq!(candidates[0].release_id.as_deref(), Some("wikidata:Q1"));
     }
 }

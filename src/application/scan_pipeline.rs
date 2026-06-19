@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -21,11 +22,11 @@ struct PipelineLimits {
     metadata: Arc<Semaphore>,
     fingerprint: Arc<Semaphore>,
     acoustid: Arc<Semaphore>,
+    disabled_providers: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Clone)]
 struct FileJob {
-    index: usize,
     path: PathBuf,
 }
 
@@ -104,6 +105,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         metadata: Arc::new(Semaphore::new(cfg.metadata_read_concurrency)),
         fingerprint: Arc::new(Semaphore::new(cfg.fingerprint_concurrency)),
         acoustid: Arc::new(Semaphore::new(cfg.acoustid_concurrency)),
+        disabled_providers: Arc::new(Mutex::new(HashSet::new())),
     });
     let (persist_tx, persist_rx) = mpsc::channel(cfg.db_write_batch_size.max(1));
     let writer = tokio::spawn(db_writer(
@@ -140,11 +142,11 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             }
         });
     }
-    for (index, path) in files.into_iter().enumerate() {
+    for path in files {
         if state.workflow_cancelled().await {
             break;
         }
-        file_tx.send(FileJob { index, path }).await?;
+        file_tx.send(FileJob { path }).await?;
     }
     drop(file_tx);
     drop(persist_tx);
@@ -201,16 +203,13 @@ async fn process_file(
             return;
         }
         state
-            .set_workflow(
-                WorkflowPhase::Fetch,
-                "fetch",
+            .start_track(
+                total,
+                filename.clone(),
                 format!(
                     "Matching {filename} · attempt {attempt}/{}",
                     cfg.track_attempts
                 ),
-                job.index,
-                total,
-                Some(filename.clone()),
             )
             .await;
         match process(&state, &limits, &persist_tx, &job.path).await {
@@ -415,12 +414,13 @@ async fn process(
         return Ok(false);
     }
     let mut candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
+    dedupe_candidates(&mut candidates);
     state
         .log(
             "info",
-            "musicbrainz",
+            "providers",
             Some(filename),
-            &format!("Provider returned {} candidate(s)", candidates.len()),
+            &format!("Providers returned {} candidate(s)", candidates.len()),
         )
         .await;
     candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -437,26 +437,28 @@ async fn process(
     }
     let Some(best) = candidates.first() else {
         state.increment_unmatched().await;
-        let message = "No MusicBrainz candidate found; counted as unmatched";
+        let message = "No provider candidate found; counted as unmatched";
         persist_unmatched(&state.pool, path, &info, &message).await?;
         state.log("warn", "match", Some(filename), &message).await;
         return Ok(false);
     };
     let second_score = candidates.get(1).map(|candidate| candidate.score);
-    let auto_select = crate::domain::matcher::auto_selectable_for_strategy(
-        cfg.matching_strategy,
-        best.score,
-        second_score,
-        best.duration_delta,
-    );
+    let has_safe_evidence = candidate_has_fingerprint(best) || candidate_source_count(best) >= 2;
+    let auto_select = has_safe_evidence
+        && crate::domain::matcher::auto_selectable_for_strategy(
+            cfg.matching_strategy,
+            best.score,
+            second_score,
+            best.duration_delta,
+        );
     if !auto_select {
         state.increment_unmatched().await;
-        let message = if best.score >= 80.0 {
+        let message = if best.score >= 70.0 {
             "Release uncertain; review required before applying metadata".to_owned()
         } else {
             "No candidate met strict matching rules; counted as unmatched".to_owned()
         };
-        if best.score >= 80.0 {
+        if best.score >= 70.0 {
             persist_review(&state.pool, path, &info, &candidates, &message).await?;
         } else {
             persist_unmatched(&state.pool, path, &info, &message).await?;
@@ -542,6 +544,14 @@ async fn identify(
                 .await?,
             );
             if out.is_empty() {
+                state
+                    .log(
+                        "info",
+                        "providers",
+                        Some(filename),
+                        "Primary sources returned no candidates; querying fallback sources",
+                    )
+                    .await;
                 out.extend(
                     query_candidate_modes(
                         state,
@@ -576,6 +586,14 @@ async fn identify(
                 .map(|candidate| candidate.score)
                 .fold(0.0, f64::max);
             if out.is_empty() || best < 85.0 {
+                state
+                    .log(
+                        "info",
+                        "providers",
+                        Some(filename),
+                        "Primary confidence is medium or empty; querying fallback sources",
+                    )
+                    .await;
                 out.extend(
                     query_candidate_modes(
                         state,
@@ -592,8 +610,18 @@ async fn identify(
             }
         }
     }
-    apply_enrichment_sources(state, cfg, current, filename, &mut out).await;
+    apply_enrichment_sources(state, cfg, limits, current, filename, &mut out).await;
     apply_source_agreement(&mut out)?;
+    if out.is_empty() {
+        state
+            .log(
+                "warn",
+                "providers",
+                Some(filename),
+                "No enabled metadata source returned candidates",
+            )
+            .await;
+    }
     Ok(out)
 }
 
@@ -626,16 +654,16 @@ async fn query_candidate_modes(
         out.extend(query_musicbrainz_text(state, cfg, current, filename).await?);
     }
     if modes.contains(&cfg.metadata_sources.discogs.mode) {
-        out.extend(query_discogs(state, cfg, current, filename).await);
+        out.extend(query_discogs(state, cfg, limits, current, filename).await);
     }
     if modes.contains(&cfg.metadata_sources.lastfm.mode) {
-        out.extend(query_lastfm(state, cfg, current, filename).await);
+        out.extend(query_lastfm(state, cfg, limits, current, filename).await);
     }
     if modes.contains(&cfg.metadata_sources.theaudiodb.mode) {
-        out.extend(query_theaudiodb(state, cfg, current, filename).await);
+        out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
     }
     if modes.contains(&cfg.metadata_sources.wikidata.mode) {
-        out.extend(query_wikidata(state, cfg, current, filename).await);
+        out.extend(query_wikidata(state, cfg, limits, current, filename).await);
     }
     Ok(out)
 }
@@ -765,10 +793,14 @@ async fn query_musicbrainz_text(
 async fn query_discogs(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
     if !cfg.metadata_sources.discogs.enabled {
+        return Vec::new();
+    }
+    if provider_disabled(limits, "discogs").await {
         return Vec::new();
     }
     let token = cfg
@@ -800,7 +832,7 @@ async fn query_discogs(
             candidates
         }
         Err(error) => {
-            log_provider_error(state, filename, "discogs", error).await;
+            handle_provider_error(state, limits, filename, "discogs", error).await;
             Vec::new()
         }
     }
@@ -809,10 +841,14 @@ async fn query_discogs(
 async fn query_lastfm(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
     if !cfg.metadata_sources.lastfm.enabled {
+        return Vec::new();
+    }
+    if provider_disabled(limits, "lastfm").await {
         return Vec::new();
     }
     let api_key = cfg.metadata_sources.lastfm.api_key.trim();
@@ -830,7 +866,7 @@ async fn query_lastfm(
             candidates
         }
         Err(error) => {
-            log_provider_error(state, filename, "lastfm", error).await;
+            handle_provider_error(state, limits, filename, "lastfm", error).await;
             Vec::new()
         }
     }
@@ -839,10 +875,14 @@ async fn query_lastfm(
 async fn query_theaudiodb(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
     if !cfg.metadata_sources.theaudiodb.enabled {
+        return Vec::new();
+    }
+    if provider_disabled(limits, "theaudiodb").await {
         return Vec::new();
     }
     let api_key = cfg.metadata_sources.theaudiodb.api_key.trim();
@@ -866,7 +906,7 @@ async fn query_theaudiodb(
             candidates
         }
         Err(error) => {
-            log_provider_error(state, filename, "theaudiodb", error).await;
+            handle_provider_error(state, limits, filename, "theaudiodb", error).await;
             Vec::new()
         }
     }
@@ -875,10 +915,14 @@ async fn query_theaudiodb(
 async fn query_wikidata(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
     if !cfg.metadata_sources.wikidata.enabled {
+        return Vec::new();
+    }
+    if provider_disabled(limits, "wikidata").await {
         return Vec::new();
     }
     let started = Instant::now();
@@ -891,7 +935,7 @@ async fn query_wikidata(
             candidates
         }
         Err(error) => {
-            log_provider_error(state, filename, "wikidata", error).await;
+            handle_provider_error(state, limits, filename, "wikidata", error).await;
             Vec::new()
         }
     }
@@ -900,6 +944,7 @@ async fn query_wikidata(
 async fn apply_enrichment_sources(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
     candidates: &mut [providers::Candidate],
@@ -909,16 +954,16 @@ async fn apply_enrichment_sources(
     }
     let mut enrichment = Vec::new();
     if cfg.metadata_sources.discogs.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_discogs(state, cfg, current, filename).await);
+        enrichment.extend(query_discogs(state, cfg, limits, current, filename).await);
     }
     if cfg.metadata_sources.lastfm.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_lastfm(state, cfg, current, filename).await);
+        enrichment.extend(query_lastfm(state, cfg, limits, current, filename).await);
     }
     if cfg.metadata_sources.theaudiodb.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_theaudiodb(state, cfg, current, filename).await);
+        enrichment.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
     }
     if cfg.metadata_sources.wikidata.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_wikidata(state, cfg, current, filename).await);
+        enrichment.extend(query_wikidata(state, cfg, limits, current, filename).await);
     }
     if enrichment.is_empty() {
         return;
@@ -946,18 +991,43 @@ fn score_text_candidate(
     current: &audio::AudioInfo,
     source: &str,
 ) -> Result<()> {
-    let score = crate::domain::matcher::score(crate::domain::matcher::CandidateInput {
-        acoustid_score: 1.0,
-        current,
-        title: &candidate.title,
-        artist: &candidate.artist,
-        album: candidate.album.as_deref(),
-        candidate_duration: candidate.duration_delta,
-        is_compilation: candidate.is_compilation,
-        compilation_preference: crate::types::CompilationPreference::Allow,
+    let title = current
+        .title
+        .as_deref()
+        .map(|value| text_similarity(value, &candidate.title))
+        .unwrap_or_default();
+    let artist = current
+        .artist
+        .as_deref()
+        .map(|value| text_similarity(value, &candidate.artist))
+        .unwrap_or_default();
+    let album_context = match (current.album.as_deref(), candidate.album.as_deref()) {
+        (Some(left), Some(right)) => text_similarity(left, right),
+        _ => 0.0,
+    };
+    let candidate_duration = candidate.duration_delta;
+    let duration_delta = candidate_duration.map(|value| (current.duration - value).abs());
+    let duration = duration_delta.map(duration_match).unwrap_or(0.0);
+    candidate.duration_delta = duration_delta;
+    let provider_cap = if candidate.provider == "musicbrainz" {
+        82.0
+    } else {
+        78.0
+    };
+    let score = ((0.40 * title) + (0.30 * artist) + (0.15 * album_context) + (0.15 * duration))
+        .clamp(0.0, 1.0)
+        * 100.0;
+    candidate.score = score.min(provider_cap);
+    let mut value = serde_json::json!({
+        "acoustid": 0.0,
+        "duration": duration,
+        "title": title,
+        "artist": artist,
+        "album_context": album_context,
+        "provider_text_only": true,
+        "auto_select_blocked": "Provider text match requires fingerprint evidence or multi-provider agreement",
+        "final_score": candidate.score
     });
-    candidate.score = score.final_score.min(90.0);
-    let mut value = serde_json::to_value(&score)?;
     value["source"] = serde_json::Value::String(source.to_owned());
     value["sources"] = serde_json::json!([provider_display_name(&candidate.provider)]);
     candidate.score_breakdown = Some(value.to_string());
@@ -974,7 +1044,12 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
             }
             if candidate_agrees(candidate, other) {
                 sources.push(provider_display_name(&other.provider).to_owned());
-                candidate.score = (candidate.score + 3.0).min(99.0);
+                let cap = if candidate_has_fingerprint(candidate) {
+                    99.0
+                } else {
+                    88.0
+                };
+                candidate.score = (candidate.score + 6.0).min(cap);
             } else if text_close(&candidate.title, &other.title, 0.55)
                 && !text_close(&candidate.artist, &other.artist, 0.55)
             {
@@ -984,6 +1059,58 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
         set_score_sources(candidate, sources)?;
     }
     Ok(())
+}
+
+fn dedupe_candidates(candidates: &mut Vec<providers::Candidate>) {
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|candidate| {
+        let key = [
+            normalize_match_key(&candidate.title),
+            normalize_match_key(&candidate.artist),
+            normalize_match_key(candidate.album.as_deref().unwrap_or_default()),
+            normalize_match_key(candidate.release_id.as_deref().unwrap_or_default()),
+        ]
+        .join("|");
+        seen.insert(key)
+    });
+}
+
+fn normalize_match_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn candidate_has_fingerprint(candidate: &providers::Candidate) -> bool {
+    candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value["acoustid"].as_f64())
+        .is_some_and(|value| value > 0.0)
+}
+
+fn candidate_source_count(candidate: &providers::Candidate) -> usize {
+    candidate_source_list(candidate).len()
+}
+
+fn text_similarity(left: &str, right: &str) -> f64 {
+    strsim::normalized_levenshtein(&left.to_ascii_lowercase(), &right.to_ascii_lowercase())
+}
+
+fn duration_match(delta: f64) -> f64 {
+    if delta <= 3.0 {
+        1.0
+    } else if delta <= 8.0 {
+        0.65
+    } else if delta <= 15.0 {
+        0.3
+    } else {
+        0.0
+    }
 }
 
 fn candidate_agrees(left: &providers::Candidate, right: &providers::Candidate) -> bool {
@@ -1072,6 +1199,57 @@ async fn log_provider_error(
                 .error_text(format!("{error:#}")),
         )
         .await;
+}
+
+async fn provider_disabled(limits: &Arc<PipelineLimits>, provider: &str) -> bool {
+    limits.disabled_providers.lock().await.contains(provider)
+}
+
+async fn disable_provider(limits: &Arc<PipelineLimits>, provider: &str) -> bool {
+    limits
+        .disabled_providers
+        .lock()
+        .await
+        .insert(provider.to_owned())
+}
+
+async fn handle_provider_error(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    filename: &str,
+    provider: &str,
+    error: anyhow::Error,
+) {
+    let error_text = format!("{error:#}");
+    let lower = error_text.to_ascii_lowercase();
+    let disable_reason = if lower.contains("401 unauthorized") {
+        Some("authentication failed; check the configured API key/token")
+    } else if lower.contains("429 too many requests") {
+        Some("rate limited by provider")
+    } else if lower.contains("504 gateway timeout") || lower.contains("timed out") {
+        Some("provider timed out")
+    } else {
+        None
+    };
+
+    if let Some(reason) = disable_reason
+        && disable_provider(limits, provider).await
+    {
+        state
+            .log_entry(
+                ActivityLogEntry::new(
+                    "warn",
+                    provider,
+                    format!("Provider disabled for this scan: {reason}"),
+                )
+                .file(filename.to_owned())
+                .error_text(error_text),
+            )
+            .await;
+        return;
+    }
+
+    log_provider_error(state, filename, provider, error).await;
 }
 
 async fn db_writer(
@@ -1568,6 +1746,64 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("Last.fm"))
         );
+    }
+
+    #[test]
+    fn provider_only_candidate_without_agreement_is_not_safe_auto_select() {
+        let candidate = providers::Candidate {
+            provider: "discogs".into(),
+            title: "Song".into(),
+            artist: "Artist".into(),
+            score: 88.0,
+            duration_delta: Some(1.0),
+            score_breakdown: Some(
+                serde_json::json!({
+                    "acoustid": 0.0,
+                    "sources": ["Discogs"]
+                })
+                .to_string(),
+            ),
+            ..Default::default()
+        };
+
+        assert!(!candidate_has_fingerprint(&candidate));
+        assert_eq!(candidate_source_count(&candidate), 1);
+        assert!(crate::domain::matcher::auto_selectable_for_strategy(
+            crate::types::MatchingStrategy::Aggressive,
+            candidate.score,
+            None,
+            candidate.duration_delta
+        ));
+        assert!(
+            !(candidate_has_fingerprint(&candidate) || candidate_source_count(&candidate) >= 2)
+        );
+    }
+
+    #[test]
+    fn dedupe_candidates_keeps_strongest_duplicate() {
+        let mut candidates = vec![
+            providers::Candidate {
+                provider: "lastfm".into(),
+                title: "Song!".into(),
+                artist: "Artist".into(),
+                album: Some("Album".into()),
+                score: 72.0,
+                ..Default::default()
+            },
+            providers::Candidate {
+                provider: "discogs".into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: Some("Album".into()),
+                score: 80.0,
+                ..Default::default()
+            },
+        ];
+
+        dedupe_candidates(&mut candidates);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].provider, "discogs");
     }
 
     #[tokio::test]

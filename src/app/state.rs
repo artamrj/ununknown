@@ -2,7 +2,7 @@ use crate::{config::Config, jobs, types::WorkflowPhase};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{RwLock, Semaphore, broadcast};
 
 #[derive(Clone, Default, Serialize)]
@@ -117,7 +117,11 @@ impl AppState {
         Self {
             config: RwLock::new(config),
             pool,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(12))
+                .user_agent("Ununknown/0.6.0")
+                .build()
+                .expect("HTTP client should build"),
             events,
             artwork_downloads: RwLock::new(Arc::new(Semaphore::new(artwork_download_concurrency))),
             tag_writes: RwLock::new(Arc::new(Semaphore::new(tag_write_concurrency))),
@@ -214,7 +218,12 @@ impl AppState {
         workflow.message = message.clone();
         workflow.current = current;
         workflow.total = total;
-        workflow.current_file = file;
+        workflow.current_file = file.clone();
+        let current_file = workflow.current_file.clone();
+        let processed = workflow.processed as i64;
+        let matched = workflow.matched as i64;
+        let unmatched = workflow.unmatched as i64;
+        let failed = workflow.failed as i64;
         drop(workflow);
         let _ = self.events.send(jobs::Event {
             kind: "workflow".into(),
@@ -228,12 +237,55 @@ impl AppState {
             duration_ms: None,
             context: None,
             phase: Some(phase),
-            current_file: None,
-            processed: None,
-            matched: None,
-            unmatched: None,
-            failed: None,
+            current_file,
+            processed: Some(processed),
+            matched: Some(matched),
+            unmatched: Some(unmatched),
+            failed: Some(failed),
             current: current as i64,
+            total: total as i64,
+            message,
+        });
+    }
+
+    pub async fn start_track(
+        &self,
+        total: usize,
+        file: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        let file = file.into();
+        let mut workflow = self.workflow.write().await;
+        workflow.phase = WorkflowPhase::Fetch;
+        workflow.message = message.clone();
+        workflow.total = total;
+        workflow.current_file = Some(file.clone());
+        let current = workflow.processed as i64;
+        workflow.current = workflow.processed;
+        let processed = workflow.processed as i64;
+        let matched = workflow.matched as i64;
+        let unmatched = workflow.unmatched as i64;
+        let failed = workflow.failed as i64;
+        drop(workflow);
+        let _ = self.events.send(jobs::Event {
+            kind: "workflow".into(),
+            stage: Some("fetch".into()),
+            level: None,
+            file: None,
+            timestamp: None,
+            detail: None,
+            error: None,
+            attempt: None,
+            duration_ms: None,
+            context: None,
+            phase: Some(WorkflowPhase::Fetch),
+            current_file: Some(file),
+            processed: Some(processed),
+            matched: Some(matched),
+            unmatched: Some(unmatched),
+            failed: Some(failed),
+            current,
             total: total as i64,
             message,
         });
@@ -370,5 +422,47 @@ mod tests {
             .await;
         assert!(!state.workflow_running().await);
         assert!(!state.workflow_cancelled().await);
+    }
+
+    #[tokio::test]
+    async fn workflow_events_include_zero_counters_and_current_file() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let state = AppState::new(Config::default(), pool);
+        let mut rx = state.events.subscribe();
+
+        state
+            .set_workflow(
+                WorkflowPhase::Fetch,
+                "fetch",
+                "Starting",
+                0,
+                10,
+                Some("first.mp3".into()),
+            )
+            .await;
+        let event = rx.recv().await.unwrap();
+
+        assert_eq!(event.current, 0);
+        assert_eq!(event.total, 10);
+        assert_eq!(event.current_file.as_deref(), Some("first.mp3"));
+        assert_eq!(event.processed, Some(0));
+        assert_eq!(event.matched, Some(0));
+        assert_eq!(event.unmatched, Some(0));
+        assert_eq!(event.failed, Some(0));
+    }
+
+    #[tokio::test]
+    async fn track_start_does_not_move_progress_backward() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let state = AppState::new(Config::default(), pool);
+        state.finish_track(10).await;
+        state.finish_track(10).await;
+
+        state.start_track(10, "late.mp3", "Matching late.mp3").await;
+        let workflow = state.workflow.read().await.clone();
+
+        assert_eq!(workflow.current, 2);
+        assert_eq!(workflow.processed, 2);
+        assert_eq!(workflow.current_file.as_deref(), Some("late.mp3"));
     }
 }

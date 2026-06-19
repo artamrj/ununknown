@@ -68,9 +68,9 @@ export function useEvents(): EventStatus {
               event.phase && phases.has(event.phase)
                 ? (event.phase as Workflow["phase"])
                 : current.phase,
-            current_file: event.current_file || event.file || current.current_file,
-            current: event.current || current.current,
-            total: event.total || current.total,
+            current_file: event.current_file ?? event.file ?? current.current_file,
+            current: event.current ?? current.current,
+            total: event.total ?? current.total,
             processed: event.processed ?? current.processed,
             matched: event.matched ?? current.matched,
             unmatched: event.unmatched ?? current.unmatched,
@@ -86,11 +86,11 @@ export function useEvents(): EventStatus {
           ...current,
           phase,
           message: event.message || current.message,
-          current: event.current || current.current,
-          total: event.total || current.total,
+          current: event.current ?? current.current,
+          total: event.total ?? current.total,
           current_file:
-            event.current_file ||
-            event.file ||
+            event.current_file ??
+            event.file ??
             (phase === "fetch" && event.message ? event.message : current.current_file),
           processed: event.processed ?? current.processed,
           matched: event.matched ?? current.matched,

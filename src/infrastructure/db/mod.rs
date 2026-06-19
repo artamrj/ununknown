@@ -1,16 +1,25 @@
 use crate::config::Config;
 use anyhow::Result;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
-use std::path::Path;
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+};
+use std::{path::Path, str::FromStr, time::Duration};
 
 pub async fn connect(path: &str) -> Result<SqlitePool> {
     if let Some(parent) = Path::new(path).parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     let url = format!("sqlite://{path}?mode=rwc");
+    let options = SqliteConnectOptions::from_str(&url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(30));
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&url)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect_with(options)
         .await?;
     sqlx::migrate!().run(&pool).await?;
     Ok(pool)
