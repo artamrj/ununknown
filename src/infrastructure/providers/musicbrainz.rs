@@ -26,7 +26,10 @@ pub async fn recording(
         let value = request_json(
             client
                 .get(format!("https://musicbrainz.org/ws/2/recording/{id}"))
-                .query(&[("fmt", "json"), ("inc", "artists+releases+isrcs")])
+                .query(&[
+                    ("fmt", "json"),
+                    ("inc", "artists+releases+release-groups+media+isrcs"),
+                ])
                 .header("User-Agent", user_agent),
         )
         .await?;
@@ -62,7 +65,12 @@ pub async fn search(
         let value = request_json(
             client
                 .get("https://musicbrainz.org/ws/2/recording")
-                .query(&[("fmt", "json"), ("limit", "3"), ("query", &query)])
+                .query(&[
+                    ("fmt", "json"),
+                    ("limit", "5"),
+                    ("query", &query),
+                    ("inc", "releases+release-groups"),
+                ])
                 .header("User-Agent", user_agent),
         )
         .await?;
@@ -86,9 +94,30 @@ pub async fn search(
 
 fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     let release = raw["releases"].as_array().and_then(|v| v.first());
+    let release_group = release.and_then(|v| v.get("release-group"));
     let artist = raw["artist-credit"].as_array().and_then(|v| v.first());
     let artist_obj = artist.and_then(|v| v.get("artist"));
     let release_id = release.and_then(|v| v["id"].as_str()).map(str::to_owned);
+    let secondary_types = release_group
+        .and_then(|v| v["secondary-types"].as_array())
+        .map(|values| join_values(values));
+    let release_type = release_group
+        .and_then(|v| v["primary-type"].as_str())
+        .map(str::to_owned);
+    let is_compilation = secondary_types
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().contains("compilation"));
+    let media_track = release
+        .and_then(|v| v["media"].as_array())
+        .and_then(|v| v.first())
+        .and_then(|v| v["tracks"].as_array())
+        .and_then(|tracks| {
+            tracks.iter().find(|track| {
+                track["recording"]["id"]
+                    .as_str()
+                    .is_some_and(|recording_id| recording_id == id)
+            })
+        });
     Candidate {
         title: raw["title"].as_str().unwrap_or("Unknown Title").into(),
         artist: artist
@@ -96,7 +125,22 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
             .unwrap_or("Unknown Artist")
             .into(),
         album: release.and_then(|v| v["title"].as_str()).map(str::to_owned),
+        duration_delta: raw["length"].as_f64().map(|millis| millis / 1000.0),
+        track_number: media_track
+            .and_then(|v| v["number"].as_str())
+            .and_then(|value| value.parse().ok()),
+        track_total: release
+            .and_then(|v| v["media"].as_array())
+            .and_then(|v| v.first())
+            .and_then(|v| v["track-count"].as_i64()),
         year: release.and_then(|v| v["date"].as_str()).map(str::to_owned),
+        release_country: release
+            .and_then(|v| v["country"].as_str())
+            .map(str::to_owned),
+        release_date: release.and_then(|v| v["date"].as_str()).map(str::to_owned),
+        release_type,
+        release_secondary_types: secondary_types,
+        is_compilation,
         isrc: raw["isrcs"]
             .as_array()
             .and_then(|v| v.first())
@@ -167,6 +211,13 @@ fn candidate_from_search(raw: &Value) -> Candidate {
         .as_array()
         .and_then(|value| value.first());
     let release = raw["releases"].as_array().and_then(|value| value.first());
+    let release_group = release.and_then(|value| value.get("release-group"));
+    let secondary_types = release_group
+        .and_then(|value| value["secondary-types"].as_array())
+        .map(|values| join_values(values));
+    let is_compilation = secondary_types
+        .as_deref()
+        .is_some_and(|value| value.to_ascii_lowercase().contains("compilation"));
     let release_id = release
         .and_then(|value| value["id"].as_str())
         .map(str::to_owned);
@@ -179,6 +230,21 @@ fn candidate_from_search(raw: &Value) -> Candidate {
         album: release
             .and_then(|value| value["title"].as_str())
             .map(str::to_owned),
+        duration_delta: raw["length"].as_f64().map(|millis| millis / 1000.0),
+        year: release
+            .and_then(|value| value["date"].as_str())
+            .map(str::to_owned),
+        release_country: release
+            .and_then(|value| value["country"].as_str())
+            .map(str::to_owned),
+        release_date: release
+            .and_then(|value| value["date"].as_str())
+            .map(str::to_owned),
+        release_type: release_group
+            .and_then(|value| value["primary-type"].as_str())
+            .map(str::to_owned),
+        release_secondary_types: secondary_types,
+        is_compilation,
         recording_id: raw["id"].as_str().map(str::to_owned),
         release_id: release_id.clone(),
         artist_id: artist
@@ -189,6 +255,14 @@ fn candidate_from_search(raw: &Value) -> Candidate {
         raw_json: raw.to_string(),
         ..Default::default()
     }
+}
+
+fn join_values(values: &[Value]) -> String {
+    values
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -215,9 +289,19 @@ mod tests {
             "musicbrainz",
             &recording_key("recording-1"),
             &serde_json::json!({
+                "length": 180000,
                 "title": "Song",
                 "artist-credit": [{ "name": "Artist", "artist": { "id": "artist-1" } }],
-                "releases": [{ "id": "release-1", "title": "Album", "date": "2024" }],
+                "releases": [{
+                    "id": "release-1",
+                    "title": "Album",
+                    "date": "2024-01-02",
+                    "country": "US",
+                    "release-group": {
+                        "primary-type": "Album",
+                        "secondary-types": ["Compilation"]
+                    }
+                }],
                 "isrcs": ["USRC17607839"]
             }),
             Utc::now() + Duration::days(1),
@@ -235,6 +319,15 @@ mod tests {
         .unwrap();
         assert_eq!(candidate.title, "Song");
         assert_eq!(candidate.release_id.as_deref(), Some("release-1"));
+        assert_eq!(candidate.release_country.as_deref(), Some("US"));
+        assert_eq!(candidate.release_date.as_deref(), Some("2024-01-02"));
+        assert_eq!(candidate.release_type.as_deref(), Some("Album"));
+        assert_eq!(
+            candidate.release_secondary_types.as_deref(),
+            Some("Compilation")
+        );
+        assert!(candidate.is_compilation);
+        assert_eq!(candidate.duration_delta, Some(180.0));
     }
 
     #[tokio::test]
@@ -247,10 +340,20 @@ mod tests {
             &search_key(query),
             &serde_json::json!({
                 "recordings": [{
+                    "length": 181000,
                     "id": "recording-1",
                     "title": "Song",
                     "artist-credit": [{ "name": "Artist", "artist": { "id": "artist-1" } }],
-                    "releases": [{ "id": "release-1", "title": "Album" }]
+                    "releases": [{
+                        "id": "release-1",
+                        "title": "Album",
+                        "date": "2023",
+                        "country": "GB",
+                        "release-group": {
+                            "primary-type": "Single",
+                            "secondary-types": []
+                        }
+                    }]
                 }]
             }),
             Utc::now() + Duration::days(1),
@@ -269,5 +372,9 @@ mod tests {
         .unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].recording_id.as_deref(), Some("recording-1"));
+        assert_eq!(candidates[0].release_country.as_deref(), Some("GB"));
+        assert_eq!(candidates[0].release_type.as_deref(), Some("Single"));
+        assert!(!candidates[0].is_compilation);
+        assert_eq!(candidates[0].duration_delta, Some(181.0));
     }
 }

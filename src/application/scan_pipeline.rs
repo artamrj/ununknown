@@ -407,7 +407,14 @@ async fn process(
             "MusicBrainz lookups are queued at one request per second",
         )
         .await;
-    let candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
+    if info.duration < 30.0 {
+        state.increment_unmatched().await;
+        let message = "Track is shorter than 30 seconds; skipped automatic identification";
+        persist_unmatched(&state.pool, path, &info, message).await?;
+        state.log("warn", "match", Some(filename), message).await;
+        return Ok(false);
+    }
+    let mut candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
     state
         .log(
             "info",
@@ -416,41 +423,44 @@ async fn process(
             &format!("Provider returned {} candidate(s)", candidates.len()),
         )
         .await;
-    let best = candidates
-        .into_iter()
-        .max_by(|a, b| a.score.total_cmp(&b.score));
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     if cfg.automation_mode == AutomationMode::Manual {
         state.increment_unmatched().await;
-        persist_unmatched(
-            &state.pool,
-            path,
-            &info,
-            "Manual mode is enabled; candidate was not auto-selected",
-        )
-        .await?;
-        state
-            .log(
-                "warn",
-                "match",
-                Some(filename),
-                "Manual mode is enabled; candidate was not auto-selected",
-            )
-            .await;
+        let message = "Manual mode is enabled; candidates require review";
+        if candidates.is_empty() {
+            persist_unmatched(&state.pool, path, &info, message).await?;
+        } else {
+            persist_review(&state.pool, path, &info, &candidates, message).await?;
+        }
+        state.log("warn", "match", Some(filename), message).await;
         return Ok(false);
     }
-    let threshold = match cfg.automation_mode {
-        AutomationMode::Aggressive => 75.0,
-        AutomationMode::Custom => cfg.confidence_threshold,
-        AutomationMode::Safe => 90.0,
-        AutomationMode::Manual => unreachable!("manual mode returns before threshold selection"),
-    };
-    let Some(candidate) = best.filter(|c| c.score >= threshold) else {
+    let Some(best) = candidates.first() else {
         state.increment_unmatched().await;
-        let message = format!("No candidate met threshold {threshold:.0}; counted as unmatched");
+        let message = "No MusicBrainz candidate found; counted as unmatched";
         persist_unmatched(&state.pool, path, &info, &message).await?;
         state.log("warn", "match", Some(filename), &message).await;
         return Ok(false);
     };
+    let second_score = candidates.get(1).map(|candidate| candidate.score);
+    let auto_select =
+        crate::domain::matcher::auto_selectable(best.score, second_score, best.duration_delta);
+    if !auto_select {
+        state.increment_unmatched().await;
+        let message = if best.score >= 80.0 {
+            "Release uncertain; review required before applying metadata".to_owned()
+        } else {
+            "No candidate met strict matching rules; counted as unmatched".to_owned()
+        };
+        if best.score >= 80.0 {
+            persist_review(&state.pool, path, &info, &candidates, &message).await?;
+        } else {
+            persist_unmatched(&state.pool, path, &info, &message).await?;
+        }
+        state.log("warn", "match", Some(filename), &message).await;
+        return Ok(false);
+    }
+    let candidate = candidates.remove(0);
     state
         .log(
             "ok",
@@ -530,13 +540,21 @@ async fn identify(
                         .context(serde_json::json!({"recording_id": hit.recording_id})),
                 )
                 .await;
-            candidate.score = crate::domain::matcher::score(
-                hit.score,
+            let candidate_duration = candidate.duration_delta;
+            let duration_delta = candidate_duration.map(|value| (current.duration - value).abs());
+            let breakdown = crate::domain::matcher::score(crate::domain::matcher::CandidateInput {
+                acoustid_score: hit.score,
                 current,
-                &candidate.title,
-                &candidate.artist,
-                duration,
-            );
+                title: &candidate.title,
+                artist: &candidate.artist,
+                album: candidate.album.as_deref(),
+                candidate_duration,
+                is_compilation: candidate.is_compilation,
+                compilation_preference: cfg.compilation_preference,
+            });
+            candidate.score = breakdown.final_score;
+            candidate.duration_delta = duration_delta;
+            candidate.score_breakdown = Some(serde_json::to_string(&breakdown)?);
             out.push(candidate);
         }
     }
@@ -560,6 +578,13 @@ async fn identify(
                     current,
                     &candidate.title,
                     &candidate.artist,
+                );
+                candidate.score_breakdown = Some(
+                    serde_json::json!({
+                        "source": "musicbrainz_text_search",
+                        "final_score": candidate.score
+                    })
+                    .to_string(),
                 );
                 out.push(candidate);
             }
@@ -655,13 +680,81 @@ async fn persist_match(
         sqlx::query("INSERT INTO tracks(path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'selected',0,?,?,?,'ready',?)")
             .bind(text.as_ref()).bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(&now).execute(&mut **tx).await?.last_insert_rowid()
     };
-    let cid=sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,musicbrainz_recording_id,musicbrainz_release_id,musicbrainz_artist_id,musicbrainz_album_artist_id,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(id).bind("musicbrainz").bind(&c.title).bind(&c.artist).bind(&c.album).bind(&c.album_artist).bind(c.track_number).bind(c.track_total).bind(c.disc_number).bind(c.disc_total).bind(&c.year).bind(&c.genre).bind(&c.composer).bind(&c.label).bind(&c.isrc).bind(&c.cover_url).bind(&c.recording_id).bind(&c.release_id).bind(&c.artist_id).bind(&c.album_artist_id).bind(c.score).bind(&c.raw_json).execute(&mut **tx).await?.last_insert_rowid();
+    let cid = insert_candidate(tx, id, c).await?;
     sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
         .bind(cid)
         .bind(id)
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+async fn insert_candidate(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    track_id: i64,
+    c: &providers::Candidate,
+) -> Result<i64> {
+    Ok(sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,musicbrainz_recording_id,musicbrainz_release_id,release_country,release_date,release_type,release_secondary_types,is_compilation,duration_delta,score_breakdown,musicbrainz_artist_id,musicbrainz_album_artist_id,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(track_id)
+        .bind("musicbrainz")
+        .bind(&c.title)
+        .bind(&c.artist)
+        .bind(&c.album)
+        .bind(&c.album_artist)
+        .bind(c.track_number)
+        .bind(c.track_total)
+        .bind(c.disc_number)
+        .bind(c.disc_total)
+        .bind(&c.year)
+        .bind(&c.genre)
+        .bind(&c.composer)
+        .bind(&c.label)
+        .bind(&c.isrc)
+        .bind(&c.cover_url)
+        .bind(&c.recording_id)
+        .bind(&c.release_id)
+        .bind(&c.release_country)
+        .bind(&c.release_date)
+        .bind(&c.release_type)
+        .bind(&c.release_secondary_types)
+        .bind(c.is_compilation)
+        .bind(c.duration_delta)
+        .bind(&c.score_breakdown)
+        .bind(&c.artist_id)
+        .bind(&c.album_artist_id)
+        .bind(c.score)
+        .bind(&c.raw_json)
+        .execute(&mut **tx)
+        .await?
+        .last_insert_rowid())
+}
+
+async fn persist_review(
+    pool: &sqlx::SqlitePool,
+    path: &Path,
+    info: &audio::AudioInfo,
+    candidates: &[providers::Candidate],
+    message: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let id = upsert_track_outcome(
+        &mut tx,
+        path,
+        Some(info),
+        "needs_review",
+        "review",
+        Some(message),
+        None,
+    )
+    .await?;
+    sqlx::query("DELETE FROM candidates WHERE track_id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    for candidate in candidates.iter().take(5) {
+        insert_candidate(&mut tx, id, candidate).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 

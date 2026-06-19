@@ -1,15 +1,16 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { api, type Track, type TrackPage } from "@/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, type Candidate, type Track, type TrackPage } from "@/api";
 import type { WorkflowViewProps } from "@/features/workflow/types";
 import { Button } from "@/shared/components/Button";
 import { PreviewList } from "@/features/workflow/components/preview/PreviewList";
 import { ActivityLog } from "@/features/workflow/components/ActivityLog";
 
-type PreviewTab = "results" | "unmatched" | "failed" | "logs";
+type PreviewTab = "results" | "review" | "unmatched" | "failed" | "logs";
 
 const tabs: { id: PreviewTab; label: string }[] = [
   { id: "results", label: "Results" },
+  { id: "review", label: "Review Required" },
   { id: "unmatched", label: "Unmatched" },
   { id: "failed", label: "Failed" },
   { id: "logs", label: "Logs" },
@@ -22,7 +23,9 @@ export function PreviewView({
   eventStatus,
   onScan,
   onApply,
+  onPreviewStale,
 }: WorkflowViewProps) {
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<PreviewTab>("results");
   const items = preview?.items || [];
   const writeCount = preview?.summary?.write_count ?? items.length;
@@ -32,10 +35,42 @@ export function PreviewView({
     queryFn: () => api<TrackPage>("/tracks?view=unmatched&page_size=200"),
     enabled: tab === "unmatched",
   });
+  const review = useQuery({
+    queryKey: ["tracks", "view", "review"],
+    queryFn: () => api<TrackPage>("/tracks?view=review&page_size=200"),
+    enabled: tab === "review",
+  });
   const failed = useQuery({
     queryKey: ["tracks", "view", "failed"],
     queryFn: () => api<TrackPage>("/tracks?view=failed&page_size=200"),
     enabled: tab === "failed",
+  });
+  const reviewAction = useMutation({
+    mutationFn: ({
+      trackId,
+      candidateId,
+      action,
+    }: {
+      trackId: number;
+      candidateId?: number;
+      action: "select" | "skip" | "keep";
+    }) => {
+      if (action === "select") {
+        return api(`/tracks/${trackId}/select-candidate`, {
+          method: "POST",
+          body: JSON.stringify({ candidate_id: candidateId }),
+        });
+      }
+      return api(`/tracks/${trackId}/${action === "skip" ? "skip" : "keep-current"}`, {
+        method: "POST",
+        body: "{}",
+      });
+    },
+    onSuccess: () => {
+      onPreviewStale();
+      queryClient.invalidateQueries({ queryKey: ["tracks"] });
+      queryClient.invalidateQueries({ queryKey: ["workspace"] });
+    },
   });
 
   return (
@@ -105,6 +140,20 @@ export function PreviewView({
           tracks={unmatched.data?.items || []}
         />
       )}
+      {tab === "review" && (
+        <ReviewRequiredList
+          error={review.error}
+          loading={review.isLoading}
+          pending={reviewAction.isPending}
+          total={review.data?.total}
+          tracks={review.data?.items || []}
+          onKeep={(trackId) => reviewAction.mutate({ trackId, action: "keep" })}
+          onSelect={(trackId, candidateId) =>
+            reviewAction.mutate({ trackId, candidateId, action: "select" })
+          }
+          onSkip={(trackId) => reviewAction.mutate({ trackId, action: "skip" })}
+        />
+      )}
       {tab === "failed" && (
         <TrackReviewList
           emptyText="No failed tracks"
@@ -125,6 +174,109 @@ export function PreviewView({
         </div>
       )}
     </section>
+  );
+}
+
+function ReviewRequiredList({
+  tracks,
+  loading,
+  error,
+  total,
+  pending,
+  onSelect,
+  onSkip,
+  onKeep,
+}: {
+  tracks: Track[];
+  loading: boolean;
+  error?: Error | null;
+  total?: number;
+  pending: boolean;
+  onSelect: (trackId: number, candidateId: number) => void;
+  onSkip: (trackId: number) => void;
+  onKeep: (trackId: number) => void;
+}) {
+  if (loading) return <div className="review-list-state">Loading review tracks...</div>;
+  if (error) return <div className="review-list-state error">{error.message}</div>;
+  if (!tracks.length) return <div className="review-list-state">No tracks need review</div>;
+
+  return (
+    <>
+      {typeof total === "number" && (
+        <div className="review-list-count">
+          Showing {tracks.length} of {total}
+        </div>
+      )}
+      <div className="review-track-list">
+        {tracks.map((track) => (
+          <article className="review-track-row review-required-row" key={track.id}>
+            <div>
+              <strong>{track.filename}</strong>
+              <span>{track.stage_message || "Choose the correct release before preview."}</span>
+            </div>
+            <div className="candidate-options">
+              {track.candidates.map((candidate) => (
+                <CandidateOption
+                  candidate={candidate}
+                  disabled={pending}
+                  key={candidate.id}
+                  onSelect={() => onSelect(track.id, candidate.id)}
+                />
+              ))}
+            </div>
+            <div className="review-actions">
+              <button disabled={pending} onClick={() => onKeep(track.id)} type="button">
+                Keep current tags
+              </button>
+              <button disabled={pending} onClick={() => onSkip(track.id)} type="button">
+                Skip
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function CandidateOption({
+  candidate,
+  disabled,
+  onSelect,
+}: {
+  candidate: Candidate;
+  disabled: boolean;
+  onSelect: () => void;
+}) {
+  const releaseType = [
+    candidate.release_type,
+    candidate.release_secondary_types,
+    candidate.is_compilation ? "Compilation" : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="candidate-option">
+      {candidate.cover_url ? <img alt="" src={candidate.cover_url} /> : <span className="cover-fallback" />}
+      <div>
+        <strong>{candidate.album || candidate.title || "Unknown release"}</strong>
+        <span>{candidate.artist || "Unknown artist"}</span>
+        <small>
+          {[candidate.release_date || candidate.year, candidate.release_country, releaseType]
+            .filter(Boolean)
+            .join(" · ")}
+        </small>
+        <small>
+          {Math.round(candidate.score)}%
+          {typeof candidate.duration_delta === "number"
+            ? ` · ${candidate.duration_delta.toFixed(1)}s duration delta`
+            : ""}
+        </small>
+      </div>
+      <button disabled={disabled} onClick={onSelect} type="button">
+        Select
+      </button>
+    </div>
   );
 }
 

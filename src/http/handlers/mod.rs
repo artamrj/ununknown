@@ -41,8 +41,8 @@ pub use settings::{
     update_settings,
 };
 pub use tracks::{
-    candidates, edit_candidate, get_track, list_tracks, retry_failed, retry_track,
-    select_candidate, skip_review,
+    candidates, edit_candidate, get_track, keep_current_track, list_tracks, retry_failed,
+    retry_track, select_candidate, skip_review, skip_track,
 };
 pub use workspace::{clear_workspace, workspace};
 
@@ -89,6 +89,13 @@ pub struct CandidateRow {
     cover_url: Option<String>,
     musicbrainz_recording_id: Option<String>,
     musicbrainz_release_id: Option<String>,
+    release_country: Option<String>,
+    release_date: Option<String>,
+    release_type: Option<String>,
+    release_secondary_types: Option<String>,
+    is_compilation: bool,
+    duration_delta: Option<f64>,
+    score_breakdown: Option<String>,
     musicbrainz_artist_id: Option<String>,
     musicbrainz_album_artist_id: Option<String>,
     score: f64,
@@ -114,6 +121,13 @@ impl CandidateRow {
             cover_url: self.cover_url.clone(),
             recording_id: self.musicbrainz_recording_id.clone(),
             release_id: self.musicbrainz_release_id.clone(),
+            release_country: self.release_country.clone(),
+            release_date: self.release_date.clone(),
+            release_type: self.release_type.clone(),
+            release_secondary_types: self.release_secondary_types.clone(),
+            is_compilation: self.is_compilation,
+            duration_delta: self.duration_delta,
+            score_breakdown: self.score_breakdown.clone(),
             artist_id: self.musicbrainz_artist_id.clone(),
             album_artist_id: self.musicbrainz_album_artist_id.clone(),
             score: self.score,
@@ -665,6 +679,10 @@ mod tests {
                 .await
                 .unwrap();
         }
+        sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,score) SELECT id,'musicbrainz','Review Song','Artist',88 FROM tracks WHERE filename='review.mp3'")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let state = Arc::new(AppState::new(Config::default(), pool));
         let unmatched = tracks::list_tracks(
@@ -674,6 +692,19 @@ mod tests {
                 page_size: None,
                 status: None,
                 view: Some("unmatched".into()),
+                search: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let review = tracks::list_tracks(
+            State(state.clone()),
+            Query(TrackQuery {
+                page: None,
+                page_size: None,
+                status: None,
+                view: Some("review".into()),
                 search: None,
             }),
         )
@@ -704,7 +735,13 @@ mod tests {
             .into_iter()
             .map(|track| track.track.filename)
             .collect();
-        assert_eq!(unmatched, ["review.mp3", "unmatched.mp3"]);
+        let review: Vec<_> = review
+            .items
+            .into_iter()
+            .map(|track| track.track.filename)
+            .collect();
+        assert_eq!(unmatched, ["unmatched.mp3"]);
+        assert_eq!(review, ["review.mp3"]);
         assert_eq!(failed, ["failed.mp3"]);
     }
 

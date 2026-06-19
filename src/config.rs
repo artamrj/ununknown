@@ -1,4 +1,4 @@
-use crate::types::{AutomationMode, CollisionStrategy, OutputMode};
+use crate::types::{AutomationMode, CollisionStrategy, CompilationPreference, OutputMode};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,7 @@ pub struct Config {
     pub output_dir: String,
     pub output_mode: OutputMode,
     pub automation_mode: AutomationMode,
+    pub compilation_preference: CompilationPreference,
     pub confidence_threshold: f64,
     pub track_attempts: u32,
     pub scan_worker_concurrency: usize,
@@ -200,6 +201,7 @@ impl Default for Config {
             output_dir: "/music/output".into(),
             output_mode: OutputMode::Copy,
             automation_mode: AutomationMode::Safe,
+            compilation_preference: CompilationPreference::Avoid,
             confidence_threshold: 90.0,
             track_attempts: 3,
             scan_worker_concurrency: 8,

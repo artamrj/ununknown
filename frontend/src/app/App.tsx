@@ -85,6 +85,7 @@ export function App() {
             confirm("Apply these metadata changes? Duplicate skips will not be written.") &&
             apply.mutate()
           }
+          onPreviewStale={() => setPreview(undefined)}
         />
         {active && <div className="sr-only">Processing</div>}
       </main>

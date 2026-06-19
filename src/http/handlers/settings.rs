@@ -45,6 +45,7 @@ pub async fn reset_settings_section(
     match section.as_str() {
         "matching" => {
             cfg.automation_mode = defaults.automation_mode;
+            cfg.compilation_preference = defaults.compilation_preference;
             cfg.confidence_threshold = defaults.confidence_threshold;
             cfg.track_attempts = defaults.track_attempts;
             cfg.scan_worker_concurrency = defaults.scan_worker_concurrency;

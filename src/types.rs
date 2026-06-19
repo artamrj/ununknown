@@ -35,6 +35,15 @@ pub enum AutomationMode {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum CompilationPreference {
+    #[default]
+    Avoid,
+    Allow,
+    Prefer,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CollisionStrategy {
     #[default]
     Skip,
@@ -212,6 +221,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AutomationMode::Aggressive).unwrap(),
             "\"aggressive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CompilationPreference::Avoid).unwrap(),
+            "\"avoid\""
         );
         assert_eq!(
             serde_json::to_string(&CollisionStrategy::Overwrite).unwrap(),

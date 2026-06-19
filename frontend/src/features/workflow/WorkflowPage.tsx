@@ -15,6 +15,7 @@ export function WorkflowPage({
   onScan,
   onStop,
   onApply,
+  onPreviewStale,
 }: WorkflowPageProps) {
   if (!workflow || loading) {
     return (
@@ -32,6 +33,7 @@ export function WorkflowPage({
     onScan,
     onStop,
     onApply,
+    onPreviewStale,
   };
 
   if (workflow.phase === "idle") return <IdleView {...viewProps} />;

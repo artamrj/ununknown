@@ -42,6 +42,11 @@ pub fn router() -> Router<Arc<AppState>> {
             axum::routing::put(handlers::edit_candidate),
         )
         .route("/tracks/{id}/retry", post(handlers::retry_track))
+        .route("/tracks/{id}/skip", post(handlers::skip_track))
+        .route(
+            "/tracks/{id}/keep-current",
+            post(handlers::keep_current_track),
+        )
         .route("/tracks/bulk/retry", post(handlers::retry_failed))
         .route("/tracks/bulk/skip", post(handlers::skip_review))
         .route("/path-template/preview", post(handlers::template_preview))

@@ -1,6 +1,6 @@
 import type { SettingsSectionProps } from "@/features/settings/types";
 import { Choice, NumberField, Reset, Section } from "@/features/settings/components/SettingsFields";
-import { modeHelp } from "@/features/settings/settingsOptions";
+import { compilationHelp, modeHelp } from "@/features/settings/settingsOptions";
 
 export function MatchingSettings({ settings, visible, set, reset }: SettingsSectionProps) {
   return (
@@ -23,6 +23,11 @@ export function MatchingSettings({ settings, visible, set, reset }: SettingsSect
             set={(value) => set("confidence_threshold", value)}
           />
         )}
+        <Choice
+          value={settings.compilation_preference || "avoid"}
+          set={(value) => set("compilation_preference", value)}
+          items={Object.entries(compilationHelp).map(([key, value]) => [key, value[0], value[1]])}
+        />
         <NumberField
           show={visible}
           l="Attempts per track"

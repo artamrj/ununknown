@@ -1476,6 +1476,56 @@ select:focus-visible {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.review-required-row {
+  grid-template-columns: minmax(180px, 0.8fr) minmax(360px, 1.8fr) 150px;
+}
+.candidate-options {
+  display: grid;
+  gap: 8px;
+}
+.candidate-option {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+.candidate-option img,
+.cover-fallback {
+  width: 46px;
+  height: 46px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #4f5ee8, #12b76a);
+  object-fit: cover;
+}
+.candidate-option > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.candidate-option small {
+  color: #667085;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.candidate-option button,
+.review-actions button {
+  border: 0;
+  border-radius: 7px;
+  padding: 7px 9px;
+  background: #eef2ff;
+  color: #3444c5;
+  font-size: 11px;
+  font-weight: 750;
+}
+.review-actions {
+  display: grid;
+  gap: 7px;
+}
 .apply-bar {
   bottom: 10px;
   margin-top: 12px;
@@ -1503,6 +1553,12 @@ select:focus-visible {
   }
   .review-track-row {
     grid-template-columns: 1fr;
+  }
+  .candidate-option {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+  .candidate-option button {
+    grid-column: 1 / -1;
   }
   .compact-preview-head {
     display: none;

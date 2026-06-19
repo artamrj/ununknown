@@ -14,6 +14,13 @@ export type Candidate = {
   label?: string;
   isrc?: string;
   cover_url?: string;
+  release_country?: string;
+  release_date?: string;
+  release_type?: string;
+  release_secondary_types?: string;
+  is_compilation?: boolean;
+  duration_delta?: number;
+  score_breakdown?: string;
   score: number;
 };
 

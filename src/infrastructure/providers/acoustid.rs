@@ -47,7 +47,7 @@ pub async fn lookup(
             .post("https://api.acoustid.org/v2/lookup")
             .form(&[
                 ("client", key),
-                ("meta", "recordings"),
+                ("meta", "recordings releases releasegroups tracks compress"),
                 ("fingerprint", fingerprint),
                 ("duration", &duration.round().to_string()),
             ])
@@ -145,7 +145,7 @@ pub async fn test_key(client: &Client, key: &str, fingerprint: &str, duration: f
         .post("https://api.acoustid.org/v2/lookup")
         .form(&[
             ("client", key),
-            ("meta", "recordings"),
+            ("meta", "recordings releases releasegroups tracks compress"),
             ("fingerprint", fingerprint),
             ("duration", &duration.round().to_string()),
         ])

@@ -1,13 +1,19 @@
 export const tabs = ["Basic", "Matching", "Metadata", "Files & Paths", "Expert"];
 
 export const modeHelp: Record<string, [string, string]> = {
-  safe: ["Safe", "Automatically keeps strong matches at 90% or higher."],
+  safe: ["Safe", "Automatically keeps strict matches with a clear release winner."],
   aggressive: ["Aggressive", "Automatically keeps matches at 75% or higher."],
   manual: [
     "Manual",
-    "Does not auto-select anything. In 0.3, this means no automatic preview entries.",
+    "Does not auto-select anything; candidates are sent to review.",
   ],
   custom: ["Custom", "Automatically keeps matches at your chosen confidence number."],
+};
+
+export const compilationHelp: Record<string, [string, string]> = {
+  avoid: ["Avoid by default", "Penalizes compilations when album or single releases are plausible."],
+  allow: ["Allow normally", "Scores compilations without an extra penalty or bonus."],
+  prefer: ["Prefer compilations", "Boosts compilation releases and labels them in review."],
 };
 
 export const metadataGroups = [

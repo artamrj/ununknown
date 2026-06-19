@@ -9,6 +9,7 @@ export type WorkflowViewProps = {
   onScan: () => void;
   onStop: () => void;
   onApply: () => void;
+  onPreviewStale: () => void;
 };
 
 export type WorkflowPageProps = {
@@ -20,4 +21,5 @@ export type WorkflowPageProps = {
   onScan: () => void;
   onStop: () => void;
   onApply: () => void;
+  onPreviewStale: () => void;
 };

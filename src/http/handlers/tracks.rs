@@ -10,7 +10,10 @@ pub async fn list_tracks(
     let view_filter = match q.view.as_deref().unwrap_or_default() {
         "" => "",
         "failed" => " AND stage='failed'",
-        "unmatched" => " AND stage IN ('ready','review') AND selected_candidate_id IS NULL",
+        "review" => " AND stage='review' AND selected_candidate_id IS NULL",
+        "unmatched" => {
+            " AND stage IN ('ready','review') AND selected_candidate_id IS NULL AND NOT EXISTS (SELECT 1 FROM candidates WHERE candidates.track_id=tracks.id)"
+        }
         view => return Err(ApiError::validation(format!("unknown track view: {view}"))),
     };
     let search = format!("%{}%", q.search.unwrap_or_default());
@@ -74,7 +77,13 @@ pub async fn select_candidate(
     Path(id): Path<TrackId>,
     Json(body): Json<SelectRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=CASE WHEN ? IS NULL THEN 'needs_review' ELSE 'selected' END WHERE id=?").bind(body.candidate_id.map(|v| v.0)).bind(body.candidate_id.map(|v| v.0)).bind(id.0).execute(&s.pool).await?;
+    let result = sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=CASE WHEN ? IS NULL THEN 'needs_review' ELSE 'selected' END,stage=CASE WHEN ? IS NULL THEN 'review' ELSE 'ready' END,stage_message=NULL WHERE id=?")
+        .bind(body.candidate_id.map(|v| v.0))
+        .bind(body.candidate_id.map(|v| v.0))
+        .bind(body.candidate_id.map(|v| v.0))
+        .bind(id.0)
+        .execute(&s.pool)
+        .await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::not_found("track not found"));
     }
@@ -109,6 +118,40 @@ pub async fn retry_track(
     }
     start_scan(State(s)).await
 }
+pub async fn skip_track(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = sqlx::query(
+        "UPDATE tracks SET selected_candidate_id=NULL,status='skipped',stage='skipped',stage_message='Skipped during review' WHERE id=?",
+    )
+    .bind(id.0)
+    .execute(&s.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("track not found"));
+    }
+    previews::invalidate(&s.pool).await?;
+    Ok(Json(serde_json::json!({"skipped":true})))
+}
+
+pub async fn keep_current_track(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let result = sqlx::query(
+        "UPDATE tracks SET selected_candidate_id=NULL,status='kept_current',stage='skipped',stage_message='Keeping current tags' WHERE id=?",
+    )
+    .bind(id.0)
+    .execute(&s.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::not_found("track not found"));
+    }
+    previews::invalidate(&s.pool).await?;
+    Ok(Json(serde_json::json!({"kept_current":true})))
+}
+
 pub async fn retry_failed(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     sqlx::query("UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE stage='failed'").execute(&s.pool).await?;
     start_scan(State(s)).await
