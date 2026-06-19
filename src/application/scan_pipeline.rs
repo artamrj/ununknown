@@ -414,16 +414,20 @@ async fn process(
         return Ok(false);
     }
     let mut candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
+    let raw_candidate_count = candidates.len();
     dedupe_candidates(&mut candidates);
+    sort_candidates_for_decision(&mut candidates);
     state
         .log(
             "info",
             "providers",
             Some(filename),
-            &format!("Providers returned {} candidate(s)", candidates.len()),
+            &format!(
+                "Providers returned {raw_candidate_count} raw candidate(s), {} usable candidate(s)",
+                candidates.len()
+            ),
         )
         .await;
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     if cfg.automation_mode == AutomationMode::Manual {
         state.increment_unmatched().await;
         let message = "Manual mode is enabled; candidates require review";
@@ -442,7 +446,7 @@ async fn process(
         state.log("warn", "match", Some(filename), &message).await;
         return Ok(false);
     };
-    let second_score = candidates.get(1).map(|candidate| candidate.score);
+    let second_score = comparable_second_score(&candidates);
     let has_safe_evidence = candidate_has_fingerprint(best) || candidate_source_count(best) >= 2;
     let auto_select = has_safe_evidence
         && crate::domain::matcher::auto_selectable_for_strategy(
@@ -585,7 +589,10 @@ async fn identify(
                 .iter()
                 .map(|candidate| candidate.score)
                 .fold(0.0, f64::max);
-            if out.is_empty() || best < 85.0 {
+            let has_strong_fingerprint = out
+                .iter()
+                .any(|candidate| candidate_has_fingerprint(candidate) && candidate.score >= 90.0);
+            if !has_strong_fingerprint && (out.is_empty() || best < 85.0) {
                 state
                     .log(
                         "info",
@@ -610,7 +617,12 @@ async fn identify(
             }
         }
     }
-    apply_enrichment_sources(state, cfg, limits, current, filename, &mut out).await;
+    let has_strong_fingerprint = out
+        .iter()
+        .any(|candidate| candidate_has_fingerprint(candidate) && candidate.score >= 90.0);
+    if !has_strong_fingerprint {
+        apply_enrichment_sources(state, cfg, limits, current, filename, &mut out).await;
+    }
     apply_source_agreement(&mut out)?;
     if out.is_empty() {
         state
@@ -623,6 +635,36 @@ async fn identify(
             .await;
     }
     Ok(out)
+}
+
+fn sort_candidates_for_decision(candidates: &mut [providers::Candidate]) {
+    candidates.sort_by(|a, b| {
+        candidate_trust_tier(b)
+            .cmp(&candidate_trust_tier(a))
+            .then_with(|| b.score.total_cmp(&a.score))
+    });
+}
+
+fn comparable_second_score(candidates: &[providers::Candidate]) -> Option<f64> {
+    let best = candidates.first()?;
+    let best_tier = candidate_trust_tier(best);
+    candidates
+        .iter()
+        .skip(1)
+        .find(|candidate| candidate_trust_tier(candidate) == best_tier)
+        .map(|candidate| candidate.score)
+}
+
+fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
+    if candidate_has_fingerprint(candidate) {
+        3
+    } else if candidate.provider == "musicbrainz" {
+        2
+    } else if candidate_source_count(candidate) >= 2 {
+        1
+    } else {
+        0
+    }
 }
 
 async fn query_candidate_modes(
@@ -1777,6 +1819,49 @@ mod tests {
         assert!(
             !(candidate_has_fingerprint(&candidate) || candidate_source_count(&candidate) >= 2)
         );
+    }
+
+    #[test]
+    fn fingerprint_backed_musicbrainz_candidate_outranks_noisy_external_results() {
+        let mut candidates = vec![
+            providers::Candidate {
+                provider: "lastfm".into(),
+                title: "Out of Time".into(),
+                artist: "The Weeknd".into(),
+                score: 96.0,
+                duration_delta: Some(1.0),
+                score_breakdown: Some(serde_json::json!({"sources":["Last.fm"]}).to_string()),
+                ..Default::default()
+            },
+            providers::Candidate {
+                provider: "musicbrainz".into(),
+                title: "Out of Time".into(),
+                artist: "The Weeknd".into(),
+                album: Some("Dawn FM".into()),
+                score: 94.0,
+                duration_delta: Some(1.0),
+                score_breakdown: Some(
+                    serde_json::json!({
+                        "acoustid": 0.98,
+                        "sources": ["AcoustID", "MusicBrainz"]
+                    })
+                    .to_string(),
+                ),
+                ..Default::default()
+            },
+        ];
+
+        sort_candidates_for_decision(&mut candidates);
+
+        assert_eq!(candidates[0].provider, "musicbrainz");
+        assert_eq!(comparable_second_score(&candidates), None);
+        assert!(candidate_has_fingerprint(&candidates[0]));
+        assert!(crate::domain::matcher::auto_selectable_for_strategy(
+            crate::types::MatchingStrategy::Balanced,
+            candidates[0].score,
+            comparable_second_score(&candidates),
+            candidates[0].duration_delta
+        ));
     }
 
     #[test]

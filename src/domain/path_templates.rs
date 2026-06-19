@@ -98,7 +98,10 @@ pub fn render(
     path = path
         .components()
         .filter_map(|part| match part {
-            Component::Normal(v) => Some(sanitize(&v.to_string_lossy(), cfg.max_filename_length)),
+            Component::Normal(v) => Some(clean_component(&sanitize(
+                &v.to_string_lossy(),
+                cfg.max_filename_length,
+            ))),
             _ => None,
         })
         .collect();
@@ -120,6 +123,19 @@ pub fn render(
         }
     }
     Ok(path)
+}
+
+fn clean_component(value: &str) -> String {
+    let cleaned = value
+        .trim()
+        .trim_start_matches(['-', '_', '.', ' '])
+        .trim()
+        .to_owned();
+    if cleaned.is_empty() {
+        "file".into()
+    } else {
+        cleaned
+    }
 }
 
 pub fn resolve_collision(path: &Path, strategy: CollisionStrategy) -> Result<PathBuf> {
@@ -208,5 +224,15 @@ mod tests {
     #[test]
     fn blocks_traversal() {
         assert!(render("../$title", &values(), &Default::default()).is_err());
+    }
+
+    #[test]
+    fn removes_leading_separator_when_track_is_missing() {
+        let mut values = values();
+        values.track = None;
+        assert_eq!(
+            render("$album/$track - $title", &values, &Default::default()).unwrap(),
+            PathBuf::from("Album/Song.flac")
+        );
     }
 }

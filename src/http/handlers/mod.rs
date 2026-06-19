@@ -249,12 +249,13 @@ fn destination(
         return Ok(track.path.clone());
     }
     let ext = track.format.clone().unwrap_or_default();
+    let effective_track = c.track_number.or(track.current_track_number);
     let values = TemplateValues {
         artist: Some(c.artist.clone()),
         albumartist: c.album_artist.clone(),
         album: c.album.clone(),
         title: Some(c.title.clone()),
-        track: c.track_number,
+        track: effective_track,
         tracktotal: c.track_total,
         disc: c.disc_number,
         disctotal: c.disc_total,

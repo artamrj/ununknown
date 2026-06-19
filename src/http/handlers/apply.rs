@@ -137,6 +137,18 @@ pub async fn apply_preview(
         if matches!(track.format.as_deref(), Some("wav" | "aiff" | "aif")) {
             warnings.push("Tag writing will be skipped: conditional/unsafe format".into());
         }
+        if candidate.track_number.is_none() {
+            if track.current_track_number.is_some() {
+                warnings.push(
+                    "Candidate has no track number; output path uses the current file track number"
+                        .into(),
+                );
+            } else {
+                warnings.push(
+                    "Candidate has no track number; output path omits the track prefix".into(),
+                );
+            }
+        }
         if dup.duplicate_action == DuplicateAction::SkipDuplicate {
             warnings.push(dup.duplicate_reason.clone().unwrap_or_else(|| {
                 "Duplicate of a stronger matched file; it will not be written".into()

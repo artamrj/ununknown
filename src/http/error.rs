@@ -123,11 +123,12 @@ impl From<reqwest::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status(),
-            Json(serde_json::json!({"error":self.to_string()})),
-        )
-            .into_response()
+        let status = self.status();
+        let message = self.to_string();
+        if status.is_server_error() {
+            tracing::error!(status = status.as_u16(), error = %message, "API request failed");
+        }
+        (status, Json(serde_json::json!({"error":message}))).into_response()
     }
 }
 
@@ -136,6 +137,7 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::response::IntoResponse;
 
     #[test]
@@ -169,5 +171,15 @@ mod tests {
         for (error, status) in cases {
             assert_eq!(error.into_response().status(), status);
         }
+    }
+
+    #[tokio::test]
+    async fn internal_error_returns_json_body() {
+        let response = ApiError::Internal(anyhow::anyhow!("database exploded")).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"], "database exploded");
     }
 }

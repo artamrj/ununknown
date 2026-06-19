@@ -93,7 +93,7 @@ pub async fn search(
 }
 
 fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
-    let release = raw["releases"].as_array().and_then(|v| v.first());
+    let release = best_recording_release(raw, id);
     let release_group = release.and_then(|v| v.get("release-group"));
     let artist = raw["artist-credit"].as_array().and_then(|v| v.first());
     let artist_obj = artist.and_then(|v| v.get("artist"));
@@ -107,17 +107,8 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     let is_compilation = secondary_types
         .as_deref()
         .is_some_and(|value| value.to_ascii_lowercase().contains("compilation"));
-    let media_track = release
-        .and_then(|v| v["media"].as_array())
-        .and_then(|v| v.first())
-        .and_then(|v| v["tracks"].as_array())
-        .and_then(|tracks| {
-            tracks.iter().find(|track| {
-                track["recording"]["id"]
-                    .as_str()
-                    .is_some_and(|recording_id| recording_id == id)
-            })
-        });
+    let media_track =
+        release.and_then(|release| recording_track(release, id).map(|(_, track)| track));
     Candidate {
         provider: "musicbrainz".into(),
         title: raw["title"].as_str().unwrap_or("Unknown Title").into(),
@@ -129,7 +120,12 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
         duration_delta: raw["length"].as_f64().map(|millis| millis / 1000.0),
         track_number: media_track
             .and_then(|v| v["number"].as_str())
-            .and_then(|value| value.parse().ok()),
+            .and_then(parse_track_position)
+            .or_else(|| {
+                media_track
+                    .and_then(|v| v["position"].as_i64())
+                    .filter(|value| *value > 0)
+            }),
         track_total: release
             .and_then(|v| v["media"].as_array())
             .and_then(|v| v.first())
@@ -154,6 +150,34 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
         raw_json: raw.to_string(),
         ..Default::default()
     }
+}
+
+fn best_recording_release<'a>(raw: &'a Value, id: &str) -> Option<&'a Value> {
+    let releases = raw["releases"].as_array()?;
+    releases
+        .iter()
+        .find(|release| recording_track(release, id).is_some())
+        .or_else(|| releases.first())
+}
+
+fn recording_track<'a>(release: &'a Value, id: &str) -> Option<(&'a Value, &'a Value)> {
+    release["media"].as_array()?.iter().find_map(|medium| {
+        medium["tracks"].as_array()?.iter().find_map(|track| {
+            track["recording"]["id"]
+                .as_str()
+                .is_some_and(|recording_id| recording_id == id)
+                .then_some((medium, track))
+        })
+    })
+}
+
+fn parse_track_position(value: &str) -> Option<i64> {
+    let digits = value
+        .chars()
+        .skip_while(|char| !char.is_ascii_digit())
+        .take_while(|char| char.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().ok()
 }
 
 pub async fn test_connection(client: &Client, user_agent: &str) -> Result<()> {
@@ -294,16 +318,32 @@ mod tests {
                 "length": 180000,
                 "title": "Song",
                 "artist-credit": [{ "name": "Artist", "artist": { "id": "artist-1" } }],
-                "releases": [{
-                    "id": "release-1",
-                    "title": "Album",
-                    "date": "2024-01-02",
-                    "country": "US",
-                    "release-group": {
-                        "primary-type": "Album",
-                        "secondary-types": ["Compilation"]
+                "releases": [
+                    {
+                        "id": "release-without-track",
+                        "title": "Wrong Album",
+                        "date": "2023-01-02",
+                        "country": "GB"
+                    },
+                    {
+                        "id": "release-1",
+                        "title": "Album",
+                        "date": "2024-01-02",
+                        "country": "US",
+                        "media": [{
+                            "track-count": 10,
+                            "tracks": [{
+                                "number": "7",
+                                "position": 7,
+                                "recording": { "id": "recording-1" }
+                            }]
+                        }],
+                        "release-group": {
+                            "primary-type": "Album",
+                            "secondary-types": ["Compilation"]
+                        }
                     }
-                }],
+                ],
                 "isrcs": ["USRC17607839"]
             }),
             Utc::now() + Duration::days(1),
@@ -321,6 +361,8 @@ mod tests {
         .unwrap();
         assert_eq!(candidate.title, "Song");
         assert_eq!(candidate.release_id.as_deref(), Some("release-1"));
+        assert_eq!(candidate.track_number, Some(7));
+        assert_eq!(candidate.track_total, Some(10));
         assert_eq!(candidate.release_country.as_deref(), Some("US"));
         assert_eq!(candidate.release_date.as_deref(), Some("2024-01-02"));
         assert_eq!(candidate.release_type.as_deref(), Some("Album"));
