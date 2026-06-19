@@ -1407,6 +1407,16 @@ select:focus-visible {
   color: #667085;
   font-size: 13px;
 }
+.review-list-state.error {
+  border-color: #fee4e2;
+  background: #fffbfa;
+  color: #b42318;
+}
+.review-list-count {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
 .review-track-list {
   display: grid;
   gap: 8px;

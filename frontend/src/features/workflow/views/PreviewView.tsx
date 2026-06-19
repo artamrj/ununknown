@@ -99,15 +99,19 @@ export function PreviewView({
       {tab === "unmatched" && (
         <TrackReviewList
           emptyText="No unmatched tracks"
+          error={unmatched.error}
           loading={unmatched.isLoading}
+          total={unmatched.data?.total}
           tracks={unmatched.data?.items || []}
         />
       )}
       {tab === "failed" && (
         <TrackReviewList
           emptyText="No failed tracks"
+          error={failed.error}
           loading={failed.isLoading}
           showError
+          total={failed.data?.total}
           tracks={failed.data?.items || []}
         />
       )}
@@ -127,57 +131,69 @@ export function PreviewView({
 function TrackReviewList({
   tracks,
   loading,
+  error,
   emptyText,
+  total,
   showError = false,
 }: {
   tracks: Track[];
   loading: boolean;
+  error?: Error | null;
   emptyText: string;
+  total?: number;
   showError?: boolean;
 }) {
   if (loading) return <div className="review-list-state">Loading tracks...</div>;
+  if (error) return <div className="review-list-state error">{error.message}</div>;
   if (!tracks.length) return <div className="review-list-state">{emptyText}</div>;
 
   return (
-    <div className="review-track-list">
-      {tracks.map((track) => {
-        const best = [...track.candidates].sort((a, b) => b.score - a.score)[0];
-        return (
-          <article className="review-track-row" key={track.id}>
-            <div>
-              <strong>{track.filename}</strong>
-              <span>{track.path}</span>
-            </div>
-            <div>
-              <b>{track.current_title || "Untitled"}</b>
-              <span>{track.current_artist || "Unknown artist"}</span>
-            </div>
-            <div>
-              <code>{track.stage}</code>
-              <span>{track.stage_message || track.status}</span>
-            </div>
-            <div>
-              {best ? (
-                <>
-                  <b>
-                    {track.candidates.length} candidate{track.candidates.length === 1 ? "" : "s"}
-                  </b>
-                  <span>
-                    Best {Math.round(best.score)}% · {best.artist || "Unknown artist"} -{" "}
-                    {best.title || "Untitled"}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <b>No candidates</b>
-                  <span>Nothing was selected for this file.</span>
-                </>
-              )}
-            </div>
-            {showError && track.error ? <pre>{track.error}</pre> : null}
-          </article>
-        );
-      })}
-    </div>
+    <>
+      {typeof total === "number" && (
+        <div className="review-list-count">
+          Showing {tracks.length} of {total}
+        </div>
+      )}
+      <div className="review-track-list">
+        {tracks.map((track) => {
+          const best = [...track.candidates].sort((a, b) => b.score - a.score)[0];
+          return (
+            <article className="review-track-row" key={track.id}>
+              <div>
+                <strong>{track.filename}</strong>
+                <span>{track.path}</span>
+              </div>
+              <div>
+                <b>{track.current_title || "Untitled"}</b>
+                <span>{track.current_artist || "Unknown artist"}</span>
+              </div>
+              <div>
+                <code>{track.stage}</code>
+                <span>{track.stage_message || track.status}</span>
+              </div>
+              <div>
+                {best ? (
+                  <>
+                    <b>
+                      {track.candidates.length} candidate{track.candidates.length === 1 ? "" : "s"}
+                    </b>
+                    <span>
+                      Best {Math.round(best.score)}% · {best.artist || "Unknown artist"} -{" "}
+                      {best.title || "Untitled"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <b>No candidates</b>
+                    <span>Nothing was selected for this file.</span>
+                  </>
+                )}
+              </div>
+              {showError && track.error ? <pre>{track.error}</pre> : null}
+            </article>
+          );
+        })}
+      </div>
+    </>
   );
 }

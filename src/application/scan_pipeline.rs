@@ -255,12 +255,25 @@ async fn process_file(
             Err(error) => {
                 tracing::warn!(path=%job.path.display(), "track failed after retries: {error:#}");
                 state.increment_failed().await;
+                let error_text = format!("{error:#}");
+                if let Err(persist_error) =
+                    persist_failed(&state.pool, &job.path, &error_text).await
+                {
+                    tracing::warn!(path=%job.path.display(), "failed to persist failed track: {persist_error:#}");
+                    state
+                        .log_entry(
+                            ActivityLogEntry::new("error", "db", "Failed to persist failed track")
+                                .file(filename.clone())
+                                .error_text(format!("{persist_error:#}")),
+                        )
+                        .await;
+                }
                 state
                     .log_entry(
                         ActivityLogEntry::new("error", "fetch", "Track failed after retries")
                             .file(filename.clone())
                             .attempt(attempt as i64)
-                            .error_text(format!("{error:#}"))
+                            .error_text(error_text)
                             .context(serde_json::json!({
                                 "path": job.path.display().to_string(),
                                 "max_attempts": cfg.track_attempts
@@ -408,6 +421,13 @@ async fn process(
         .max_by(|a, b| a.score.total_cmp(&b.score));
     if cfg.automation_mode == AutomationMode::Manual {
         state.increment_unmatched().await;
+        persist_unmatched(
+            &state.pool,
+            path,
+            &info,
+            "Manual mode is enabled; candidate was not auto-selected",
+        )
+        .await?;
         state
             .log(
                 "warn",
@@ -426,14 +446,9 @@ async fn process(
     };
     let Some(candidate) = best.filter(|c| c.score >= threshold) else {
         state.increment_unmatched().await;
-        state
-            .log(
-                "warn",
-                "match",
-                Some(filename),
-                &format!("No candidate met threshold {threshold:.0}; counted as unmatched"),
-            )
-            .await;
+        let message = format!("No candidate met threshold {threshold:.0}; counted as unmatched");
+        persist_unmatched(&state.pool, path, &info, &message).await?;
+        state.log("warn", "match", Some(filename), &message).await;
         return Ok(false);
     };
     state
@@ -648,4 +663,191 @@ async fn persist_match(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn persist_unmatched(
+    pool: &sqlx::SqlitePool,
+    path: &Path,
+    info: &audio::AudioInfo,
+    message: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let id = upsert_track_outcome(
+        &mut tx,
+        path,
+        Some(info),
+        "needs_review",
+        "review",
+        Some(message),
+        None,
+    )
+    .await?;
+    sqlx::query("DELETE FROM candidates WHERE track_id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn persist_failed(pool: &sqlx::SqlitePool, path: &Path, error: &str) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let id = upsert_track_outcome(
+        &mut tx,
+        path,
+        None,
+        "provider_error",
+        "failed",
+        Some("Track failed after retries"),
+        Some(error),
+    )
+    .await?;
+    sqlx::query("DELETE FROM candidates WHERE track_id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn upsert_track_outcome(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    path: &Path,
+    info: Option<&audio::AudioInfo>,
+    status: &str,
+    stage: &str,
+    stage_message: Option<&str>,
+    error: Option<&str>,
+) -> Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let text = path.to_string_lossy();
+    let filename = path
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| anyhow!("invalid filename"))?;
+    let format = info
+        .map(|info| info.format.clone())
+        .or_else(|| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+        })
+        .unwrap_or_default();
+    let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM tracks WHERE path=?")
+        .bind(text.as_ref())
+        .fetch_optional(&mut **tx)
+        .await?;
+    if let Some(id) = existing {
+        sqlx::query("UPDATE tracks SET filename=?,format=?,duration=?,current_title=?,current_artist=?,current_album=?,current_album_artist=?,current_track_number=?,selected_candidate_id=NULL,status=?,error=?,is_missing=0,last_seen_at=?,last_scanned_at=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
+            .bind(filename)
+            .bind(&format)
+            .bind(info.map(|info| info.duration))
+            .bind(info.and_then(|info| info.title.as_ref()))
+            .bind(info.and_then(|info| info.artist.as_ref()))
+            .bind(info.and_then(|info| info.album.as_ref()))
+            .bind(info.and_then(|info| info.album_artist.as_ref()))
+            .bind(info.and_then(|info| info.track_number.map(i64::from)))
+            .bind(status)
+            .bind(error)
+            .bind(&now)
+            .bind(&now)
+            .bind(stage)
+            .bind(stage_message)
+            .bind(&now)
+            .bind(id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(id)
+    } else {
+        let id = sqlx::query("INSERT INTO tracks(path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage,stage_message,updated_at) VALUES(?,?,?,?,?,?,?,?,?,NULL,?,?,0,?,?,?,?,?,?)")
+            .bind(text.as_ref())
+            .bind(filename)
+            .bind(&format)
+            .bind(info.map(|info| info.duration))
+            .bind(info.and_then(|info| info.title.as_ref()))
+            .bind(info.and_then(|info| info.artist.as_ref()))
+            .bind(info.and_then(|info| info.album.as_ref()))
+            .bind(info.and_then(|info| info.album_artist.as_ref()))
+            .bind(info.and_then(|info| info.track_number.map(i64::from)))
+            .bind(status)
+            .bind(error)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now)
+            .bind(stage)
+            .bind(stage_message)
+            .bind(&now)
+            .execute(&mut **tx)
+            .await?
+            .last_insert_rowid();
+        Ok(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scan-pipeline.sqlite");
+        let pool = crate::infrastructure::db::connect(path.to_str().unwrap())
+            .await
+            .unwrap();
+        std::mem::forget(dir);
+        pool
+    }
+
+    #[tokio::test]
+    async fn persist_unmatched_upserts_review_track_with_metadata() {
+        let pool = test_pool().await;
+        let path = Path::new("/music/input/unmatched.mp3");
+        let info = audio::AudioInfo {
+            title: Some("Current title".into()),
+            artist: Some("Current artist".into()),
+            album: Some("Current album".into()),
+            album_artist: Some("Current album artist".into()),
+            track_number: Some(7),
+            duration: 181.4,
+            bitrate: Some(320),
+            format: "mp3".into(),
+        };
+
+        persist_unmatched(&pool, path, &info, "No candidate met threshold 90")
+            .await
+            .unwrap();
+
+        let row: (String, String, Option<String>, Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT stage,status,stage_message,current_title,selected_candidate_id FROM tracks WHERE path=?")
+                .bind(path.to_string_lossy().as_ref())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "review");
+        assert_eq!(row.1, "needs_review");
+        assert_eq!(row.2.as_deref(), Some("No candidate met threshold 90"));
+        assert_eq!(row.3.as_deref(), Some("Current title"));
+        assert_eq!(row.4, None);
+    }
+
+    #[tokio::test]
+    async fn persist_failed_upserts_failed_track_with_error() {
+        let pool = test_pool().await;
+        let path = Path::new("/music/input/broken.flac");
+        persist_failed(&pool, path, "fpcalc failed: command not found")
+            .await
+            .unwrap();
+
+        let row: (String, String, Option<String>, Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT stage,status,stage_message,error,selected_candidate_id FROM tracks WHERE path=?")
+                .bind(path.to_string_lossy().as_ref())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, "provider_error");
+        assert_eq!(row.2.as_deref(), Some("Track failed after retries"));
+        assert_eq!(row.3.as_deref(), Some("fpcalc failed: command not found"));
+        assert_eq!(row.4, None);
+    }
 }
