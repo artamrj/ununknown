@@ -63,13 +63,13 @@ export function App() {
         <b>
           <i>U</i> Ununknown <small>0.4.5</small>
         </b>
-        <span>{settings.data?.input_dir}</span>
+        <Flow phase={workflow.data?.phase || "idle"} />
+        <span className="topbar-path">{settings.data?.input_dir}</span>
         <Button kind="quiet" onClick={() => setSettingsPage(true)}>
           Settings
         </Button>
       </header>
       <main className="pipeline v4">
-        <Flow phase={workflow.data?.phase || "idle"} />
         <Workspace
           workflow={workflow.data}
           loading={workflow.isLoading}

@@ -13,16 +13,17 @@ const phaseIndex = (phase: string) =>
 export function Flow({ phase }: { phase: string }) {
   const active = phaseIndex(phase);
   return (
-    <nav className="flowline">
+    <nav className="flowline" aria-label="Workflow progress">
       {steps.map((step, index) => (
-        <div
+        <span
           className={`flow-step ${index < active ? "done" : index === active ? "active" : "wait"}`}
           key={step}
+          aria-current={index === active ? "step" : undefined}
         >
-          <span>{index + 1}</span>
+          <i aria-hidden="true" />
+          <b aria-hidden="true">{index + 1}</b>
           <strong>{step}</strong>
-          {index < steps.length - 1 && <i />}
-        </div>
+        </span>
       ))}
     </nav>
   );
