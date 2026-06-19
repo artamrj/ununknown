@@ -739,6 +739,52 @@ select:focus-visible {
   font-size: 12px;
   line-height: 1.5;
 }
+.json-settings-card {
+  padding: 0;
+  overflow: hidden;
+}
+.json-settings-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 0;
+}
+.json-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.json-error {
+  margin: 14px 20px 0;
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff1f2;
+  color: #b42318;
+  font-size: 12px;
+}
+.json-editor {
+  width: calc(100% - 40px);
+  min-height: 560px;
+  margin: 16px 20px 20px;
+  padding: 14px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #101828;
+  color: #f8fafc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+  tab-size: 2;
+  white-space: pre;
+}
+.json-editor:focus {
+  outline: 2px solid #4f5ee8;
+  outline-offset: 2px;
+}
 .choice-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

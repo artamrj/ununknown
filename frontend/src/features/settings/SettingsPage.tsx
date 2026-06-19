@@ -7,6 +7,7 @@ import { FilesAndPathsSettings } from "@/features/settings/sections/FilesAndPath
 import { MatchingSettings } from "@/features/settings/sections/MatchingSettings";
 import { MetadataSettings } from "@/features/settings/sections/MetadataSettings";
 import { MetadataSourcesSettings } from "@/features/settings/sections/MetadataSourcesSettings";
+import { JsonSettings } from "@/features/settings/sections/JsonSettings";
 import { tabs } from "@/features/settings/settingsOptions";
 import type { SettingsSectionProps } from "@/features/settings/types";
 import { Button } from "@/shared/components/Button";
@@ -24,6 +25,7 @@ export function SettingsPage({ settings, back, initialTab = "Basic" }: SettingsP
   const [search, setSearch] = useState("");
   const [msg, setMsg] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [jsonValid, setJsonValid] = useState(true);
 
   const change = (value: any) => {
     setDraft(value);
@@ -79,6 +81,24 @@ export function SettingsPage({ settings, back, initialTab = "Basic" }: SettingsP
     Metadata: <MetadataSettings {...sectionProps} />,
     "Files & Paths": <FilesAndPathsSettings {...sectionProps} pathPreview={pathPreview} />,
     Expert: <ExpertSettings {...sectionProps} />,
+    JSON: (
+      <JsonSettings settings={draft} onChange={change} onValidityChange={setJsonValid} />
+    ),
+  };
+
+  const canSave = jsonValid && !save.isPending;
+  const handleSave = () => {
+    if (!canSave) {
+      setMsg("Fix JSON syntax before saving settings");
+      return;
+    }
+    if (
+      draft.expert_mode &&
+      !confirm("Save Expert Mode settings? These can modify original files.")
+    ) {
+      return;
+    }
+    save.mutate();
   };
 
   return (
@@ -103,15 +123,7 @@ export function SettingsPage({ settings, back, initialTab = "Basic" }: SettingsP
           >
             Reset all
           </Button>
-          <Button
-            onClick={() =>
-              (draft.expert_mode &&
-                confirm("Save Expert Mode settings? These can modify original files.")) ||
-              !draft.expert_mode
-                ? save.mutate()
-                : null
-            }
-          >
+          <Button onClick={handleSave} disabled={!canSave}>
             Save settings
           </Button>
         </div>

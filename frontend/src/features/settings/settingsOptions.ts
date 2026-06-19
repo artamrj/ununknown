@@ -1,4 +1,12 @@
-export const tabs = ["Basic", "Matching", "Metadata Sources", "Metadata", "Files & Paths", "Expert"];
+export const tabs = [
+  "Basic",
+  "Matching",
+  "Metadata Sources",
+  "Metadata",
+  "Files & Paths",
+  "Expert",
+  "JSON",
+];
 
 export const modeHelp: Record<string, [string, string]> = {
   safe: ["Safe", "Automatically keeps strict matches with a clear release winner."],
