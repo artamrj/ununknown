@@ -5,6 +5,13 @@ folder, reads existing audio tags, fingerprints files with `fpcalc`, looks up
 candidate metadata from AcoustID and MusicBrainz, previews proposed changes, and
 then applies selected tag and file path updates.
 
+For beginner-focused backend documentation, start with
+[Backend Start Here](backend/README.md). That docs set also contains the
+[API reference](backend/api.md), [database guide](backend/database.md),
+[workflow guide](backend/workflows.md),
+[configuration guide](backend/configuration.md), and
+[developer guide](backend/developer-guide.md).
+
 Project identity:
 
 - Package name: `ununknown`
@@ -106,7 +113,7 @@ Router
 
 - Defines shared runtime state.
 - `AppState` contains current settings, SQLite pool, HTTP client, event
-  broadcast channel, cancellation state, preview-token storage, and workflow
+  broadcast channel, artwork/tag-write concurrency limiters, and workflow
   progress.
 - `Workflow` is the frontend-facing process state.
 - `TerminalLine` is a compact log entry exposed in the UI and over SSE.
@@ -138,7 +145,9 @@ Router
 
 - Contains API routing, handlers, and error conversion.
 - `router.rs` defines all public API paths.
-- `handlers/mod.rs` contains endpoint implementations and API DTOs.
+- `handlers/mod.rs` contains shared DTOs and re-exports handlers split across
+  feature files such as `settings.rs`, `scan.rs`, `tracks.rs`, `apply.rs`,
+  `artwork.rs`, `workspace.rs`, and `events.rs`.
 - `error.rs` maps typed application errors to JSON responses with specific HTTP status codes.
 
 `src/infrastructure/`
@@ -166,8 +175,9 @@ It contains:
 - `pool: SqlitePool`: shared SQLite pool.
 - `client: reqwest::Client`: reused outbound HTTP client.
 - `events: broadcast::Sender<jobs::Event>`: event stream fanout.
-- `cancelled: RwLock<HashSet<String>>`: job cancellation IDs.
-- `previews: RwLock<HashMap<String, Vec<PreviewItem>>>`: dry-run preview tokens.
+- `artwork_downloads: RwLock<Arc<Semaphore>>`: runtime limiter for artwork
+  downloads.
+- `tag_writes: RwLock<Arc<Semaphore>>`: runtime limiter for tag writes.
 - `workflow: RwLock<Workflow>`: current UI workflow state.
 
 `Workflow` contains:
@@ -176,10 +186,10 @@ It contains:
 - `message`: current human-readable status.
 - `current_file`: file currently being processed.
 - counters for current, total, processed, matched, unmatched, and failed.
-- `terminal_log`: last 160 terminal lines.
+- `terminal_log`: last 500 terminal lines.
 - `cancelled`: internal flag skipped during serialization.
 
-`AppState::terminal` appends a terminal line, trims the log to 160 entries, and
+`AppState::terminal` appends a terminal line, trims the log to 500 entries, and
 emits a `terminal` event so the frontend can update without waiting for polling.
 
 ### Configuration Model
@@ -347,14 +357,14 @@ The scan pipeline lives in `src/application/scan_pipeline.rs`.
 When accepted, it:
 
 1. Deletes existing rows from `tracks`.
-2. Deletes existing rows from `provider_cache`.
-3. Clears in-memory previews.
-4. Resets workflow to `scan`.
-5. Writes a terminal message.
-6. Spawns `scan_pipeline::run` in a Tokio task.
+2. Invalidates ready persisted previews.
+3. Resets workflow to `scan`.
+4. Writes a terminal message.
+5. Spawns `scan_pipeline::run` in a Tokio task.
 
-The scan is sequential. Files are discovered first, sorted, and then processed
-one by one.
+Files are discovered first and sorted. They are then processed by a bounded
+worker pool using the configured scan, metadata, fingerprint, AcoustID, and DB
+write limits.
 
 ### File Discovery
 
@@ -859,7 +869,7 @@ On each event:
 
 - The hook parses the server event JSON.
 - It updates the TanStack Query cache for `["workspace"]`.
-- Terminal events append to `terminal_log` and keep the last 160 lines.
+- Terminal events append to `terminal_log` and keep the last 500 lines.
 - Preview, finish, failed, and done-like events invalidate workspace and track
   queries.
 - Connection state is exposed as `connecting`, `connected`, or `reconnecting`.
