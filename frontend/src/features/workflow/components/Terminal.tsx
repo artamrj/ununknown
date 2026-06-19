@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import type { TerminalLine } from "../api";
-import type { EventStatus } from "../hooks";
+import type { TerminalLine } from "@/api";
+import type { EventStatus } from "@/shared/hooks/useEvents";
 
 export function Terminal({
   lines,

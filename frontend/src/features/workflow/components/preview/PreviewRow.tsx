@@ -1,4 +1,4 @@
-import type { PreviewItem } from "../../api";
+import type { PreviewItem } from "@/api";
 import { MusicMetadataCard } from "./MusicMetadataCard";
 
 export function PreviewRow({ item }: { item: PreviewItem }) {

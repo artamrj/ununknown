@@ -10,7 +10,7 @@ const phaseIndex = (phase: string) =>
           ? 3
           : 4;
 
-export function Flow({ phase }: { phase: string }) {
+export function WorkflowProgress({ phase }: { phase: string }) {
   const active = phaseIndex(phase);
   return (
     <nav className="flowline" aria-label="Workflow progress">

@@ -1,4 +1,4 @@
-import type { MetadataSummary } from "../../api";
+import type { MetadataSummary } from "@/api";
 import { CoverImage } from "./CoverImage";
 
 export function MusicMetadataCard({

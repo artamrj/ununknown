@@ -1,24 +1,16 @@
-import type { Preview, Workflow } from "../api";
-import type { EventStatus } from "../hooks";
-import { Button } from "../components";
-import { PreviewList } from "../features/preview";
-import { Terminal } from "../layouts/Terminal";
+import type { WorkflowViewProps } from "@/features/workflow/types";
+import { Button } from "@/shared/components/Button";
+import { PreviewList } from "@/features/workflow/components/preview/PreviewList";
+import { Terminal } from "@/features/workflow/components/Terminal";
 
-export function PreviewPage({
+export function PreviewView({
   workflow,
   preview,
   applyPending,
   eventStatus,
   onScan,
   onApply,
-}: {
-  workflow: Workflow;
-  preview?: Preview;
-  applyPending: boolean;
-  eventStatus: EventStatus;
-  onScan: () => void;
-  onApply: () => void;
-}) {
+}: WorkflowViewProps) {
   const items = preview?.items || [];
   const writeCount = preview?.summary?.write_count ?? items.length;
   const empty = workflow.phase !== "finish" && !items.length;

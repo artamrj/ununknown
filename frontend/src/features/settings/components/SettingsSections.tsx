@@ -9,4 +9,4 @@ export {
   Toggle,
   ToggleCard,
 } from "./SettingsFields";
-export { metadataGroups, modeHelp, tabs } from "./SettingsTypes";
+export { metadataGroups, modeHelp, tabs } from "../settingsOptions";

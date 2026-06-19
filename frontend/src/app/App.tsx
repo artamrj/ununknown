@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, Preview, Workflow } from "../api";
-import { useEvents } from "../hooks";
-import { Button, Toast } from "../components";
-import { Flow, Workspace } from "../layouts";
-import { SettingsPage } from "../pages/SettingsPage";
+import { api, Preview, Workflow } from "@/api";
+import { useEvents } from "@/shared/hooks/useEvents";
+import { Button } from "@/shared/components/Button";
+import { Toast } from "@/shared/components/Toast";
+import { WorkflowProgress } from "@/features/workflow/components/WorkflowProgress";
+import { WorkflowPage } from "@/features/workflow/WorkflowPage";
+import { SettingsPage } from "@/features/settings/SettingsPage";
 
 export function App() {
   const eventStatus = useEvents();
@@ -64,14 +66,14 @@ export function App() {
         <b>
           <i>U</i> Ununknown <small>0.5.0</small>
         </b>
-        <Flow phase={workflow.data?.phase || "idle"} />
+        <WorkflowProgress phase={workflow.data?.phase || "idle"} />
         <span className="topbar-path">{settings.data?.input_dir}</span>
         <Button kind="quiet" onClick={() => setSettingsPage(true)}>
           Settings
         </Button>
       </header>
       <main className="pipeline v4">
-        <Workspace
+        <WorkflowPage
           workflow={workflow.data}
           loading={workflow.isLoading}
           preview={preview}

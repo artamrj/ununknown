@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { TerminalLine, Workflow } from "../api";
+import type { TerminalLine, Workflow } from "@/api";
 
 type ServerEvent = {
   kind: string;

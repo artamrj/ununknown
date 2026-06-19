@@ -1,4 +1,4 @@
-import type { PreviewItem } from "../../api";
+import type { PreviewItem } from "@/api";
 import { PreviewRow } from "./PreviewRow";
 
 export function PreviewList({ items }: { items: PreviewItem[] }) {

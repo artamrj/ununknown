@@ -1,4 +1,4 @@
-import { Spinner } from "../components";
+import { Spinner } from "@/shared/components/Spinner";
 
 function Progress({ current, total }: { current: number; total: number }) {
   const value = total ? Math.min(100, Math.round((current / total) * 100)) : 0;
@@ -9,7 +9,7 @@ function Progress({ current, total }: { current: number; total: number }) {
   );
 }
 
-export function ProcessingCard({
+export function ProcessingStatusCard({
   phase,
   message,
   currentFile,

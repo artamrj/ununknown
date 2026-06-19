@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button } from "../../components";
+import { Button } from "@/shared/components/Button";
 
 export const Section = ({
   title,
