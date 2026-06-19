@@ -59,9 +59,9 @@ export function PreviewPage({
         </div>
       )}
       {workflow.phase !== "finish" && !empty && <PreviewList items={items} />}
-      {workflow.phase !== "finish" && preview && (
+      {workflow.phase !== "finish" && preview && writeCount > 0 && (
         <div className="apply-bar">
-          <Button disabled={!writeCount || applyPending} onClick={onApply}>
+          <Button disabled={applyPending} onClick={onApply}>
             {applyPending ? "Applying..." : "Apply changes"}
           </Button>
         </div>

@@ -248,7 +248,7 @@ async fn process_file(
                         TerminalEntry::new("warn", "fetch", "Track attempt failed; retrying")
                             .file(filename.clone())
                             .attempt(attempt as i64)
-                            .error(error.as_ref())
+                            .error_text(format!("{error:#}"))
                             .context(serde_json::json!({
                                 "path": job.path.display().to_string(),
                                 "max_attempts": cfg.track_attempts
@@ -265,7 +265,7 @@ async fn process_file(
                         TerminalEntry::new("error", "fetch", "Track failed after retries")
                             .file(filename.clone())
                             .attempt(attempt as i64)
-                            .error(error.as_ref())
+                            .error_text(format!("{error:#}"))
                             .context(serde_json::json!({
                                 "path": job.path.display().to_string(),
                                 "max_attempts": cfg.track_attempts
@@ -396,15 +396,27 @@ async fn process(
             &format!("Provider returned {} candidate(s)", candidates.len()),
         )
         .await;
-    let threshold = match cfg.automation_mode {
-        AutomationMode::Aggressive => 75.0,
-        AutomationMode::Manual => 101.0,
-        AutomationMode::Custom => cfg.confidence_threshold,
-        AutomationMode::Safe => 90.0,
-    };
     let best = candidates
         .into_iter()
         .max_by(|a, b| a.score.total_cmp(&b.score));
+    if cfg.automation_mode == AutomationMode::Manual {
+        state.workflow.write().await.unmatched += 1;
+        state
+            .terminal(
+                "warn",
+                "match",
+                Some(filename),
+                "Manual mode is enabled; candidate was not auto-selected",
+            )
+            .await;
+        return Ok(false);
+    }
+    let threshold = match cfg.automation_mode {
+        AutomationMode::Aggressive => 75.0,
+        AutomationMode::Custom => cfg.confidence_threshold,
+        AutomationMode::Safe => 90.0,
+        AutomationMode::Manual => unreachable!("manual mode returns before threshold selection"),
+    };
     let Some(candidate) = best.filter(|c| c.score >= threshold) else {
         state.workflow.write().await.unmatched += 1;
         state
