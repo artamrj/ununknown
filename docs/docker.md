@@ -60,7 +60,7 @@ export UNUNKNOWN_CACHE_DIR=/volume1/docker/ununknown/cache
 export UNUNKNOWN_INPUT_DIR_HOST=/volume1/music/input
 export UNUNKNOWN_OUTPUT_DIR_HOST=/volume1/music/output
 export UNUNKNOWN_ACOUSTID_API_KEY=your_key_here
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT='Ununknown/0.4.5 (https://github.com/artamrj/ununknown)'
+export UNUNKNOWN_MUSICBRAINZ_USER_AGENT='Ununknown/0.5.0 (https://github.com/artamrj/ununknown)'
 docker compose -f docker-compose.deploy.yml up -d
 ```
 

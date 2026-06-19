@@ -61,7 +61,7 @@ export function App() {
     <>
       <header className="topbar">
         <b>
-          <i>U</i> Ununknown <small>0.4.5</small>
+          <i>U</i> Ununknown <small>0.5.0</small>
         </b>
         <Flow phase={workflow.data?.phase || "idle"} />
         <span className="topbar-path">{settings.data?.input_dir}</span>

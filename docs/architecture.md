@@ -8,7 +8,7 @@ then applies selected tag and file path updates.
 Project identity:
 
 - Package name: `ununknown`
-- Version: `0.4.5`
+- Version: `0.5.0`
 - License: MIT
 - Backend: Rust 2024
 - Frontend: React, TypeScript, and Vite
@@ -89,7 +89,7 @@ Environment variables:
 | `UNUNKNOWN_INPUT_DIR` | Root folder scanned for music | `/music/input` |
 | `UNUNKNOWN_OUTPUT_DIR` | Copy-mode output folder | `/music/output` |
 | `UNUNKNOWN_ACOUSTID_API_KEY` | AcoustID API key | empty |
-| `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` | MusicBrainz contact user agent | `Ununknown/0.4.5 (https://github.com/artamrj/ununknown)` |
+| `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` | MusicBrainz contact user agent | `Ununknown/0.5.0 (https://github.com/artamrj/ununknown)` |
 
 The backend nests the API under `/api` and serves static frontend assets as the
 fallback service:
