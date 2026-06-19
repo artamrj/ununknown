@@ -11,7 +11,7 @@ import { SettingsPage } from "@/features/settings/SettingsPage";
 export function App() {
   const eventStatus = useEvents();
   const queryClient = useQueryClient();
-  const [settingsPage, setSettingsPage] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<string>();
   const [preview, setPreview] = useState<Preview>();
   const [toast, setToast] = useState("");
   const settings = useQuery({ queryKey: ["settings"], queryFn: () => api<any>("/settings") });
@@ -56,7 +56,13 @@ export function App() {
   }, [workflow.data?.phase, workflow.data?.matched, preview, makePreview]);
 
   if (settingsPage) {
-    return <SettingsPage settings={settings.data} back={() => setSettingsPage(false)} />;
+    return (
+      <SettingsPage
+        settings={settings.data}
+        back={() => setSettingsPage(undefined)}
+        initialTab={settingsPage}
+      />
+    );
   }
 
   const active = !!workflow.data && ["scan", "fetch", "apply"].includes(workflow.data.phase);
@@ -64,11 +70,11 @@ export function App() {
     <>
       <header className="topbar">
         <b>
-          <i>U</i> Ununknown <small>0.5.0</small>
+          <i>U</i> Ununknown <small>0.6.0</small>
         </b>
         <WorkflowProgress phase={workflow.data?.phase || "idle"} />
         <span className="topbar-path">{settings.data?.input_dir}</span>
-        <Button kind="quiet" onClick={() => setSettingsPage(true)}>
+        <Button kind="quiet" onClick={() => setSettingsPage("Basic")}>
           Settings
         </Button>
       </header>

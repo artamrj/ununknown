@@ -15,7 +15,7 @@ For beginner-focused backend documentation, start with
 Project identity:
 
 - Package name: `ununknown`
-- Version: `0.5.0`
+- Version: `0.6.0`
 - License: MIT
 - Backend: Rust 2024
 - Frontend: React, TypeScript, and Vite
@@ -95,8 +95,9 @@ Environment variables:
 | `UNUNKNOWN_DB` | SQLite database path | `/cache/ununknown.sqlite` |
 | `UNUNKNOWN_INPUT_DIR` | Root folder scanned for music | `/music/input` |
 | `UNUNKNOWN_OUTPUT_DIR` | Copy-mode output folder | `/music/output` |
-| `UNUNKNOWN_ACOUSTID_API_KEY` | AcoustID API key | empty |
-| `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` | MusicBrainz contact user agent | `Ununknown/0.5.0 (https://github.com/artamrj/ununknown)` |
+
+Provider credentials and contact values, including the AcoustID API key and
+MusicBrainz User-Agent/contact, are configured in Settings -> Metadata Sources.
 
 The backend nests the API under `/api` and serves static frontend assets as the
 fallback service:
@@ -203,15 +204,15 @@ emits an `activity_log` event so the frontend can update without waiting for pol
   `metadata_fields`.
 - safety and retention: `expert_mode`, `workspace_retention_days`,
   `job_retention_days`.
-- secrets and provider identity: `acoustid_api_key`,
-  `musicbrainz_user_agent`.
+- provider source configuration: `metadata_sources`, including AcoustID API key
+  and MusicBrainz User-Agent/contact.
 - file naming: `path_templates`, `in_place`.
 
 Secrets are not exposed through public settings:
 
-- `db_path`, `acoustid_api_key`, and `musicbrainz_user_agent` are skipped by
-  serde in the main config.
-- `Config::public` clears the AcoustID key and exposes boolean status fields:
+- `db_path` and legacy credential aliases are skipped by serde in the main
+  config.
+- `Config::public` clears provider secrets and exposes boolean status fields:
   `acoustid_configured` and `musicbrainz_configured`.
 
 Validation rules include:
@@ -420,7 +421,7 @@ The command has a 180 second timeout. The JSON output must contain a
 
 Provider orchestration is in `src/infrastructure/providers/mod.rs`.
 
-If `Config.acoustid_api_key` is non-empty:
+If the Metadata Sources AcoustID API key is configured:
 
 1. AcoustID `/v2/lookup` is called with `meta=recordings`.
 2. Up to three recording hits are used.
@@ -737,13 +738,11 @@ On startup, `db::cleanup`:
 
 1. Reads `settings.value` where key is `config`.
 2. Deserializes it into `Config`, or falls back to defaults.
-3. Restores runtime-only values from environment/defaults:
+3. Restores runtime-only path values from environment/defaults:
    - `db_path`
-   - `acoustid_api_key`
-   - `musicbrainz_user_agent`
 4. Saves the normalized config back to SQLite.
 
-This means editable settings survive restarts, while secrets and runtime paths
+This means editable settings survive restarts, while runtime paths
 come from the environment and startup defaults.
 
 ## External Integrations

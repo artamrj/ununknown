@@ -59,10 +59,11 @@ Override host paths for NAS or VPS layouts:
 export UNUNKNOWN_CACHE_DIR=/volume1/docker/ununknown/cache
 export UNUNKNOWN_INPUT_DIR_HOST=/volume1/music/input
 export UNUNKNOWN_OUTPUT_DIR_HOST=/volume1/music/output
-export UNUNKNOWN_ACOUSTID_API_KEY=your_key_here
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT='Ununknown/0.5.0 (https://github.com/artamrj/ununknown)'
 docker compose -f docker-compose.deploy.yml up -d
 ```
+
+Configure the AcoustID API key and MusicBrainz User-Agent/contact in
+Settings -> Metadata Sources after the app starts.
 
 Deploy mode expects this image to already exist:
 

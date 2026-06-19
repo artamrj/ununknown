@@ -53,9 +53,11 @@ your `PATH`.
 export UNUNKNOWN_DB=.local/cache/ununknown.sqlite
 export UNUNKNOWN_INPUT_DIR=.local/input
 export UNUNKNOWN_OUTPUT_DIR=.local/output
-export UNUNKNOWN_MUSICBRAINZ_USER_AGENT='Ununknown/0.5.0 (https://github.com/artamrj/ununknown)'
 cargo run
 ```
+
+Configure AcoustID and MusicBrainz credentials/contact in Settings -> Metadata
+Sources.
 
 The direct Rust run expects the frontend build to exist if you want the browser
 UI served by the backend.

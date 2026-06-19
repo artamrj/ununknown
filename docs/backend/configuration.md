@@ -5,8 +5,9 @@ Configuration comes from two places:
 1. Environment variables used at process startup.
 2. Saved editable settings stored as JSON in the SQLite `settings` table.
 
-The startup environment values are treated as deployment-owned values. Saved UI
-settings are loaded from SQLite and merged with those deployment values.
+The startup environment values are treated as deployment-owned path values.
+Saved UI settings are loaded from SQLite and merged with those deployment
+values.
 
 ## Environment Variables
 
@@ -15,17 +16,16 @@ settings are loaded from SQLite and merged with those deployment values.
 | `UNUNKNOWN_DB` | SQLite database path | `/cache/ununknown.sqlite` |
 | `UNUNKNOWN_INPUT_DIR` | Folder scanned for music | `/music/input` |
 | `UNUNKNOWN_OUTPUT_DIR` | Copy-mode output folder | `/music/output` |
-| `UNUNKNOWN_ACOUSTID_API_KEY` | Optional AcoustID API key | empty |
-| `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` | MusicBrainz contact user agent | `Ununknown/0.5.0 (https://github.com/artamrj/ununknown)` |
 
-MusicBrainz requires a useful user agent. The backend validation expects a
-product/version plus contact details in parentheses, with either an email
-address or a website.
+Provider credentials and contact values are configured in Settings -> Metadata
+Sources. MusicBrainz requires a useful user agent. The backend validation
+expects a product/version plus contact details in parentheses, with either an
+email address or a website.
 
 Example:
 
 ```text
-Ununknown/0.5.0 (https://github.com/artamrj/ununknown)
+Ununknown/0.6.0 (https://github.com/artamrj/ununknown)
 ```
 
 ## Saved Settings

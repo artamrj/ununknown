@@ -1,5 +1,6 @@
 export type Candidate = {
   id: number;
+  provider?: string;
   title?: string;
   artist?: string;
   album?: string;

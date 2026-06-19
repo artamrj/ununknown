@@ -1,4 +1,7 @@
-use crate::{domain::audio::AudioInfo, types::CompilationPreference};
+use crate::{
+    domain::audio::AudioInfo,
+    types::{CompilationPreference, MatchingStrategy},
+};
 use serde::Serialize;
 use strsim::normalized_levenshtein;
 
@@ -95,6 +98,27 @@ pub fn auto_selectable(
         && second_score.is_none_or(|score| top_score - score >= 10.0)
 }
 
+pub fn auto_selectable_for_strategy(
+    strategy: MatchingStrategy,
+    top_score: f64,
+    second_score: Option<f64>,
+    duration_delta: Option<f64>,
+) -> bool {
+    match strategy {
+        MatchingStrategy::Safe => {
+            top_score >= 92.0
+                && duration_delta.is_some_and(|delta| delta <= 3.0)
+                && second_score.is_none_or(|score| top_score - score >= 12.0)
+        }
+        MatchingStrategy::Balanced => auto_selectable(top_score, second_score, duration_delta),
+        MatchingStrategy::Aggressive => {
+            top_score >= 85.0
+                && duration_delta.is_some_and(|delta| delta <= 5.0)
+                && second_score.is_none_or(|score| top_score - score >= 6.0)
+        }
+    }
+}
+
 fn text_similarity(left: &str, right: &str) -> f64 {
     normalized_levenshtein(&left.to_lowercase(), &right.to_lowercase())
 }
@@ -144,6 +168,22 @@ mod tests {
     #[test]
     fn close_second_result_blocks_auto_select() {
         assert!(!auto_selectable(96.0, Some(91.0), Some(1.0)));
+    }
+
+    #[test]
+    fn matching_strategy_changes_auto_select_thresholds() {
+        assert!(!auto_selectable_for_strategy(
+            MatchingStrategy::Safe,
+            90.0,
+            Some(79.0),
+            Some(2.0)
+        ));
+        assert!(auto_selectable_for_strategy(
+            MatchingStrategy::Aggressive,
+            86.0,
+            Some(79.0),
+            Some(4.0)
+        ));
     }
 
     #[test]

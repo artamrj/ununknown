@@ -248,6 +248,12 @@ function CandidateOption({
   disabled: boolean;
   onSelect: () => void;
 }) {
+  const why = parseWhy(candidate.score_breakdown);
+  const badges = [
+    providerLabel(candidate.provider),
+    why?.acoustid ? "AcoustID" : undefined,
+    candidate.is_compilation ? "Compilation" : undefined,
+  ].filter(Boolean);
   const releaseType = [
     candidate.release_type,
     candidate.release_secondary_types,
@@ -260,6 +266,11 @@ function CandidateOption({
       {candidate.cover_url ? <img alt="" src={candidate.cover_url} /> : <span className="cover-fallback" />}
       <div>
         <strong>{candidate.album || candidate.title || "Unknown release"}</strong>
+        <span className="source-badges">
+          {badges.map((badge) => (
+            <i key={badge}>{badge}</i>
+          ))}
+        </span>
         <span>{candidate.artist || "Unknown artist"}</span>
         <small>
           {[candidate.release_date || candidate.year, candidate.release_country, releaseType]
@@ -276,8 +287,61 @@ function CandidateOption({
       <button disabled={disabled} onClick={onSelect} type="button">
         Select
       </button>
+      <details className="why-match">
+        <summary>Why this match?</summary>
+        <dl>
+          <div>
+            <dt>Fingerprint match</dt>
+            <dd>{why?.acoustid ? `${Math.round(why.acoustid * 100)}%` : "Not used"}</dd>
+          </div>
+          <div>
+            <dt>Duration match</dt>
+            <dd>{quality(why?.duration)}</dd>
+          </div>
+          <div>
+            <dt>Title similarity</dt>
+            <dd>{quality(why?.title)}</dd>
+          </div>
+          <div>
+            <dt>Album context</dt>
+            <dd>{quality(why?.album_context)}</dd>
+          </div>
+          <div>
+            <dt>Source agreement</dt>
+            <dd>{badges.filter((badge) => badge !== "Compilation").join(" + ")}</dd>
+          </div>
+        </dl>
+      </details>
     </div>
   );
+}
+
+function parseWhy(value?: string) {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value) as Record<string, number>;
+  } catch {
+    return undefined;
+  }
+}
+
+function quality(value?: number) {
+  if (typeof value !== "number") return "Unknown";
+  if (value >= 0.85) return "Good";
+  if (value >= 0.55) return "Medium";
+  return "Weak";
+}
+
+function providerLabel(value?: string) {
+  if (!value) return "MusicBrainz";
+  const known: Record<string, string> = {
+    musicbrainz: "MusicBrainz",
+    discogs: "Discogs",
+    acoustid: "AcoustID",
+    lastfm: "Last.fm",
+    wikidata: "Wikidata",
+  };
+  return known[value] || value;
 }
 
 function TrackReviewList({

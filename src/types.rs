@@ -44,6 +44,36 @@ pub enum CompilationPreference {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MatchingStrategy {
+    Safe,
+    #[default]
+    Balanced,
+    Aggressive,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderMode {
+    #[default]
+    Primary,
+    Fallback,
+    Parallel,
+    EnrichmentOnly,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderStatus {
+    Connected,
+    MissingApiKey,
+    RateLimited,
+    Error,
+    #[default]
+    Disabled,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CollisionStrategy {
     #[default]
     Skip,
@@ -225,6 +255,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&CompilationPreference::Avoid).unwrap(),
             "\"avoid\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MatchingStrategy::Balanced).unwrap(),
+            "\"balanced\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderMode::EnrichmentOnly).unwrap(),
+            "\"enrichment_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderStatus::MissingApiKey).unwrap(),
+            "\"missing_api_key\""
         );
         assert_eq!(
             serde_json::to_string(&CollisionStrategy::Overwrite).unwrap(),

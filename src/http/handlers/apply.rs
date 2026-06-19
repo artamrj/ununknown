@@ -13,8 +13,11 @@ pub async fn template_preview(
 ) -> ApiResult<Json<serde_json::Value>> {
     let base = s.config.read().await.clone();
     let mut cfg = body.settings.unwrap_or(base.clone());
-    cfg.acoustid_api_key = base.acoustid_api_key;
-    cfg.musicbrainz_user_agent = base.musicbrainz_user_agent;
+    cfg.metadata_sources.acoustid.api_key = base.metadata_sources.acoustid.api_key.clone();
+    cfg.metadata_sources.musicbrainz.user_agent =
+        base.metadata_sources.musicbrainz.user_agent.clone();
+    cfg.acoustid_api_key = cfg.metadata_sources.acoustid.api_key.clone();
+    cfg.musicbrainz_user_agent = cfg.metadata_sources.musicbrainz.user_agent.clone();
     cfg.db_path = base.db_path;
     cfg.validate()
         .map_err(|error| ApiError::validation(error.to_string()))?;

@@ -6,6 +6,7 @@ import { ExpertSettings } from "@/features/settings/sections/ExpertSettings";
 import { FilesAndPathsSettings } from "@/features/settings/sections/FilesAndPathsSettings";
 import { MatchingSettings } from "@/features/settings/sections/MatchingSettings";
 import { MetadataSettings } from "@/features/settings/sections/MetadataSettings";
+import { MetadataSourcesSettings } from "@/features/settings/sections/MetadataSourcesSettings";
 import { tabs } from "@/features/settings/settingsOptions";
 import type { SettingsSectionProps } from "@/features/settings/types";
 import { Button } from "@/shared/components/Button";
@@ -13,12 +14,13 @@ import { Button } from "@/shared/components/Button";
 type SettingsPageProps = {
   settings: any;
   back: () => void;
+  initialTab?: string;
 };
 
-export function SettingsPage({ settings, back }: SettingsPageProps) {
+export function SettingsPage({ settings, back, initialTab = "Basic" }: SettingsPageProps) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<any>({ ...settings });
-  const [tab, setTab] = useState("Basic");
+  const [tab, setTab] = useState(initialTab);
   const [search, setSearch] = useState("");
   const [msg, setMsg] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -73,6 +75,7 @@ export function SettingsPage({ settings, back }: SettingsPageProps) {
   const content = {
     Basic: <BasicSettings {...sectionProps} />,
     Matching: <MatchingSettings {...sectionProps} />,
+    "Metadata Sources": <MetadataSourcesSettings {...sectionProps} />,
     Metadata: <MetadataSettings {...sectionProps} />,
     "Files & Paths": <FilesAndPathsSettings {...sectionProps} pathPreview={pathPreview} />,
     Expert: <ExpertSettings {...sectionProps} />,

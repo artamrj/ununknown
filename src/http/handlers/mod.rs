@@ -6,8 +6,8 @@ use crate::{
     http::error::{ApiError, ApiResult},
     infrastructure::{media::tag_writer, providers::Candidate},
     types::{
-        CandidateId, DuplicateAction, JobId, OutputMode, PreviewToken, TrackId, TrackStage,
-        WorkflowPhase,
+        CandidateId, DuplicateAction, JobId, OutputMode, PreviewToken, ProviderStatus, TrackId,
+        TrackStage, WorkflowPhase,
     },
 };
 use anyhow::{Result, anyhow};
@@ -37,8 +37,8 @@ pub use artwork::{current_artwork, proposed_artwork};
 pub use events::events;
 pub use scan::{get_job, list_jobs, start_scan, stop_scan};
 pub use settings::{
-    reset_settings, reset_settings_section, settings, test_acoustid, test_musicbrainz,
-    update_settings,
+    provider_status, reset_settings, reset_settings_section, settings, test_acoustid,
+    test_musicbrainz, test_provider, update_settings,
 };
 pub use tracks::{
     candidates, edit_candidate, get_track, keep_current_track, list_tracks, retry_failed,

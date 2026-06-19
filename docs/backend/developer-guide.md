@@ -104,8 +104,9 @@ Check these first:
 - Is `input_dir` correct and mounted into the container?
 - Are the files supported by `domain::audio::is_supported`?
 - Does `fpcalc` exist? In Docker, run `which fpcalc` inside the container.
-- Is `UNUNKNOWN_ACOUSTID_API_KEY` configured if fingerprint matching is needed?
-- Is `UNUNKNOWN_MUSICBRAINZ_USER_AGENT` valid?
+- Is the AcoustID API key configured in Settings -> Metadata Sources if
+  fingerprint matching is needed?
+- Is the MusicBrainz User-Agent/contact valid in Settings -> Metadata Sources?
 - Look at `/api/workspace` and the activity log from `/api/events`.
 
 `POST /api/scan/start` clears the previous temporary track workspace. Do not use

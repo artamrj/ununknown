@@ -24,6 +24,8 @@ pub fn router() -> Router<Arc<AppState>> {
             "/providers/musicbrainz/test",
             post(handlers::test_musicbrainz),
         )
+        .route("/providers/status", get(handlers::provider_status))
+        .route("/providers/{provider}/test", post(handlers::test_provider))
         .route("/scan/start", post(handlers::start_scan))
         .route("/scan/stop", post(handlers::stop_scan))
         .route("/jobs", get(handlers::list_jobs))

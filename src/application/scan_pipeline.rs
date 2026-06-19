@@ -380,7 +380,7 @@ async fn process(
         )
         .await;
     let cfg = state.config.read().await.clone();
-    if cfg.acoustid_api_key.is_empty() {
+    if cfg.acoustid_key().is_empty() || !cfg.metadata_sources.acoustid.enabled {
         state
             .log(
                 "warn",
@@ -443,8 +443,12 @@ async fn process(
         return Ok(false);
     };
     let second_score = candidates.get(1).map(|candidate| candidate.score);
-    let auto_select =
-        crate::domain::matcher::auto_selectable(best.score, second_score, best.duration_delta);
+    let auto_select = crate::domain::matcher::auto_selectable_for_strategy(
+        cfg.matching_strategy,
+        best.score,
+        second_score,
+        best.duration_delta,
+    );
     if !auto_select {
         state.increment_unmatched().await;
         let message = if best.score >= 80.0 {
@@ -499,14 +503,17 @@ async fn identify(
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
     let mut out = Vec::new();
-    if !cfg.acoustid_api_key.is_empty() {
+    if !cfg.acoustid_key().is_empty()
+        && cfg.metadata_sources.acoustid.enabled
+        && cfg.metadata_sources.musicbrainz.enabled
+    {
         let started = Instant::now();
         let hits = {
             let _permit = limits.acoustid.acquire().await?;
             providers::acoustid::lookup(
                 &state.pool,
                 &state.client,
-                &cfg.acoustid_api_key,
+                cfg.acoustid_key(),
                 fingerprint,
                 duration,
             )
@@ -528,7 +535,7 @@ async fn identify(
             let mut candidate = providers::musicbrainz::recording(
                 &state.pool,
                 &state.client,
-                &cfg.musicbrainz_user_agent,
+                cfg.musicbrainz_user_agent(),
                 &hit.recording_id,
             )
             .await?;
@@ -558,7 +565,7 @@ async fn identify(
             out.push(candidate);
         }
     }
-    if out.is_empty() {
+    if out.is_empty() && cfg.metadata_sources.musicbrainz.enabled {
         let title = current
             .title
             .as_deref()
@@ -568,7 +575,7 @@ async fn identify(
             for mut candidate in providers::musicbrainz::search(
                 &state.pool,
                 &state.client,
-                &cfg.musicbrainz_user_agent,
+                cfg.musicbrainz_user_agent(),
                 title,
                 current.artist.as_deref(),
             )
@@ -694,7 +701,7 @@ async fn insert_candidate(
     track_id: i64,
     c: &providers::Candidate,
 ) -> Result<i64> {
-    Ok(sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,musicbrainz_recording_id,musicbrainz_release_id,release_country,release_date,release_type,release_secondary_types,is_compilation,duration_delta,score_breakdown,musicbrainz_artist_id,musicbrainz_album_artist_id,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    let candidate_id = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,musicbrainz_recording_id,musicbrainz_release_id,release_country,release_date,release_type,release_secondary_types,is_compilation,duration_delta,score_breakdown,musicbrainz_artist_id,musicbrainz_album_artist_id,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(track_id)
         .bind("musicbrainz")
         .bind(&c.title)
@@ -726,7 +733,57 @@ async fn insert_candidate(
         .bind(&c.raw_json)
         .execute(&mut **tx)
         .await?
-        .last_insert_rowid())
+        .last_insert_rowid();
+    insert_candidate_source(
+        tx,
+        candidate_id,
+        "MusicBrainz",
+        Some(c.score),
+        serde_json::json!({
+            "reason": "Canonical recording and release metadata",
+            "recording_id": c.recording_id,
+            "release_id": c.release_id
+        }),
+        Some(&c.raw_json),
+    )
+    .await?;
+    if let Some(score_breakdown) = &c.score_breakdown
+        && score_breakdown.contains("\"acoustid\"")
+    {
+        insert_candidate_source(
+            tx,
+            candidate_id,
+            "AcoustID",
+            Some(c.score),
+            serde_json::json!({
+                "reason": "Fingerprint evidence contributed to score",
+                "breakdown": score_breakdown
+            }),
+            None,
+        )
+        .await?;
+    }
+    Ok(candidate_id)
+}
+
+async fn insert_candidate_source(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    candidate_id: i64,
+    provider: &str,
+    confidence: Option<f64>,
+    reason: serde_json::Value,
+    raw_json: Option<&str>,
+) -> Result<()> {
+    sqlx::query("INSERT INTO candidate_sources(candidate_id,provider,confidence,reason_json,raw_json,created_at) VALUES(?,?,?,?,?,?)")
+        .bind(candidate_id)
+        .bind(provider)
+        .bind(confidence)
+        .bind(reason.to_string())
+        .bind(raw_json)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn persist_review(
@@ -942,5 +999,40 @@ mod tests {
         assert_eq!(row.2.as_deref(), Some("Track failed after retries"));
         assert_eq!(row.3.as_deref(), Some("fpcalc failed: command not found"));
         assert_eq!(row.4, None);
+    }
+
+    #[tokio::test]
+    async fn persist_review_stores_candidate_source_evidence() {
+        let pool = test_pool().await;
+        let path = Path::new("/music/input/review.mp3");
+        let info = audio::AudioInfo {
+            title: Some("Song".into()),
+            artist: Some("Artist".into()),
+            duration: 180.0,
+            format: "mp3".into(),
+            ..Default::default()
+        };
+        let candidates = vec![providers::Candidate {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: Some("Album".into()),
+            recording_id: Some("rec-1".into()),
+            release_id: Some("rel-1".into()),
+            score: 91.0,
+            raw_json: "{}".into(),
+            score_breakdown: Some(serde_json::json!({"acoustid":0.96}).to_string()),
+            ..Default::default()
+        }];
+
+        persist_review(&pool, path, &info, &candidates, "Review required")
+            .await
+            .unwrap();
+
+        let providers: Vec<String> =
+            sqlx::query_scalar("SELECT provider FROM candidate_sources ORDER BY provider")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(providers, ["AcoustID", "MusicBrainz"]);
     }
 }

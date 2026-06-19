@@ -1,4 +1,7 @@
-use crate::types::{AutomationMode, CollisionStrategy, CompilationPreference, OutputMode};
+use crate::types::{
+    AutomationMode, CollisionStrategy, CompilationPreference, MatchingStrategy, OutputMode,
+    ProviderMode, ProviderStatus,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +14,7 @@ pub struct Config {
     pub output_dir: String,
     pub output_mode: OutputMode,
     pub automation_mode: AutomationMode,
+    pub matching_strategy: MatchingStrategy,
     pub compilation_preference: CompilationPreference,
     pub confidence_threshold: f64,
     pub track_attempts: u32,
@@ -30,9 +34,121 @@ pub struct Config {
     pub job_retention_days: u32,
     #[serde(skip)]
     pub musicbrainz_user_agent: String,
+    pub metadata_sources: MetadataSourcesConfig,
     pub path_templates: PathTemplateConfig,
     pub in_place: InPlaceConfig,
     pub metadata_fields: MetadataFields,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderConfig {
+    pub enabled: bool,
+    pub mode: ProviderMode,
+    pub api_key: String,
+    pub token: String,
+    pub user_agent: String,
+}
+
+impl ProviderConfig {
+    fn without_secrets(mut self) -> Self {
+        if !self.api_key.is_empty() {
+            self.api_key = "configured".into();
+        }
+        if !self.token.is_empty() {
+            self.token = "configured".into();
+        }
+        self
+    }
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: ProviderMode::EnrichmentOnly,
+            api_key: String::new(),
+            token: String::new(),
+            user_agent: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetadataSourcesConfig {
+    pub musicbrainz: ProviderConfig,
+    pub acoustid: ProviderConfig,
+    pub discogs: ProviderConfig,
+    pub cover_art_archive: ProviderConfig,
+    pub theaudiodb: ProviderConfig,
+    pub wikidata: ProviderConfig,
+    pub lastfm: ProviderConfig,
+}
+
+impl MetadataSourcesConfig {
+    fn without_secrets(mut self) -> Self {
+        self.musicbrainz = self.musicbrainz.without_secrets();
+        self.acoustid = self.acoustid.without_secrets();
+        self.discogs = self.discogs.without_secrets();
+        self.cover_art_archive = self.cover_art_archive.without_secrets();
+        self.theaudiodb = self.theaudiodb.without_secrets();
+        self.wikidata = self.wikidata.without_secrets();
+        self.lastfm = self.lastfm.without_secrets();
+        self
+    }
+}
+
+impl Default for MetadataSourcesConfig {
+    fn default() -> Self {
+        Self {
+            musicbrainz: ProviderConfig {
+                enabled: true,
+                mode: ProviderMode::Primary,
+                user_agent: "Ununknown/0.6.0 (https://github.com/artamrj/ununknown)".into(),
+                ..Default::default()
+            },
+            acoustid: ProviderConfig {
+                enabled: true,
+                mode: ProviderMode::Primary,
+                ..Default::default()
+            },
+            discogs: ProviderConfig {
+                enabled: false,
+                mode: ProviderMode::Fallback,
+                ..Default::default()
+            },
+            cover_art_archive: ProviderConfig {
+                enabled: true,
+                mode: ProviderMode::EnrichmentOnly,
+                ..Default::default()
+            },
+            theaudiodb: ProviderConfig {
+                enabled: false,
+                mode: ProviderMode::EnrichmentOnly,
+                ..Default::default()
+            },
+            wikidata: ProviderConfig {
+                enabled: true,
+                mode: ProviderMode::EnrichmentOnly,
+                ..Default::default()
+            },
+            lastfm: ProviderConfig {
+                enabled: false,
+                mode: ProviderMode::EnrichmentOnly,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderPublicStatus {
+    pub enabled: bool,
+    pub mode: ProviderMode,
+    pub status: ProviderStatus,
+    pub configured: bool,
+    pub confidence_weight: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,10 +205,11 @@ impl Config {
     pub fn public(&self) -> PublicSettings {
         PublicSettings {
             config: self.clone().without_secrets(),
-            acoustid_configured: !self.acoustid_api_key.is_empty(),
+            acoustid_configured: !self.acoustid_key().is_empty(),
             musicbrainz_configured: Self::valid_musicbrainz_user_agent(
-                &self.musicbrainz_user_agent,
+                self.musicbrainz_user_agent(),
             ),
+            provider_statuses: self.provider_statuses(),
         }
     }
     pub fn validate(&self) -> Result<()> {
@@ -141,7 +258,7 @@ impl Config {
             "DB write batch size must be between 1 and 250"
         );
         anyhow::ensure!(
-            Self::valid_musicbrainz_user_agent(&self.musicbrainz_user_agent),
+            Self::valid_musicbrainz_user_agent(self.musicbrainz_user_agent()),
             "MusicBrainz contact must include an email address or website, for example: Ununknown/0.1 (you@example.com)"
         );
         anyhow::ensure!(
@@ -174,7 +291,64 @@ impl Config {
     }
     fn without_secrets(mut self) -> Self {
         self.acoustid_api_key.clear();
+        self.metadata_sources = self.metadata_sources.without_secrets();
         self
+    }
+    pub fn provider_statuses(&self) -> ProviderStatuses {
+        ProviderStatuses {
+            musicbrainz: provider_status(
+                &self.metadata_sources.musicbrainz,
+                Self::valid_musicbrainz_user_agent(self.musicbrainz_user_agent()),
+                "High",
+                true,
+            ),
+            acoustid: provider_status(
+                &self.metadata_sources.acoustid,
+                !self.acoustid_key().is_empty(),
+                "High",
+                true,
+            ),
+            discogs: provider_status(
+                &self.metadata_sources.discogs,
+                !self.metadata_sources.discogs.token.is_empty()
+                    || !self.metadata_sources.discogs.api_key.is_empty(),
+                "Medium",
+                true,
+            ),
+            cover_art_archive: provider_status(
+                &self.metadata_sources.cover_art_archive,
+                true,
+                "Enrichment",
+                false,
+            ),
+            theaudiodb: provider_status(
+                &self.metadata_sources.theaudiodb,
+                !self.metadata_sources.theaudiodb.api_key.is_empty(),
+                "Enrichment",
+                true,
+            ),
+            wikidata: provider_status(&self.metadata_sources.wikidata, true, "Enrichment", false),
+            lastfm: provider_status(
+                &self.metadata_sources.lastfm,
+                !self.metadata_sources.lastfm.api_key.is_empty(),
+                "Enrichment",
+                true,
+            ),
+        }
+    }
+    pub fn acoustid_key(&self) -> &str {
+        if self.metadata_sources.acoustid.api_key.is_empty() {
+            &self.acoustid_api_key
+        } else {
+            &self.metadata_sources.acoustid.api_key
+        }
+    }
+    pub fn musicbrainz_user_agent(&self) -> &str {
+        if self.metadata_sources.musicbrainz.user_agent.is_empty() {
+            &self.musicbrainz_user_agent
+        } else {
+            &self.metadata_sources.musicbrainz.user_agent
+        }
     }
     pub fn valid_musicbrainz_user_agent(value: &str) -> bool {
         let value = value.trim();
@@ -191,6 +365,39 @@ pub struct PublicSettings {
     pub config: Config,
     pub acoustid_configured: bool,
     pub musicbrainz_configured: bool,
+    pub provider_statuses: ProviderStatuses,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderStatuses {
+    pub musicbrainz: ProviderPublicStatus,
+    pub acoustid: ProviderPublicStatus,
+    pub discogs: ProviderPublicStatus,
+    pub cover_art_archive: ProviderPublicStatus,
+    pub theaudiodb: ProviderPublicStatus,
+    pub wikidata: ProviderPublicStatus,
+    pub lastfm: ProviderPublicStatus,
+}
+
+fn provider_status(
+    provider: &ProviderConfig,
+    configured: bool,
+    confidence_weight: &'static str,
+    requires_key: bool,
+) -> ProviderPublicStatus {
+    ProviderPublicStatus {
+        enabled: provider.enabled,
+        mode: provider.mode,
+        status: if !provider.enabled {
+            ProviderStatus::Disabled
+        } else if requires_key && !configured {
+            ProviderStatus::MissingApiKey
+        } else {
+            ProviderStatus::Connected
+        },
+        configured,
+        confidence_weight,
+    }
 }
 
 impl Default for Config {
@@ -201,6 +408,7 @@ impl Default for Config {
             output_dir: "/music/output".into(),
             output_mode: OutputMode::Copy,
             automation_mode: AutomationMode::Safe,
+            matching_strategy: MatchingStrategy::Balanced,
             compilation_preference: CompilationPreference::Avoid,
             confidence_threshold: 90.0,
             track_attempts: 3,
@@ -218,6 +426,7 @@ impl Default for Config {
             workspace_retention_days: 1,
             job_retention_days: 7,
             musicbrainz_user_agent: "Ununknown/0.1 (configure-your-contact)".into(),
+            metadata_sources: Default::default(),
             path_templates: Default::default(),
             in_place: Default::default(),
             metadata_fields: Default::default(),
@@ -281,7 +490,10 @@ impl Default for MetadataFields {
 #[cfg(test)]
 mod tests {
     use super::Config;
-    use crate::types::{AutomationMode, CollisionStrategy, OutputMode};
+    use crate::types::{
+        AutomationMode, CollisionStrategy, MatchingStrategy, OutputMode, ProviderMode,
+        ProviderStatus,
+    };
 
     fn valid_config() -> Config {
         Config {
@@ -307,6 +519,12 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.output_mode, OutputMode::Copy);
         assert_eq!(cfg.automation_mode, AutomationMode::Safe);
+        assert_eq!(cfg.matching_strategy, MatchingStrategy::Balanced);
+        assert_eq!(cfg.metadata_sources.musicbrainz.mode, ProviderMode::Primary);
+        assert_eq!(
+            cfg.metadata_sources.cover_art_archive.mode,
+            ProviderMode::EnrichmentOnly
+        );
         assert_eq!(
             cfg.path_templates.collision_strategy,
             CollisionStrategy::Skip
@@ -320,9 +538,69 @@ mod tests {
             serde_json::json!("safe")
         );
         assert_eq!(
+            serde_json::to_value(&cfg).unwrap()["matching_strategy"],
+            serde_json::json!("balanced")
+        );
+        assert_eq!(
             serde_json::to_value(&cfg).unwrap()["path_templates"]["collision_strategy"],
             serde_json::json!("skip")
         );
+    }
+
+    #[test]
+    fn public_settings_mask_provider_secrets_and_report_status() {
+        let mut cfg = Config::default();
+        cfg.metadata_sources.acoustid.api_key = "secret".into();
+        cfg.metadata_sources.discogs.enabled = true;
+        cfg.metadata_sources.discogs.token = "discogs-token".into();
+        cfg.metadata_sources.lastfm.enabled = true;
+        let public = cfg.public();
+        assert_eq!(
+            public.config.metadata_sources.acoustid.api_key,
+            "configured"
+        );
+        assert_eq!(public.config.metadata_sources.discogs.token, "configured");
+        assert_eq!(
+            public.provider_statuses.acoustid.status,
+            ProviderStatus::Connected
+        );
+        assert_eq!(
+            public.provider_statuses.discogs.status,
+            ProviderStatus::Connected
+        );
+        assert_eq!(
+            public.provider_statuses.lastfm.status,
+            ProviderStatus::MissingApiKey
+        );
+    }
+
+    #[test]
+    fn metadata_sources_are_canonical_for_acoustid_and_musicbrainz_credentials() {
+        let mut cfg = Config {
+            acoustid_api_key: "legacy-acoustid".into(),
+            musicbrainz_user_agent: "Ununknown/0.1 (legacy@example.com)".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.acoustid_key(), "legacy-acoustid");
+        assert!(Config::valid_musicbrainz_user_agent(
+            cfg.musicbrainz_user_agent()
+        ));
+
+        cfg.metadata_sources.acoustid.api_key = "source-acoustid".into();
+        cfg.metadata_sources.musicbrainz.user_agent =
+            "Ununknown/0.6.0 (https://github.com/artamrj/ununknown)".into();
+        let public = cfg.public();
+
+        assert_eq!(cfg.acoustid_key(), "source-acoustid");
+        assert_eq!(
+            public.config.metadata_sources.acoustid.api_key,
+            "configured"
+        );
+        assert_eq!(
+            public.config.metadata_sources.musicbrainz.user_agent,
+            "Ununknown/0.6.0 (https://github.com/artamrj/ununknown)"
+        );
+        assert!(public.musicbrainz_configured);
     }
 
     #[test]

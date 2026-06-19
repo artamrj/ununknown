@@ -18,8 +18,6 @@ pub async fn connect(path: &str) -> Result<SqlitePool> {
 
 pub async fn load_settings(pool: &SqlitePool, defaults: Config) -> Result<Config> {
     let db_path = defaults.db_path.clone();
-    let secret = defaults.acoustid_api_key.clone();
-    let musicbrainz_user_agent = defaults.musicbrainz_user_agent.clone();
     let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key='config'")
         .fetch_optional(pool)
         .await?;
@@ -28,8 +26,19 @@ pub async fn load_settings(pool: &SqlitePool, defaults: Config) -> Result<Config
         None => defaults,
     };
     config.db_path = db_path;
-    config.acoustid_api_key = secret;
-    config.musicbrainz_user_agent = musicbrainz_user_agent;
+    if config.metadata_sources.acoustid.api_key.is_empty() {
+        config.metadata_sources.acoustid.api_key = config.acoustid_api_key.clone();
+    }
+    config.acoustid_api_key = config.metadata_sources.acoustid.api_key.clone();
+    if config.metadata_sources.musicbrainz.user_agent.is_empty() {
+        config.metadata_sources.musicbrainz.user_agent = config.musicbrainz_user_agent.clone();
+    }
+    config.musicbrainz_user_agent = config.metadata_sources.musicbrainz.user_agent.clone();
+    if !config.metadata_sources.discogs.api_key.is_empty()
+        || !config.metadata_sources.discogs.token.is_empty()
+    {
+        config.metadata_sources.discogs.enabled = true;
+    }
     save_settings(pool, &config).await?;
     Ok(config)
 }
