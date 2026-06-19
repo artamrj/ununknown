@@ -6,7 +6,7 @@ export function PreviewVirtualList({ items }: { items: PreviewItem[] }) {
   const [compact, setCompact] = useState(
     typeof window !== "undefined" ? window.matchMedia("(max-width: 700px)").matches : false,
   );
-  const rowHeight = compact ? 204 : 108;
+  const rowHeight = compact ? 152 : 82;
   const overscan = 10;
   const viewport = 620;
   const listHeight = Math.min(items.length * rowHeight, viewport);

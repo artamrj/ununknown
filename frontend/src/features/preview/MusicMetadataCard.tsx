@@ -2,20 +2,14 @@ import type { MetadataSummary } from "../../api";
 import { CoverImage } from "./CoverImage";
 
 export function MusicMetadataCard({
-  label,
   filename,
   data = {},
   cover,
-  confidence,
-  path,
   changedFrom,
 }: {
-  label: string;
   filename: string;
   data?: MetadataSummary;
   cover?: string;
-  confidence?: number;
-  path?: string;
   changedFrom?: MetadataSummary;
 }) {
   const field = (key: keyof MetadataSummary, name: string) => {
@@ -31,10 +25,6 @@ export function MusicMetadataCard({
     <section className="metadata-card">
       <CoverImage src={cover} title={data.title} />
       <div className="music-meta">
-        <header>
-          <em>{label}</em>
-          {confidence !== undefined && <span>{Math.round(confidence)}%</span>}
-        </header>
         <h3 className={changedFrom && changedFrom.title !== data.title ? "changed" : ""}>
           {data.title || "Unknown title"}
         </h3>
@@ -47,10 +37,8 @@ export function MusicMetadataCard({
             {filename}
           </span>
           {field("album", "Album")}
-          {field("album_artist", "Album artist")}
           {field("year", "Date")}
         </div>
-        {path && <p className="path-line">{path}</p>}
       </div>
     </section>
   );

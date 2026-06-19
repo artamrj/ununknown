@@ -8,22 +8,14 @@ export function PreviewRow({ item }: { item: PreviewItem }) {
   const skip = item.duplicate_action === "skip_duplicate";
   return (
     <article className={`preview-row ${skip ? "duplicate-skip" : ""}`}>
-      <MusicMetadataCard
-        label="Actual"
-        filename={item.filename}
-        data={oldData}
-        cover={item.current_cover_url}
-      />
+      <MusicMetadataCard filename={item.filename} data={oldData} cover={item.current_cover_url} />
       <div className="change-arrow">
         <span>{skip ? "skip" : "→"}</span>
       </div>
       <MusicMetadataCard
-        label="New"
         filename={item.filename}
         data={newData}
         cover={item.proposed_cover_url || item.cover_url}
-        confidence={item.confidence}
-        path={item.destination_path}
         changedFrom={oldData}
       />
       {warnings.length > 0 && (
