@@ -13,11 +13,11 @@ export function Terminal({
   useEffect(() => {
     if (body.current) body.current.scrollTop = body.current.scrollHeight;
   }, [lines.length]);
-  const recent = lines.slice(-120);
+  const recent = lines.slice(-500);
   return (
     <aside className={`terminal-card ${status}`}>
       <header>
-        <span /> Fetch terminal{" "}
+        <span /> Developer log{" "}
         <small>
           {status} · {recent.length} lines
         </small>
@@ -26,23 +26,33 @@ export function Terminal({
         {recent.length ? (
           recent.map((line, index) => (
             <p className={line.level} key={`${line.timestamp}-${index}`}>
-              <time>{new Date(line.timestamp).toLocaleTimeString()}</time>
-              <b>{line.stage}</b>
+              <time>{new Date(line.timestamp).toISOString()}</time>
+              <b>{line.level.toUpperCase()}</b>
+              <code>{line.stage}</code>
               <span>
-                {line.file ? <strong>{line.file}</strong> : null}
-                {line.file ? " · " : ""}
-                {line.message}
+                <strong>{line.message}</strong>
+                {line.file ? <em>{line.file}</em> : null}
+                <small>
+                  {line.attempt ? `attempt=${line.attempt} ` : ""}
+                  {typeof line.duration_ms === "number" ? `duration_ms=${line.duration_ms}` : ""}
+                </small>
+                {line.detail ? <i>{line.detail}</i> : null}
+                {line.error ? <pre>{line.error}</pre> : null}
+                {line.context ? <pre>{JSON.stringify(line.context, null, 2)}</pre> : null}
               </span>
             </p>
           ))
         ) : (
           <p className="muted">
             <time>--:--:--</time>
-            <b>idle</b>
+            <b>INFO</b>
+            <code>idle</code>
             <span>
-              {status === "reconnecting"
-                ? "Reconnecting to live events..."
-                : "Waiting for scan output..."}
+              <strong>
+                {status === "reconnecting"
+                  ? "Reconnecting to live events..."
+                  : "Waiting for scan output..."}
+              </strong>
             </span>
           </p>
         )}

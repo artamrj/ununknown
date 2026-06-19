@@ -1235,22 +1235,49 @@ select:focus-visible {
   padding: 8px;
 }
 .terminal-card p {
-  grid-template-columns: 58px 74px minmax(0, 1fr);
+  grid-template-columns: 168px 48px 82px minmax(0, 1fr);
   gap: 6px;
   margin: 0;
-  padding: 3px 0;
+  padding: 5px 0;
   border-bottom: 1px solid #1d2939;
   font-size: 10.5px;
 }
+.terminal-card p code {
+  color: #7cd4fd;
+  font-family: inherit;
+  overflow-wrap: anywhere;
+}
 .terminal-card p span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  display: grid;
+  gap: 3px;
 }
 .terminal-card p span strong {
   color: #e4e7ec;
   font-weight: 650;
+}
+.terminal-card p span em {
+  color: #98a2b3;
+  font-style: normal;
+}
+.terminal-card p span small,
+.terminal-card p span i {
+  color: #98a2b3;
+  font-style: normal;
+}
+.terminal-card p pre {
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  background: #0b1220;
+  border: 1px solid #263244;
+  border-radius: 6px;
+  color: #e4e7ec;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: inherit;
 }
 .preview-v4 {
   padding: 14px;

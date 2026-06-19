@@ -8,6 +8,11 @@ type ServerEvent = {
   level?: string;
   file?: string;
   timestamp?: string;
+  detail?: string;
+  error?: string;
+  attempt?: number;
+  duration_ms?: number;
+  context?: Record<string, unknown>;
   phase?: Workflow["phase"] | string;
   current_file?: string;
   processed?: number;
@@ -51,6 +56,11 @@ export function useEvents(): EventStatus {
             stage: event.stage || "fetch",
             file: event.file,
             message: event.message,
+            detail: event.detail,
+            error: event.error,
+            attempt: event.attempt,
+            duration_ms: event.duration_ms,
+            context: event.context,
           };
           return {
             ...current,
@@ -65,7 +75,7 @@ export function useEvents(): EventStatus {
             matched: event.matched ?? current.matched,
             unmatched: event.unmatched ?? current.unmatched,
             failed: event.failed ?? current.failed,
-            terminal_log: [...(current.terminal_log || []), line].slice(-160),
+            terminal_log: [...(current.terminal_log || []), line].slice(-500),
           };
         }
         const phase =

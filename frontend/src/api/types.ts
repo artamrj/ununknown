@@ -86,6 +86,11 @@ export type TerminalLine = {
   stage: string;
   file?: string;
   message: string;
+  detail?: string;
+  error?: string;
+  attempt?: number;
+  duration_ms?: number;
+  context?: Record<string, unknown>;
 };
 
 export type Workflow = {

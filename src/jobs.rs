@@ -13,6 +13,16 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<WorkflowPhase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_file: Option<String>,
@@ -44,6 +54,11 @@ pub fn emit(
         level: None,
         file: None,
         timestamp: None,
+        detail: None,
+        error: None,
+        attempt: None,
+        duration_ms: None,
+        context: None,
         phase,
         current_file: None,
         processed: None,

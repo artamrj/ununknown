@@ -15,7 +15,8 @@ pub async fn calculate(path: &Path) -> Result<(String, f64)> {
         Command::new("fpcalc").arg("-json").arg(path).output(),
     )
     .await
-    .context("fpcalc timed out")??;
+    .context("fpcalc timed out")?
+    .context("failed to run fpcalc; install Chromaprint so the fpcalc command is on PATH")?;
     if !result.status.success() {
         bail!("fpcalc failed: {}", String::from_utf8_lossy(&result.stderr));
     }

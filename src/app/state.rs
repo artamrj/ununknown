@@ -28,6 +28,75 @@ pub struct TerminalLine {
     pub stage: String,
     pub file: Option<String>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Default)]
+pub struct TerminalEntry {
+    pub level: String,
+    pub stage: String,
+    pub file: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+    pub error: Option<String>,
+    pub attempt: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub context: Option<serde_json::Value>,
+}
+
+impl TerminalEntry {
+    pub fn new(level: &str, stage: &str, message: impl Into<String>) -> Self {
+        Self {
+            level: level.into(),
+            stage: stage.into(),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn file(mut self, file: impl Into<String>) -> Self {
+        self.file = Some(file.into());
+        self
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn error(mut self, error: &(dyn std::error::Error + 'static)) -> Self {
+        self.error = Some(format!("{error:#}"));
+        self
+    }
+
+    pub fn error_text(mut self, error: impl Into<String>) -> Self {
+        self.error = Some(error.into());
+        self
+    }
+
+    pub fn attempt(mut self, attempt: i64) -> Self {
+        self.attempt = Some(attempt);
+        self
+    }
+
+    pub fn duration_ms(mut self, duration_ms: i64) -> Self {
+        self.duration_ms = Some(duration_ms);
+        self
+    }
+
+    pub fn context(mut self, context: serde_json::Value) -> Self {
+        self.context = Some(context);
+        self
+    }
 }
 
 pub struct AppState {
@@ -73,16 +142,27 @@ impl AppState {
     }
 
     pub async fn terminal(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {
+        let mut entry = TerminalEntry::new(level, stage, message);
+        entry.file = file.map(str::to_owned);
+        self.terminal_entry(entry).await;
+    }
+
+    pub async fn terminal_entry(&self, entry: TerminalEntry) {
         let line = TerminalLine {
             timestamp: Utc::now().to_rfc3339(),
-            level: level.into(),
-            stage: stage.into(),
-            file: file.map(str::to_owned),
-            message: message.into(),
+            level: entry.level,
+            stage: entry.stage,
+            file: entry.file,
+            message: entry.message,
+            detail: entry.detail,
+            error: entry.error,
+            attempt: entry.attempt,
+            duration_ms: entry.duration_ms,
+            context: entry.context,
         };
         let mut workflow = self.workflow.write().await;
         workflow.terminal_log.push(line.clone());
-        let overflow = workflow.terminal_log.len().saturating_sub(160);
+        let overflow = workflow.terminal_log.len().saturating_sub(500);
         if overflow > 0 {
             workflow.terminal_log.drain(0..overflow);
         }
@@ -97,10 +177,15 @@ impl AppState {
         drop(workflow);
         let _ = self.events.send(jobs::Event {
             kind: "terminal".into(),
-            stage: Some(stage.into()),
+            stage: Some(line.stage.clone()),
             level: Some(line.level),
             file: line.file,
             timestamp: Some(line.timestamp),
+            detail: line.detail,
+            error: line.error,
+            attempt: line.attempt,
+            duration_ms: line.duration_ms,
+            context: line.context,
             phase: Some(phase),
             current_file,
             processed: Some(processed),
@@ -111,5 +196,34 @@ impl AppState {
             total,
             message: line.message,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_line_serializes_structured_debug_fields() {
+        let line = TerminalLine {
+            timestamp: "2026-06-19T12:00:00Z".into(),
+            level: "error".into(),
+            stage: "fingerprint".into(),
+            file: Some("track.flac".into()),
+            message: "Fingerprint failed".into(),
+            detail: Some("Running fpcalc -json".into()),
+            error: Some("fpcalc failed: command not found".into()),
+            attempt: Some(2),
+            duration_ms: Some(1234),
+            context: Some(serde_json::json!({"path": "/music/input/track.flac"})),
+        };
+
+        let value = serde_json::to_value(line).unwrap();
+
+        assert_eq!(value["detail"], "Running fpcalc -json");
+        assert_eq!(value["error"], "fpcalc failed: command not found");
+        assert_eq!(value["attempt"], 2);
+        assert_eq!(value["duration_ms"], 1234);
+        assert_eq!(value["context"]["path"], "/music/input/track.flac");
     }
 }

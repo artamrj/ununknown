@@ -1,16 +1,16 @@
 use crate::{
-    app::AppState,
+    app::{AppState, TerminalEntry},
     domain::audio,
     infrastructure::{media::fingerprint, providers},
     jobs,
     types::{AutomationMode, WorkflowPhase},
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, oneshot},
@@ -48,10 +48,18 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             "Walking input folder for supported audio files",
         )
         .await;
+    let mut walk_errors = Vec::new();
     let mut files: Vec<PathBuf> = WalkDir::new(&cfg.input_dir)
         .follow_links(false)
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                tracing::warn!("input folder walk error: {error:#}");
+                walk_errors.push(format!("{error:#}"));
+                None
+            }
+        })
         .filter(|e| e.file_type().is_file() && audio::is_supported(e.path()))
         .filter_map(|e| e.path().canonicalize().ok())
         .collect();
@@ -65,6 +73,21 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             &format!("Discovered {total} supported audio files"),
         )
         .await;
+    for error in walk_errors {
+        state
+            .terminal_entry(
+                TerminalEntry::new("error", "scan", "Input folder walk error").error_text(error),
+            )
+            .await;
+    }
+    if total == 0 {
+        state
+            .terminal_entry(
+                TerminalEntry::new("warn", "scan", "No supported audio files found")
+                    .detail(format!("Input folder scanned: {}", cfg.input_dir)),
+            )
+            .await;
+    }
     {
         let mut w = state.workflow.write().await;
         w.total = total;
@@ -221,11 +244,15 @@ async fn process_file(
             Err(error) if attempt < cfg.track_attempts => {
                 tracing::warn!(path=%job.path.display(), attempt, "track attempt failed: {error:#}");
                 state
-                    .terminal(
-                        "warn",
-                        "fetch",
-                        Some(&filename),
-                        &format!("Attempt {attempt} failed: {error:#}; retrying"),
+                    .terminal_entry(
+                        TerminalEntry::new("warn", "fetch", "Track attempt failed; retrying")
+                            .file(filename.clone())
+                            .attempt(attempt as i64)
+                            .error(error.as_ref())
+                            .context(serde_json::json!({
+                                "path": job.path.display().to_string(),
+                                "max_attempts": cfg.track_attempts
+                            })),
                     )
                     .await;
                 tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
@@ -234,11 +261,15 @@ async fn process_file(
                 tracing::warn!(path=%job.path.display(), "track failed after retries: {error:#}");
                 state.workflow.write().await.failed += 1;
                 state
-                    .terminal(
-                        "error",
-                        "fetch",
-                        Some(&filename),
-                        &format!("Failed after retries: {error:#}"),
+                    .terminal_entry(
+                        TerminalEntry::new("error", "fetch", "Track failed after retries")
+                            .file(filename.clone())
+                            .attempt(attempt as i64)
+                            .error(error.as_ref())
+                            .context(serde_json::json!({
+                                "path": job.path.display().to_string(),
+                                "max_attempts": cfg.track_attempts
+                            })),
                     )
                     .await;
             }
@@ -275,13 +306,16 @@ async fn process(
             "Reading existing tags and audio properties",
         )
         .await;
+    let started = Instant::now();
     let info = {
         let _permit = limits.metadata.acquire().await?;
         tokio::task::spawn_blocking({
             let p = path.to_path_buf();
             move || audio::read(&p)
         })
-        .await??
+        .await
+        .context("metadata reader task failed")?
+        .with_context(|| format!("failed to read metadata from {}", path.display()))?
     };
     state
         .terminal(
@@ -297,6 +331,13 @@ async fn process(
         )
         .await;
     state
+        .terminal_entry(
+            TerminalEntry::new("info", "metadata", "Metadata read timing")
+                .file(filename.to_owned())
+                .duration_ms(started.elapsed().as_millis() as i64),
+        )
+        .await;
+    state
         .terminal(
             "info",
             "fingerprint",
@@ -304,12 +345,19 @@ async fn process(
             "Running fpcalc fingerprint",
         )
         .await;
+    let started = Instant::now();
     let (fp, duration) = {
         let _permit = limits.fingerprint.acquire().await?;
-        fingerprint::calculate(path).await?
+        fingerprint::calculate(path)
+            .await
+            .with_context(|| format!("failed to fingerprint {}", path.display()))?
     };
     state
-        .terminal("ok", "fingerprint", Some(filename), "Fingerprint generated")
+        .terminal_entry(
+            TerminalEntry::new("ok", "fingerprint", "Fingerprint generated")
+                .file(filename.to_owned())
+                .duration_ms(started.elapsed().as_millis() as i64),
+        )
         .await;
     let cfg = state.config.read().await.clone();
     if cfg.acoustid_api_key.is_empty() {
@@ -339,7 +387,7 @@ async fn process(
             "MusicBrainz lookups are queued at one request per second",
         )
         .await;
-    let candidates = identify(state, &cfg, limits, &fp, duration, &info).await?;
+    let candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
     state
         .terminal(
             "info",
@@ -404,9 +452,11 @@ async fn identify(
     fingerprint: &str,
     duration: f64,
     current: &audio::AudioInfo,
+    filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
     let mut out = Vec::new();
     if !cfg.acoustid_api_key.is_empty() {
+        let started = Instant::now();
         let hits = {
             let _permit = limits.acoustid.acquire().await?;
             providers::acoustid::lookup(
@@ -418,7 +468,19 @@ async fn identify(
             )
             .await?
         };
+        state
+            .terminal_entry(
+                TerminalEntry::new(
+                    "info",
+                    "acoustid",
+                    format!("AcoustID returned {} hit(s)", hits.len()),
+                )
+                .file(filename.to_owned())
+                .duration_ms(started.elapsed().as_millis() as i64),
+            )
+            .await;
         for hit in hits.into_iter().take(3) {
+            let started = Instant::now();
             let mut candidate = providers::musicbrainz::recording(
                 &state.pool,
                 &state.client,
@@ -426,6 +488,14 @@ async fn identify(
                 &hit.recording_id,
             )
             .await?;
+            state
+                .terminal_entry(
+                    TerminalEntry::new("info", "musicbrainz", "Fetched recording details")
+                        .file(filename.to_owned())
+                        .duration_ms(started.elapsed().as_millis() as i64)
+                        .context(serde_json::json!({"recording_id": hit.recording_id})),
+                )
+                .await;
             candidate.score = crate::domain::matcher::score(
                 hit.score,
                 current,
@@ -442,6 +512,7 @@ async fn identify(
             .as_deref()
             .filter(|value| !value.trim().is_empty());
         if let Some(title) = title {
+            let started = Instant::now();
             for mut candidate in providers::musicbrainz::search(
                 &state.pool,
                 &state.client,
@@ -458,6 +529,18 @@ async fn identify(
                 );
                 out.push(candidate);
             }
+            state
+                .terminal_entry(
+                    TerminalEntry::new(
+                        "info",
+                        "musicbrainz",
+                        format!("Tag search returned {} candidate(s)", out.len()),
+                    )
+                    .file(filename.to_owned())
+                    .duration_ms(started.elapsed().as_millis() as i64)
+                    .context(serde_json::json!({"title": title, "artist": current.artist})),
+                )
+                .await;
         }
     }
     Ok(out)
@@ -489,6 +572,15 @@ async fn db_writer(
             Some(error) => Some(error),
             None => tx.commit().await.err().map(|error| anyhow!("{error:#}")),
         };
+        if let Some(error) = &failed {
+            state
+                .terminal_entry(
+                    TerminalEntry::new("error", "db", "Failed to persist matched candidates")
+                        .error(error.as_ref())
+                        .context(serde_json::json!({"batch_size": batch.len()})),
+                )
+                .await;
+        }
         for (job, result) in batch.into_iter().zip(results) {
             let response = match (&failed, result) {
                 (Some(error), _) => Err(anyhow!("{error:#}")),

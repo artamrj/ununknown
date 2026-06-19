@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::TerminalEntry;
 
 pub async fn stop_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     s.workflow.write().await.cancelled = true;
@@ -222,21 +223,66 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
         if s.cancelled(&job.to_string()).await {
             break;
         }
+        s.terminal_entry(
+            TerminalEntry::new("info", "apply", "Applying metadata changes")
+                .file(item.filename.clone())
+                .context(serde_json::json!({
+                    "track_id": item.track_id,
+                    "source": item.current_path,
+                    "destination": item.destination_path,
+                    "action": item.action
+                })),
+        )
+        .await;
         let (_, candidate) = selected(&s.pool, item.track_id).await?;
         let artwork = if cfg.cover_art_enabled {
             if let Some(url) = &candidate.cover_url {
                 let limiter = s.artwork_downloads.read().await.clone();
                 let _permit = limiter.acquire_owned().await?;
                 if let Some(release_id) = candidate.release_id.as_deref() {
-                    crate::infrastructure::providers::cover_art_archive::fetch_cached(
+                    match crate::infrastructure::providers::cover_art_archive::fetch_cached(
                         &s.pool, &s.client, release_id, url,
                     )
                     .await
-                    .ok()
+                    {
+                        Ok(bytes) => {
+                            s.terminal_entry(
+                                TerminalEntry::new("ok", "artwork", "Downloaded cover art")
+                                    .file(item.filename.clone())
+                                    .context(serde_json::json!({"release_id": release_id})),
+                            )
+                            .await;
+                            Some(bytes)
+                        }
+                        Err(error) => {
+                            s.terminal_entry(
+                                TerminalEntry::new("warn", "artwork", "Cover art download failed")
+                                    .file(item.filename.clone())
+                                    .error(error.as_ref())
+                                    .context(
+                                        serde_json::json!({"release_id": release_id, "url": url}),
+                                    ),
+                            )
+                            .await;
+                            None
+                        }
+                    }
                 } else {
-                    crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
+                    match crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
                         .await
-                        .ok()
+                    {
+                        Ok(bytes) => Some(bytes),
+                        Err(error) => {
+                            s.terminal_entry(
+                                TerminalEntry::new("warn", "artwork", "Cover art download failed")
+                                    .file(item.filename.clone())
+                                    .error(error.as_ref())
+                                    .context(serde_json::json!({"url": url})),
+                            )
+                            .await;
+                            None
+                        }
+                    }
                 }
             } else {
                 None
@@ -248,9 +294,30 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
         let dest = PathBuf::from(&item.destination_path);
         let target = if cfg.output_mode == OutputMode::Copy {
             if let Some(p) = dest.parent() {
-                tokio::fs::create_dir_all(p).await?;
+                if let Err(error) = tokio::fs::create_dir_all(p).await {
+                    s.terminal_entry(
+                        TerminalEntry::new("error", "apply", "Failed to create output directory")
+                            .file(item.filename.clone())
+                            .error(&error)
+                            .context(serde_json::json!({"directory": p.display().to_string()})),
+                    )
+                    .await;
+                    return Err(error.into());
+                }
             }
-            tokio::fs::copy(&src, &dest).await?;
+            if let Err(error) = tokio::fs::copy(&src, &dest).await {
+                s.terminal_entry(
+                    TerminalEntry::new("error", "apply", "Failed to copy source file")
+                        .file(item.filename.clone())
+                        .error(&error)
+                        .context(serde_json::json!({
+                            "source": src.display().to_string(),
+                            "destination": dest.display().to_string()
+                        })),
+                )
+                .await;
+                return Err(error.into());
+            }
             dest.clone()
         } else {
             src
@@ -293,7 +360,16 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
                 }
                 ("applied", None)
             }
-            Err(e) => ("failed", Some(e.to_string())),
+            Err(e) => {
+                s.terminal_entry(
+                    TerminalEntry::new("error", "apply", "Tag writing failed")
+                        .file(item.filename.clone())
+                        .error(e.as_ref())
+                        .context(serde_json::json!({"target": target.display().to_string()})),
+                )
+                .await;
+                ("failed", Some(format!("{e:#}")))
+            }
         };
         if status == "failed" && cfg.output_mode == OutputMode::Copy {
             let _ = tokio::fs::remove_file(&target).await;
@@ -329,6 +405,12 @@ pub async fn apply(s: Arc<AppState>, job: JobId, items: Vec<PreviewItem>) -> Res
             status,
         );
         if status == "applied" {
+            s.terminal_entry(
+                TerminalEntry::new("ok", "apply", "Applied metadata changes")
+                    .file(item.filename.clone())
+                    .context(serde_json::json!({"output": final_path.display().to_string()})),
+            )
+            .await;
             sqlx::query("DELETE FROM tracks WHERE id=?")
                 .bind(item.track_id.0)
                 .execute(&s.pool)
