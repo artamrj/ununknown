@@ -1,0 +1,11 @@
+.git
+.gitignore
+.DS_Store
+.local
+target
+frontend/node_modules
+frontend/dist
+*.log
+Dockerfile
+docker-compose.yml
+.dockerignore

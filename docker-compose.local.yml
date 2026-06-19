@@ -1,0 +1,16 @@
+services:
+  ununknown:
+    build:
+      context: .
+    ports:
+      - "7331:7331"
+    environment:
+      UNUNKNOWN_DB: /cache/ununknown.sqlite
+      UNUNKNOWN_INPUT_DIR: /music/input
+      UNUNKNOWN_OUTPUT_DIR: /music/output
+      UNUNKNOWN_ACOUSTID_API_KEY: ${UNUNKNOWN_ACOUSTID_API_KEY:-}
+      UNUNKNOWN_MUSICBRAINZ_USER_AGENT: ${UNUNKNOWN_MUSICBRAINZ_USER_AGENT:-Ununknown/0.4.5 (test@email.test)}
+    volumes:
+      - ./.local/cache:/cache
+      - ./.local/input:/music/input
+      - ./.local/output:/music/output
