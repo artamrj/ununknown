@@ -187,7 +187,7 @@ export function App() {
           {review.map((track) => <ReviewTrack key={track.id} track={track} onChoose={choose} onSaved={loadTracks} />)}
           <details className="ready-list">
             <summary>{ready.length} automatically identified</summary>
-            {ready.map((track) => <TrackSummary key={track.id} track={track} candidate={track.candidates.find((candidate) => candidate.id === track.selected_candidate_id)} />)}
+            {ready.map((track) => <TrackSummary key={track.id} track={track} candidate={track.candidates.find((candidate) => candidate.id === track.selected_candidate_id)} onSaved={loadTracks} />)}
           </details>
         </section>
       )}
@@ -219,10 +219,16 @@ function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise
   return <div className="manual">{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
 }
 
-function TrackSummary({ track, candidate }: { track: Track; candidate?: Candidate }) {
+function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
   const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
   const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
-  return <div className="track"><Artwork candidate={candidate} /><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
+  const setCover = async () => {
+    const coverUrl = prompt("Paste a direct HTTPS image URL or Spotify track URL", candidate?.cover_url || "");
+    if (!coverUrl) return;
+    await api(`/tracks/${track.id}/artwork`, { method: "PUT", body: JSON.stringify({ cover_url: coverUrl }) });
+    await onSaved();
+  };
+  return <div className="track"><div className="artwork-control"><Artwork candidate={candidate} /><button className="link" onClick={setCover}>Set cover</button></div><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
 }
 
 function Artwork({ candidate }: { candidate?: Candidate }) {
@@ -235,13 +241,14 @@ function Artwork({ candidate }: { candidate?: Candidate }) {
 }
 
 function artworkUrls(candidate?: Candidate) {
-  const urls = candidate?.cover_url ? [candidate.cover_url] : [];
+  const urls: string[] = [];
   try {
     const alternatives = JSON.parse(candidate?.score_breakdown || "{}")?.artwork_candidates || [];
     for (const artwork of alternatives) if (typeof artwork?.url === "string") urls.push(artwork.url);
   } catch {
     // A malformed explanation must not break the rest of the review screen.
   }
+  if (candidate?.cover_url) urls.push(candidate.cover_url);
   return [...new Set(urls)];
 }
 

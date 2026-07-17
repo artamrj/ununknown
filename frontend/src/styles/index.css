@@ -68,6 +68,8 @@ label i { color: #226b47; font-size: 11px; }
 .ready-list { margin-top: 20px; padding: 18px 20px; border: 1px solid #dfe4df; border-radius: 14px; background: white; }
 .track { display: grid; grid-template-columns: 48px minmax(180px, 1fr) minmax(180px, 1fr) minmax(100px, .5fr); gap: 12px; align-items: center; padding: 11px 0; border-top: 1px solid #edf0ed; font-size: 13px; }
 .track .artwork { width: 48px; height: 48px; }
+.artwork-control { display: grid; gap: 2px; justify-items: center; }
+.artwork-control .link { font-size: 9px; white-space: nowrap; }
 .track:first-of-type { margin-top: 12px; }
 .track span, .track small { color: #657068; overflow-wrap: anywhere; }
 @media (max-width: 720px) {

@@ -25,7 +25,7 @@ mod workspace;
 pub use apply::start_apply;
 pub use scan::{start_scan, stop_scan};
 pub use settings::{setup, update_setup};
-pub use tracks::{list_tracks, manual_candidate, select_candidate};
+pub use tracks::{list_tracks, manual_candidate, select_candidate, update_artwork};
 pub use workspace::workspace;
 
 #[derive(Serialize, FromRow)]
@@ -150,6 +150,11 @@ pub struct CandidateEdit {
     label: Option<String>,
     isrc: Option<String>,
     cover_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ArtworkEdit {
+    cover_url: String,
 }
 
 #[derive(Deserialize)]

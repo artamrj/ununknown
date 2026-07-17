@@ -300,9 +300,6 @@ async fn resolve_artwork(
     candidate: &crate::infrastructure::providers::Candidate,
 ) -> Result<Option<Vec<u8>>> {
     let mut urls = Vec::<(String, String)>::new();
-    if let Some(url) = candidate.cover_url.as_deref() {
-        urls.push((candidate.provider.clone(), url.to_owned()));
-    }
     if let Some(value) = candidate
         .score_breakdown
         .as_deref()
@@ -316,6 +313,9 @@ async fn resolve_artwork(
                 ));
             }
         }
+    }
+    if let Some(url) = candidate.cover_url.as_deref() {
+        urls.push((candidate.provider.clone(), url.to_owned()));
     }
     let mut seen = HashSet::new();
     urls.retain(|(_, url)| seen.insert(url.clone()));

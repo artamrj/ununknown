@@ -18,6 +18,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "/tracks/{id}/manual",
             axum::routing::put(handlers::manual_candidate),
         )
+        .route(
+            "/tracks/{id}/artwork",
+            axum::routing::put(handlers::update_artwork),
+        )
         .route("/write", post(handlers::start_apply))
         .fallback(api_not_found)
 }

@@ -77,6 +77,63 @@ pub async fn manual_candidate(
     ))
 }
 
+pub async fn update_artwork(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+    Json(value): Json<ArtworkEdit>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let supplied = value.cover_url.trim();
+    let parsed = reqwest::Url::parse(supplied)
+        .map_err(|_| ApiError::validation("Enter a valid HTTPS image or Spotify track URL"))?;
+    if parsed.scheme() != "https" {
+        return Err(ApiError::validation("Cover URLs must use HTTPS"));
+    }
+    let cover_url = if parsed.host_str() == Some("open.spotify.com") {
+        let value = s
+            .client
+            .get("https://open.spotify.com/oembed")
+            .query(&[("url", supplied)])
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| ApiError::validation(format!("Spotify link failed: {error}")))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| ApiError::validation(format!("Spotify response failed: {error}")))?;
+        value["thumbnail_url"]
+            .as_str()
+            .map(upgrade_spotify_image)
+            .ok_or_else(|| ApiError::validation("Spotify did not return cover artwork"))?
+    } else {
+        supplied.to_owned()
+    };
+    let bytes = crate::infrastructure::providers::cover_art_archive::fetch(&s.client, &cover_url)
+        .await
+        .map_err(|error| ApiError::validation(format!("Cover download failed: {error:#}")))?;
+    tag_writer::validate_artwork(&bytes).map_err(|error| {
+        ApiError::validation(format!("The URL is not a valid image: {error:#}"))
+    })?;
+    let changed = sqlx::query(
+        "UPDATE candidates SET cover_url=? WHERE id=(SELECT selected_candidate_id FROM tracks WHERE id=?)",
+    )
+    .bind(&cover_url)
+    .bind(id.0)
+    .execute(&s.pool)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Err(ApiError::not_found(
+            "Select metadata for this track before setting its cover",
+        ));
+    }
+    Ok(Json(serde_json::json!({"cover_url": cover_url})))
+}
+
+fn upgrade_spotify_image(url: &str) -> String {
+    url.replace("ab67616d00001e02", "ab67616d0000b273")
+        .replace("ab67616d00004851", "ab67616d0000b273")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +186,14 @@ mod tests {
                 "Correct title".into(),
                 "Correct artist".into()
             )
+        );
+    }
+
+    #[test]
+    fn spotify_thumbnail_is_upgraded_to_large_cover() {
+        assert_eq!(
+            upgrade_spotify_image("https://i.scdn.co/image/ab67616d00001e02abc"),
+            "https://i.scdn.co/image/ab67616d0000b273abc"
         );
     }
 }

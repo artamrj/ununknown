@@ -663,18 +663,33 @@ async fn identify(
         && !cfg.audd_token.trim().is_empty()
         && !fingerprint.value.is_empty()
     {
-        out.extend(
-            query_audd(
-                state,
-                limits,
-                &cfg.audd_token,
-                path,
-                fingerprint.value,
-                current,
-                filename,
-            )
-            .await,
-        );
+        let audd_candidates = query_audd(
+            state,
+            limits,
+            &cfg.audd_token,
+            path,
+            fingerprint.value,
+            current,
+            filename,
+        )
+        .await;
+        if let Some(recognized) = audd_candidates.first() {
+            let recognized_info = audio::AudioInfo {
+                title: Some(recognized.title.clone()),
+                artist: Some(recognized.artist.clone()),
+                album: recognized.album.clone(),
+                album_artist: recognized.album_artist.clone(),
+                duration: current.duration,
+                format: current.format.clone(),
+                ..Default::default()
+            };
+            match query_itunes(state, cfg, &recognized_info, filename).await {
+                Ok(candidates) => out.extend(candidates),
+                Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
+            }
+            out.extend(query_deezer(state, limits, &recognized_info, filename).await);
+        }
+        out.extend(audd_candidates);
     }
     if !cfg.spotify_client_id.trim().is_empty() && !cfg.spotify_client_secret.trim().is_empty() {
         let isrcs = out
@@ -1385,9 +1400,10 @@ fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<(
                 .then_with(|| right.1.total_cmp(&left.1))
         });
         artwork.dedup_by(|left, right| left.3 == right.3);
-        if candidate.cover_url.is_none() {
-            candidate.cover_url = artwork.first().map(|item| item.3.clone());
-        }
+        candidate.cover_url = artwork
+            .first()
+            .map(|item| item.3.clone())
+            .or_else(|| candidate.cover_url.clone());
         if artwork.is_empty() {
             continue;
         }
@@ -1416,6 +1432,14 @@ fn artwork_agrees(left: &providers::Candidate, right: &providers::Candidate) -> 
     if !candidate_agrees(left, right) {
         return false;
     }
+    if left
+        .isrc
+        .as_deref()
+        .zip(right.isrc.as_deref())
+        .is_some_and(|(left_isrc, right_isrc)| left_isrc.eq_ignore_ascii_case(right_isrc))
+    {
+        return true;
+    }
     match (left.album.as_deref(), right.album.as_deref()) {
         (Some(left_album), Some(right_album)) => text_close(left_album, right_album, 0.65),
         (Some(_), None) => false,
@@ -1425,8 +1449,8 @@ fn artwork_agrees(left: &providers::Candidate, right: &providers::Candidate) -> 
 
 fn artwork_provider_priority(provider: &str) -> u8 {
     match provider {
+        "itunes" | "spotify" => 8,
         "musicbrainz" => 7,
-        "itunes" | "spotify" => 6,
         "deezer" => 5,
         "discogs" => 4,
         "audd" | "theaudiodb" => 3,
@@ -2300,6 +2324,7 @@ mod tests {
                 title: "Song".into(),
                 artist: "Artist".into(),
                 album: Some("Album".into()),
+                cover_url: Some("https://example.test/musicbrainz.jpg".into()),
                 score: 94.0,
                 ..Default::default()
             },
