@@ -22,6 +22,8 @@ input:focus { border-color: #226b47; box-shadow: 0 0 0 3px #dcebe2; }
 .primary { border: 0; border-radius: 10px; padding: 12px 16px; background: #226b47; color: white; font-weight: 800; white-space: nowrap; }
 .primary:disabled { opacity: .45; cursor: default; }
 .setup details { grid-column: 1 / -1; border-top: 1px solid #edf0ed; padding-top: 12px; }
+.source-status { grid-column: 1 / -1; display: grid; gap: 4px; padding: 10px 12px; border-radius: 9px; background: #f0f7f3; color: #315d45; font-size: 13px; }
+.source-status small { color: #84631b; }
 summary { cursor: pointer; font-weight: 800; }
 .setup details > p { margin: 8px 0 12px; font-size: 13px; color: #657068; }
 .key-grid, .manual { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }

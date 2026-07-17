@@ -2,13 +2,19 @@ use super::*;
 
 pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let cfg = s.config.read().await;
+    let fpcalc = std::process::Command::new("fpcalc")
+        .arg("-version")
+        .output()
+        .is_ok();
     Json(serde_json::json!({
         "input_dir": cfg.input_dir,
         "output_dir": cfg.output_dir,
         "sources": {
             "musicbrainz": true,
+            "itunes": true,
             "wikidata": true,
             "cover_art_archive": true,
+            "fpcalc": fpcalc,
             "acoustid": !cfg.acoustid_key.is_empty(),
             "discogs": !cfg.discogs_token.is_empty(),
             "lastfm": !cfg.lastfm_key.is_empty(),

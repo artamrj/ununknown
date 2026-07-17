@@ -1,6 +1,7 @@
 pub mod acoustid;
 pub mod cover_art_archive;
 pub mod discogs;
+pub mod itunes;
 pub mod lastfm;
 pub mod musicbrainz;
 pub mod theaudiodb;

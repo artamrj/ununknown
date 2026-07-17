@@ -122,9 +122,13 @@ export function App() {
           Corrected copies
           <input value={setup.output_dir} onChange={(event) => setSetup({ ...setup, output_dir: event.target.value })} placeholder="/Users/me/Music/fixed" />
         </label>
+        <div className="source-status">
+          <span>Active catalogs: Apple Music, MusicBrainz, Wikidata</span>
+          {(!setup.sources.fpcalc || !setup.sources.acoustid) && <small>For hard-to-name tracks, install Chromaprint (`fpcalc`) and add an AcoustID key.</small>}
+        </div>
         <details>
           <summary>Optional source keys</summary>
-          <p>MusicBrainz, Cover Art Archive, and Wikidata work without keys.</p>
+          <p>Apple Music, MusicBrainz, Cover Art Archive, and Wikidata work without keys.</p>
           <div className="key-grid">
             <Secret label="AcoustID (fingerprints)" active={setup.sources.acoustid} value={keys.acoustid} onChange={(value) => setKeys({ ...keys, acoustid: value })} />
             <Secret label="Discogs" active={setup.sources.discogs} value={keys.discogs} onChange={(value) => setKeys({ ...keys, discogs: value })} />

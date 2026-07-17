@@ -51,7 +51,24 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
             info.title = Some(stem.trim().to_owned());
         }
     }
+    clean_search_tags(&mut info);
     Ok(info)
+}
+
+fn clean_search_tags(info: &mut AudioInfo) {
+    let suspicious_artist = info
+        .artist
+        .as_deref()
+        .is_none_or(|artist| artist.trim().is_empty() || artist.trim().starts_with('@'));
+    let parsed = info.title.as_deref().and_then(|value| {
+        let (title, artist) = value.rsplit_once('|')?;
+        (!title.trim().is_empty() && !artist.trim().is_empty())
+            .then(|| (title.trim().to_owned(), artist.trim().to_owned()))
+    });
+    if suspicious_artist && let Some((title, artist)) = parsed {
+        info.title = Some(title);
+        info.artist = Some(artist);
+    }
 }
 
 pub fn is_supported(path: &Path) -> bool {
@@ -62,4 +79,21 @@ pub fn is_supported(path: &Path) -> bool {
             .as_deref(),
         Some("mp3" | "flac" | "m4a" | "ogg" | "opus" | "wav" | "aiff" | "aif")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replaces_social_spam_artist_from_pipe_title() {
+        let mut info = AudioInfo {
+            title: Some("Колыбельная | Jah Khalib".into()),
+            artist: Some("@RadioP0l".into()),
+            ..Default::default()
+        };
+        clean_search_tags(&mut info);
+        assert_eq!(info.title.as_deref(), Some("Колыбельная"));
+        assert_eq!(info.artist.as_deref(), Some("Jah Khalib"));
+    }
 }

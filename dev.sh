@@ -31,12 +31,23 @@ if [[ ! -d "$FRONTEND_DIR/node_modules" ]]; then
 fi
 
 if command -v lsof >/dev/null 2>&1; then
-  for dev_port in 7331 5173; do
-    if lsof -nP -iTCP:"$dev_port" -sTCP:LISTEN >/dev/null 2>&1; then
-      echo "Port $dev_port is already in use. Stop the existing development server first." >&2
-      exit 1
-    fi
-  done
+  backend_busy=false
+  frontend_busy=false
+  lsof -nP -iTCP:7331 -sTCP:LISTEN >/dev/null 2>&1 && backend_busy=true
+  lsof -nP -iTCP:5173 -sTCP:LISTEN >/dev/null 2>&1 && frontend_busy=true
+  if $backend_busy && $frontend_busy \
+    && curl --silent --fail --max-time 2 http://localhost:7331/api/status >/dev/null \
+    && curl --silent --fail --max-time 2 http://localhost:5173/ >/dev/null; then
+    echo "Development server is already running with live reload."
+    echo "Open: http://localhost:5173"
+    exit 0
+  fi
+  if $backend_busy || $frontend_busy; then
+    echo "A required port is occupied by another or incomplete server:" >&2
+    $backend_busy && lsof -nP -iTCP:7331 -sTCP:LISTEN >&2
+    $frontend_busy && lsof -nP -iTCP:5173 -sTCP:LISTEN >&2
+    exit 1
+  fi
 fi
 
 export UNUNKNOWN_DB="${UNUNKNOWN_DB:-$LOCAL_DIR/cache/ununknown.sqlite}"

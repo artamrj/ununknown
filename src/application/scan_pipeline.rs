@@ -427,19 +427,54 @@ async fn process(
         .await;
     let Some(best) = candidates.first() else {
         state.increment_unmatched().await;
-        let message = "No provider candidate found; counted as unmatched";
-        persist_unmatched(&state.pool, path, &info, message).await?;
-        state.log("warn", "match", Some(filename), message).await;
+        let fingerprint_note = if fp.is_empty() || cfg.acoustid_key.is_empty() {
+            " Fingerprint matching is unavailable; install fpcalc and configure an AcoustID key for difficult tracks."
+        } else {
+            ""
+        };
+        let message = format!(
+            "No catalog match from Apple Music, MusicBrainz, or the enabled optional sources.{fingerprint_note}"
+        );
+        persist_unmatched(&state.pool, path, &info, &message).await?;
+        state.log("warn", "match", Some(filename), &message).await;
         return Ok(false);
     };
     let second_score = comparable_second_score(&candidates);
     let has_safe_evidence = candidate_has_fingerprint(best) || candidate_source_count(best) >= 2;
-    let auto_select = has_safe_evidence
-        && crate::domain::matcher::auto_selectable(best.score, second_score, best.duration_delta);
+    let exact_unique = unique_exact_catalog_match(best, &candidates, &info);
+    let auto_select = exact_unique
+        || (has_safe_evidence
+            && crate::domain::matcher::auto_selectable(
+                best.score,
+                second_score,
+                best.duration_delta,
+            ));
     if !auto_select {
         state.increment_unmatched().await;
         let message = if best.score >= 70.0 {
-            "Release uncertain; review required before applying metadata".to_owned()
+            let mut source_names = candidates
+                .iter()
+                .flat_map(candidate_source_list)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            source_names.sort();
+            let sources = source_names.join(", ");
+            match (
+                candidates.len(),
+                info.album.as_deref(),
+                best.album.as_deref(),
+            ) {
+                (1, Some(existing), Some(found)) if text_similarity(existing, found) < 0.65 => {
+                    format!(
+                        "Found one close match from {sources}, but its album “{found}” conflicts with the existing album “{existing}”; review before applying it."
+                    )
+                }
+                _ => format!(
+                    "Found {} possible release(s) from {sources}, but the release is ambiguous; choose the correct one.",
+                    candidates.len()
+                ),
+            }
         } else {
             "No candidate met strict matching rules; counted as unmatched".to_owned()
         };
@@ -510,6 +545,10 @@ async fn identify(
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
     }
+    match query_itunes(state, current, filename).await {
+        Ok(candidates) => out.extend(candidates),
+        Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
+    }
     out.extend(query_discogs(state, cfg, limits, current, filename).await);
     out.extend(query_lastfm(state, cfg, limits, current, filename).await);
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
@@ -549,13 +588,41 @@ fn comparable_second_score(candidates: &[providers::Candidate]) -> Option<f64> {
 fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
     if candidate_has_fingerprint(candidate) {
         3
-    } else if candidate.provider == "musicbrainz" {
+    } else if matches!(candidate.provider.as_str(), "musicbrainz" | "itunes") {
         2
     } else if candidate_source_count(candidate) >= 2 {
         1
     } else {
         0
     }
+}
+
+async fn query_itunes(
+    state: &Arc<AppState>,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Result<Vec<providers::Candidate>> {
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    let started = Instant::now();
+    let mut candidates = providers::itunes::search(
+        &state.pool,
+        &state.client,
+        title,
+        current.artist.as_deref(),
+        current.album.as_deref(),
+    )
+    .await?;
+    for candidate in &mut candidates {
+        score_text_candidate(candidate, current, "itunes_catalog_search")?;
+    }
+    log_provider_count(state, filename, "itunes", candidates.len(), started).await;
+    Ok(candidates)
 }
 
 async fn query_musicbrainz_acoustid(
@@ -811,7 +878,7 @@ fn score_text_candidate(
     let title = current
         .title
         .as_deref()
-        .map(|value| text_similarity(value, &candidate.title))
+        .map(|value| title_similarity(value, &candidate.title))
         .unwrap_or_default();
     let artist = current
         .artist
@@ -826,12 +893,12 @@ fn score_text_candidate(
     let duration_delta = candidate_duration.map(|value| (current.duration - value).abs());
     let duration = duration_delta.map(duration_match).unwrap_or(0.0);
     candidate.duration_delta = duration_delta;
-    let provider_cap = if candidate.provider == "musicbrainz" {
-        82.0
-    } else {
-        78.0
+    let provider_cap = match candidate.provider.as_str() {
+        "itunes" => 94.0,
+        "musicbrainz" => 82.0,
+        _ => 78.0,
     };
-    let score = ((0.40 * title) + (0.30 * artist) + (0.15 * album_context) + (0.15 * duration))
+    let score = ((0.35 * title) + (0.25 * artist) + (0.25 * album_context) + (0.15 * duration))
         .clamp(0.0, 1.0)
         * 100.0;
     candidate.score = score.min(provider_cap);
@@ -842,7 +909,7 @@ fn score_text_candidate(
         "artist": artist,
         "album_context": album_context,
         "provider_text_only": true,
-        "auto_select_blocked": "Provider text match requires fingerprint evidence or multi-provider agreement",
+        "auto_select_rule": "Text-only matches require an exact unique title, artist, and duration or independent source agreement",
         "final_score": candidate.score
     });
     value["source"] = serde_json::Value::String(source.to_owned());
@@ -855,18 +922,21 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
     let snapshot = candidates.to_vec();
     for candidate in candidates {
         let mut sources = candidate_source_list(candidate);
+        let mut agreeing_providers = HashSet::new();
         for other in &snapshot {
             if other.provider == candidate.provider {
                 continue;
             }
             if candidate_agrees(candidate, other) {
                 sources.push(provider_display_name(&other.provider).to_owned());
-                let cap = if candidate_has_fingerprint(candidate) {
-                    99.0
-                } else {
-                    88.0
-                };
-                candidate.score = (candidate.score + 6.0).min(cap);
+                if agreeing_providers.insert(other.provider.as_str()) {
+                    let cap = if candidate_has_fingerprint(candidate) {
+                        99.0
+                    } else {
+                        98.0
+                    };
+                    candidate.score = (candidate.score + 6.0).min(cap);
+                }
             } else if text_close(&candidate.title, &other.title, 0.55)
                 && !text_close(&candidate.artist, &other.artist, 0.55)
             {
@@ -896,9 +966,9 @@ fn dedupe_candidates(candidates: &mut Vec<providers::Candidate>) {
 fn normalize_match_key(value: &str) -> String {
     value
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .collect::<String>()
-        .to_ascii_lowercase()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn candidate_has_fingerprint(candidate: &providers::Candidate) -> bool {
@@ -912,6 +982,67 @@ fn candidate_has_fingerprint(candidate: &providers::Candidate) -> bool {
 
 fn candidate_source_count(candidate: &providers::Candidate) -> usize {
     candidate_source_list(candidate).len()
+}
+
+fn unique_exact_catalog_match(
+    best: &providers::Candidate,
+    candidates: &[providers::Candidate],
+    current: &audio::AudioInfo,
+) -> bool {
+    if !matches!(best.provider.as_str(), "itunes" | "musicbrainz")
+        || best.duration_delta.is_none_or(|delta| delta > 3.0)
+    {
+        return false;
+    }
+    let Some(title) = current.title.as_deref() else {
+        return false;
+    };
+    let Some(artist) = current.artist.as_deref() else {
+        return false;
+    };
+    if title_similarity(title, &best.title) < 0.94 || !text_close(artist, &best.artist, 0.96) {
+        return false;
+    }
+    let current_album = current
+        .album
+        .as_deref()
+        .filter(|album| !album.trim().is_empty() && !album.trim().starts_with('@'));
+    if let Some(album) = current_album
+        && best
+            .album
+            .as_deref()
+            .is_none_or(|candidate_album| text_similarity(album, candidate_album) < 0.65)
+    {
+        return false;
+    }
+    candidates
+        .iter()
+        .filter(|candidate| {
+            title_similarity(title, &candidate.title) >= 0.94
+                && text_close(artist, &candidate.artist, 0.96)
+                && candidate.duration_delta.is_some_and(|delta| delta <= 3.0)
+                && current_album.is_none_or(|album| {
+                    candidate.album.as_deref().is_some_and(|candidate_album| {
+                        text_similarity(album, candidate_album) >= 0.65
+                    })
+                })
+        })
+        .map(|candidate| normalize_match_key(candidate.album.as_deref().unwrap_or_default()))
+        .collect::<HashSet<_>>()
+        .len()
+        == 1
+}
+
+fn title_similarity(left: &str, right: &str) -> f64 {
+    let left_key = normalize_match_key(left);
+    let right_key = normalize_match_key(right);
+    if left_key.len().min(right_key.len()) >= 8
+        && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key))
+    {
+        0.96
+    } else {
+        text_similarity(left, right)
+    }
 }
 
 fn text_similarity(left: &str, right: &str) -> f64 {
@@ -1235,6 +1366,7 @@ fn provider_display_name(provider: &str) -> &str {
     match provider {
         "acoustid" => "AcoustID",
         "discogs" => "Discogs",
+        "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
         "theaudiodb" => "TheAudioDB",
         "wikidata" => "Wikidata",
@@ -1693,5 +1825,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(provider, "discogs");
+    }
+
+    #[test]
+    fn equivalent_catalog_releases_are_one_exact_match() {
+        let info = audio::AudioInfo {
+            title: Some("Колыбельная".into()),
+            artist: Some("Jah Khalib".into()),
+            album: Some("@radiop0l".into()),
+            ..Default::default()
+        };
+        let candidates = vec![
+            providers::Candidate {
+                provider: "itunes".into(),
+                title: "Колыбельная".into(),
+                artist: "Jah Khalib".into(),
+                album: Some("E.G.O.".into()),
+                duration_delta: Some(0.14),
+                ..Default::default()
+            },
+            providers::Candidate {
+                provider: "musicbrainz".into(),
+                title: "Колыбельная".into(),
+                artist: "Jah Khalib".into(),
+                album: Some("E.G.O.".into()),
+                duration_delta: Some(0.04),
+                ..Default::default()
+            },
+        ];
+        assert!(unique_exact_catalog_match(
+            &candidates[0],
+            &candidates,
+            &info
+        ));
+    }
+
+    #[test]
+    fn conflicting_existing_album_blocks_unique_text_match() {
+        let info = audio::AudioInfo {
+            title: Some("All of the Stars".into()),
+            artist: Some("Ed Sheeran".into()),
+            album: Some("The Fault In Our Stars (Music From The Motion Picture)".into()),
+            ..Default::default()
+        };
+        let candidates = vec![providers::Candidate {
+            provider: "itunes".into(),
+            title: "All of the Stars".into(),
+            artist: "Ed Sheeran".into(),
+            album: Some("x (10th Anniversary Edition)".into()),
+            duration_delta: Some(2.0),
+            ..Default::default()
+        }];
+        assert!(!unique_exact_catalog_match(
+            &candidates[0],
+            &candidates,
+            &info
+        ));
     }
 }
