@@ -406,9 +406,17 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
       </section>}
 
       {isReview(track) && track.candidates.length > 0 && <section className="inspector-section candidate-section">
-        <div className="section-heading"><div><p className="eyebrow">Candidate matches</p><h3>Choose the right recording</h3></div><span>{track.candidates.length} found</span></div>
+        <div className="section-heading"><div><p className="eyebrow">Review matches</p><h3>Compare with the original file</h3></div><span>{track.candidates.length} found</span></div>
+        <p className="candidate-help">Scores can be close even when the recordings are different. Compare the title, artist, album, and audio evidence before choosing.</p>
+        <div className="candidate-reference">
+          <div className="reference-file"><Icon name="music" size={15} /><span><small>Original file</small><b title={track.filename}>{track.filename}</b></span></div>
+          <ReferenceField label="Title" value={track.current_title} />
+          <ReferenceField label="Artist" value={track.current_artist} />
+          <ReferenceField label="Album" value={track.current_album} />
+          <ReferenceField label="Track" value={track.current_track_number?.toString()} />
+        </div>
         <div className="candidate-list">
-          {track.candidates.slice(0, 5).map((item, index) => <CandidateRow key={item.id} candidate={item} rank={index + 1} choosing={choosingId === item.id} disabled={choosingId !== undefined} onChoose={() => void acceptCandidate(item.id)} />)}
+          {track.candidates.slice(0, 5).map((item, index) => <CandidateRow key={item.id} track={track} candidate={item} rank={index + 1} topScore={track.candidates[0]?.score || item.score} nextScore={index === 0 ? track.candidates[1]?.score : undefined} choosing={choosingId === item.id} disabled={choosingId !== undefined} onChoose={() => void acceptCandidate(item.id)} />)}
         </div>
       </section>}
 
@@ -449,14 +457,26 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   );
 }
 
-function CandidateRow({ candidate, rank, choosing, disabled, onChoose }: { candidate: Candidate; rank: number; choosing: boolean; disabled: boolean; onChoose: () => void }) {
+function ReferenceField({ label, value }: { label: string; value?: string }) {
+  return <span className="reference-field"><small>{label}</small><b title={value}>{value || "Not set"}</b></span>;
+}
+
+function CandidateRow({ track, candidate, rank, topScore, nextScore, choosing, disabled, onChoose }: { track: Track; candidate: Candidate; rank: number; topScore: number; nextScore?: number; choosing: boolean; disabled: boolean; onChoose: () => void }) {
   const audit = metadataAudit(candidate);
+  const confidence = candidateConfidence(candidate.score);
+  const signals = candidateSignals(track, candidate);
+  const gap = rank === 1 && typeof nextScore === "number" ? Math.max(0, candidate.score - nextScore) : Math.max(0, topScore - candidate.score);
   return <article className="candidate-row">
-    <span className="candidate-rank">{rank}</span>
-    <Artwork candidate={candidate} size="medium" />
-    <div className="candidate-identity"><b>{candidate.title || "Untitled"}</b><span>{candidate.artist || "Unknown artist"}</span><small>{[candidate.album, candidate.year || candidate.release_date?.slice(0, 4), candidate.track_number ? `Track ${candidate.track_number}` : ""].filter(Boolean).join(" · ")}</small><em>{candidateSources(candidate)}</em></div>
-    <div className="candidate-score"><strong>{Math.round(candidate.score)}%</strong><progress className="score-track" max="100" value={Math.max(0, Math.min(100, candidate.score))} aria-label={`${Math.round(candidate.score)} percent match`} /><small>{audit.coreComplete ? "Complete metadata" : `${audit.score}% complete`}</small></div>
-    <button className="accept-button" disabled={disabled} onClick={onChoose}>{choosing ? <span className="spinner" /> : <Icon name="check" size={15} />}{choosing ? "Accepting…" : "Accept match"}</button>
+    <div className="candidate-main">
+      <span className="candidate-rank" aria-label={`Result ${rank}`}>{rank}</span>
+      <Artwork candidate={candidate} size="medium" />
+      <div className="candidate-identity"><b>{candidate.title || "Untitled"}</b><span>{candidate.artist || "Unknown artist"}</span><small>{[candidate.album || "Album unknown", candidate.year || candidate.release_date?.slice(0, 4), candidate.track_number ? `Track ${candidate.track_number}${candidate.track_total ? ` of ${candidate.track_total}` : ""}` : ""].filter(Boolean).join(" · ")}</small><em>{candidateSources(candidate)} · {audit.coreComplete ? "Complete metadata" : `${audit.score}% metadata`}</em></div>
+      <div className={`candidate-score ${confidence.tone}`}><span>{confidence.label}</span><strong>{Math.round(candidate.score)}%</strong><small>{rank === 1 ? typeof nextScore === "number" ? `${Math.round(gap)} points above #2` : "Only result" : `${Math.round(gap)} points below #1`}</small></div>
+      <button className="accept-button" disabled={disabled} onClick={onChoose}>{choosing ? <span className="spinner" /> : <Icon name="check" size={15} />}{choosing ? "Choosing…" : "Use this match"}</button>
+    </div>
+    <div className="candidate-evidence" aria-label="Comparison with original file">
+      {signals.map((signal) => <span className={signal.tone} key={signal.label}><small>{signal.label}</small><b>{signal.value}</b></span>)}
+    </div>
   </article>;
 }
 
@@ -581,6 +601,43 @@ function MetadataHealth({ candidate }: { candidate: Candidate }) {
   const audit = metadataAudit(candidate);
   return <span className={`metadata-health ${audit.coreComplete ? "complete" : "incomplete"}`}><Icon name={audit.coreComplete ? "check" : "alert"} size={14} />{audit.score}% metadata {audit.coreComplete ? "complete" : `· missing ${audit.missing.slice(0, 3).join(", ")}`}</span>;
 }
+
+function candidateConfidence(score: number) {
+  if (score >= 85) return { label: "Strong match", tone: "strong" };
+  if (score >= 70) return { label: "Likely match", tone: "likely" };
+  if (score >= 55) return { label: "Uncertain", tone: "uncertain" };
+  return { label: "Weak match", tone: "weak" };
+}
+
+function candidateSignals(track: Track, candidate: Candidate) {
+  let evidence: Record<string, unknown> = {};
+  try { evidence = JSON.parse(candidate.score_breakdown || "{}"); } catch { /* Compare available text directly. */ }
+  return [
+    comparisonSignal("Title", track.current_title, candidate.title, evidence.title),
+    comparisonSignal("Artist", track.current_artist, candidate.artist, evidence.artist),
+    comparisonSignal("Album", track.current_album, candidate.album, evidence.album_context),
+    durationSignal(evidence.duration),
+  ];
+}
+
+function comparisonSignal(label: string, original?: string, proposed?: string, rawSimilarity?: unknown) {
+  if (!original?.trim()) return { label, value: "No original", tone: "muted" };
+  if (!proposed?.trim()) return { label, value: "Missing", tone: "warning" };
+  const similarity = typeof rawSimilarity === "number" ? rawSimilarity : normalizeText(original) === normalizeText(proposed) ? 1 : 0;
+  if (similarity >= 0.92) return { label, value: "Exact", tone: "good" };
+  if (similarity >= 0.7) return { label, value: "Close", tone: "good" };
+  if (similarity >= 0.4) return { label, value: "Different", tone: "warning" };
+  return { label, value: "Mismatch", tone: "warning" };
+}
+
+function durationSignal(rawSimilarity?: unknown) {
+  if (typeof rawSimilarity !== "number") return { label: "Audio length", value: "Not checked", tone: "muted" };
+  if (rawSimilarity >= 0.9) return { label: "Audio length", value: "Same", tone: "good" };
+  if (rawSimilarity >= 0.55) return { label: "Audio length", value: "Close", tone: "good" };
+  return { label: "Audio length", value: "Different", tone: "warning" };
+}
+
+function normalizeText(value: string) { return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "").trim(); }
 
 function isReview(track: Track) { return track.stage === "review" && !isCompleted(track) && !isProblem(track); }
 function isReady(track: Track) { return track.stage === "ready" && Boolean(track.selected_candidate_id) && !isCompleted(track); }
