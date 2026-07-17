@@ -30,8 +30,9 @@ pub fn write(
     // contain malformed frames that can be read but cannot be saved again.
     file.insert_tag(Tag::new(file.primary_tag_type()));
     let tag = file.primary_tag_mut().expect("primary tag inserted");
-    set(tag, ItemKey::TrackTitle, &candidate.title);
-    set(tag, ItemKey::TrackArtist, &candidate.artist);
+    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    set(tag, ItemKey::TrackTitle, &credits.title);
+    set(tag, ItemKey::TrackArtist, &credits.artist);
     optional(tag, ItemKey::AlbumTitle, &candidate.album);
     optional(tag, ItemKey::AlbumArtist, &candidate.album_artist);
     optional(tag, ItemKey::Isrc, &candidate.isrc);

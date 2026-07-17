@@ -702,7 +702,9 @@ async fn identify(
     out.extend(query_lastfm(state, cfg, limits, current, filename).await);
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
     out.extend(query_wikidata(state, limits, current, filename).await);
-    reconcile_collaboration_credit(&mut out, current)?;
+    for candidate in &mut out {
+        normalize_candidate_credits(candidate);
+    }
     apply_source_agreement(&mut out)?;
     enrich_artwork_fallbacks(&mut out)?;
     let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, current) {
@@ -802,6 +804,7 @@ async fn query_audd(
     {
         Ok(mut candidates) => {
             for candidate in &mut candidates {
+                normalize_candidate_credits(candidate);
                 candidate.duration_delta = candidate
                     .duration_delta
                     .map(|candidate_duration| (current.duration - candidate_duration).abs());
@@ -1250,6 +1253,7 @@ fn score_text_candidate(
     current: &audio::AudioInfo,
     source: &str,
 ) -> Result<()> {
+    normalize_candidate_credits(candidate);
     preserve_album_context_for_catalog_single(candidate, current);
     let title = current
         .title
@@ -1377,51 +1381,10 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
     Ok(())
 }
 
-fn reconcile_collaboration_credit(
-    candidates: &mut [providers::Candidate],
-    current: &audio::AudioInfo,
-) -> Result<()> {
-    let Some(current_artist) = current.artist.as_deref().filter(|artist| {
-        [" & ", " feat. ", " ft. ", " x "]
-            .iter()
-            .any(|separator| artist.to_ascii_lowercase().contains(separator))
-    }) else {
-        return Ok(());
-    };
-    let snapshot = candidates.to_vec();
-    for candidate in candidates {
-        if artist_similarity(current_artist, &candidate.artist) >= 0.88 {
-            continue;
-        }
-        let lead = current_artist
-            .split(['&', ','])
-            .next()
-            .unwrap_or(current_artist)
-            .trim();
-        let lead_matches = artist_similarity(lead, &candidate.artist) >= 0.88;
-        let independently_supported = snapshot.iter().any(|other| {
-            other.provider != candidate.provider
-                && title_similarity(&candidate.title, &other.title) >= 0.90
-                && artist_similarity(current_artist, &other.artist) >= 0.88
-        });
-        if !lead_matches || !independently_supported {
-            continue;
-        }
-        let original = candidate.artist.clone();
-        candidate.artist = current_artist.to_owned();
-        let mut breakdown = candidate
-            .score_breakdown
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        breakdown["performer_credit"] = serde_json::json!({
-            "original": original,
-            "corrected": current_artist,
-            "reason": "Complete collaboration credit confirmed by an independent provider"
-        });
-        candidate.score_breakdown = Some(breakdown.to_string());
-    }
-    Ok(())
+fn normalize_candidate_credits(candidate: &mut providers::Candidate) {
+    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    candidate.artist = credits.artist;
+    candidate.title = credits.title;
 }
 
 fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<()> {
@@ -2361,41 +2324,6 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&serde_json::json!("Last.fm"))
-        );
-    }
-
-    #[test]
-    fn independent_source_restores_complete_collaboration_credit() {
-        let current = audio::AudioInfo {
-            title: Some("Mi amor".into()),
-            artist: Some("Arta & Saaren".into()),
-            ..Default::default()
-        };
-        let mut candidates = vec![
-            providers::Candidate {
-                provider: "audd".into(),
-                title: "Mi amor".into(),
-                artist: "Arta".into(),
-                score_breakdown: Some(serde_json::json!({"audio_recognition": true}).to_string()),
-                ..Default::default()
-            },
-            providers::Candidate {
-                provider: "lastfm".into(),
-                title: "Mi amor".into(),
-                artist: "Arta & Saaren".into(),
-                ..Default::default()
-            },
-        ];
-
-        reconcile_collaboration_credit(&mut candidates, &current).unwrap();
-
-        assert_eq!(candidates[0].artist, "Arta & Saaren");
-        assert!(
-            candidates[0]
-                .score_breakdown
-                .as_deref()
-                .unwrap()
-                .contains("performer_credit")
         );
     }
 

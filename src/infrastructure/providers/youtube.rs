@@ -37,11 +37,11 @@ fn candidate_from_oembed(raw: &Value) -> Option<Candidate> {
             cleaned,
         )
     });
-    let (artist, title) = move_feature_credit(artist, title);
+    let credits = crate::domain::credits::normalize_featured(&artist, &title);
     Some(Candidate {
         provider: "youtube".into(),
-        title,
-        artist,
+        title: credits.title,
+        artist: credits.artist,
         cover_url: raw["thumbnail_url"].as_str().map(str::to_owned),
         score: 92.0,
         score_breakdown: Some(
@@ -123,7 +123,7 @@ fn parse_video(raw: &Value) -> Option<Candidate> {
             .to_owned();
         (channel, cleaned.clone())
     });
-    let (artist, title) = move_feature_credit(artist, title);
+    let credits = crate::domain::credits::normalize_featured(&artist, &title);
     let published = video["snippet"]["publishedAt"].as_str();
     let cover_url = ["maxres", "standard", "high", "medium", "default"]
         .into_iter()
@@ -131,8 +131,8 @@ fn parse_video(raw: &Value) -> Option<Candidate> {
         .map(str::to_owned);
     Some(Candidate {
         provider: "youtube".into(),
-        title,
-        artist,
+        title: credits.title,
+        artist: credits.artist,
         year: published.and_then(|date| date.get(..4)).map(str::to_owned),
         release_date: published.and_then(|date| date.get(..10)).map(str::to_owned),
         cover_url,
@@ -173,24 +173,6 @@ fn clean_video_title(value: &str) -> String {
         }
     }
     value.trim().to_owned()
-}
-
-fn move_feature_credit(artist: String, title: String) -> (String, String) {
-    let lower = title.to_ascii_lowercase();
-    for marker in [" (feat. ", " (ft. ", " (featuring "] {
-        if let Some(index) = lower.find(marker)
-            && title.ends_with(')')
-        {
-            let featured = title[index + marker.len()..title.len() - 1].trim();
-            if !featured.is_empty() {
-                return (
-                    format!("{} & {featured}", artist.trim()),
-                    title[..index].trim().to_owned(),
-                );
-            }
-        }
-    }
-    (artist, title)
 }
 
 fn split_artist_title(value: &str) -> Option<(String, String)> {
@@ -254,14 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn oembed_moves_featured_artist_into_full_credit() {
+    fn oembed_keeps_featured_artist_in_title() {
         let candidate = candidate_from_oembed(&serde_json::json!({
             "title": "Arta - Mi Amor (feat. Saaren) | OFFICIAL MUSIC VIDEO",
             "author_name": "ARTA", "thumbnail_url": "cover"
         }))
         .unwrap();
-        assert_eq!(candidate.title, "Mi Amor");
-        assert_eq!(candidate.artist, "Arta & Saaren");
+        assert_eq!(candidate.title, "Mi Amor (feat. Saaren)");
+        assert_eq!(candidate.artist, "Arta");
         assert_eq!(candidate.cover_url.as_deref(), Some("cover"));
     }
 }

@@ -89,12 +89,26 @@ pub struct CandidateRow {
 }
 
 impl CandidateRow {
+    fn normalized_credits(&self) -> crate::domain::credits::Credits {
+        crate::domain::credits::normalize_featured(
+            self.artist.as_deref().unwrap_or_default(),
+            self.title.as_deref().unwrap_or_default(),
+        )
+    }
+
+    pub(super) fn normalize_credits(&mut self) {
+        let credits = self.normalized_credits();
+        self.artist = Some(credits.artist);
+        self.title = Some(credits.title);
+    }
+
     pub(super) fn value(&self) -> Candidate {
+        let credits = self.normalized_credits();
         Candidate {
             id: Some(self.id.0),
             provider: self.provider.clone(),
-            title: self.title.clone().unwrap_or_default(),
-            artist: self.artist.clone().unwrap_or_default(),
+            title: credits.title,
+            artist: credits.artist,
             album: self.album.clone(),
             album_artist: self.album_artist.clone(),
             track_number: self.track_number,
@@ -208,8 +222,9 @@ fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<Str
         .extension()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty());
-    let artist = safe_filename_part(&candidate.artist, "Unknown Artist");
-    let title = safe_filename_part(&candidate.title, "Unknown Title");
+    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    let artist = safe_filename_part(&credits.artist, "Unknown Artist");
+    let title = safe_filename_part(&credits.title, "Unknown Title");
     let mut basename = truncate_utf8(&format!("{artist} - {title}"), 220).to_owned();
     if let Some(extension) = extension {
         basename.push('.');

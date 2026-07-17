@@ -25,6 +25,11 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
     };
     fill_from_filename(path, &mut info);
     clean_search_tags(&mut info);
+    if let (Some(artist), Some(title)) = (info.artist.as_deref(), info.title.as_deref()) {
+        let credits = crate::domain::credits::normalize_featured(artist, title);
+        info.artist = Some(credits.artist);
+        info.title = Some(credits.title);
+    }
     Ok(info)
 }
 

@@ -10,7 +10,10 @@ pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Track
     let total = tracks.len() as i64;
     let mut items = Vec::with_capacity(tracks.len());
     for track in tracks {
-        let candidates = queries::candidates(&s.pool, track.id).await?;
+        let mut candidates = queries::candidates(&s.pool, track.id).await?;
+        for candidate in &mut candidates {
+            candidate.normalize_credits();
+        }
         items.push(WorkspaceTrack { track, candidates });
     }
     Ok(Json(TrackPage { items, total }))
@@ -44,11 +47,14 @@ pub async fn select_candidate(
 pub async fn manual_candidate(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
-    Json(value): Json<CandidateEdit>,
+    Json(mut value): Json<CandidateEdit>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if value.title.trim().is_empty() || value.artist.trim().is_empty() {
         return Err(ApiError::validation("Title and artist are required"));
     }
+    let credits = crate::domain::credits::normalize_featured(&value.artist, &value.title);
+    value.artist = credits.artist;
+    value.title = credits.title;
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM tracks WHERE id=?")
         .bind(id.0)
         .fetch_optional(&s.pool)
