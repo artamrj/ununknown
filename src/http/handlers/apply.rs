@@ -201,7 +201,8 @@ pub async fn apply(
             move || {
                 let _permit = write_permit;
                 let expected_artwork = artwork.clone();
-                tag_writer::write(&write_target, &candidate, artwork, replay_gain)?;
+                let sanitized =
+                    tag_writer::write_resilient(&write_target, &candidate, artwork, replay_gain)?;
                 if let Some(expected) = expected_artwork {
                     let embedded = tag_writer::read_artwork(&write_target)?.ok_or_else(|| {
                         anyhow::anyhow!("cover verification found no embedded image")
@@ -210,10 +211,21 @@ pub async fn apply(
                         anyhow::bail!("embedded cover does not match the validated preview image");
                     }
                 }
-                Ok::<_, anyhow::Error>(())
+                Ok::<_, anyhow::Error>(sanitized)
             }
         })
         .await?;
+        if result.as_ref().is_ok_and(|sanitized| *sanitized) {
+            s.log_entry(
+                ActivityLogEntry::new(
+                    "ok",
+                    "tags",
+                    "Removed malformed legacy tags with lossless stream-copy and retried",
+                )
+                .file(item.filename.clone()),
+            )
+            .await;
+        }
         let mut result = match result {
             Ok(_) => tokio::fs::rename(&temporary, &dest)
                 .await

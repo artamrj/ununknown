@@ -218,10 +218,17 @@ fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<Str
     let parent = relative
         .parent()
         .unwrap_or_else(|| std::path::Path::new(""));
-    let extension = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty());
+    // Re-sniff the source at apply time. The database may still contain an old
+    // extension-based format from a previous scan (for example, AAC/M4A bytes in
+    // a file named `.mp3`). Falling back keeps previews for missing files usable.
+    let detected_format = crate::domain::audio::read(source)
+        .ok()
+        .map(|info| info.format);
+    let extension = detected_format
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or_else(|| track.format.as_deref().filter(|value| !value.is_empty()))
+        .or_else(|| source.extension().and_then(|value| value.to_str()));
     let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
     let artist = safe_filename_part(&credits.artist, "Unknown Artist");
     let title = safe_filename_part(&credits.title, "Unknown Title");

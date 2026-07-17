@@ -1,5 +1,5 @@
 use crate::infrastructure::{media::replaygain::ReplayGain, providers::Candidate};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use lofty::{
     config::WriteOptions,
     file::TaggedFileExt,
@@ -24,7 +24,7 @@ pub fn write(
     if matches!(ext.as_str(), "wav" | "aiff" | "aif") {
         bail!("{ext} writing skipped because it is conditional/unsafe in this MVP");
     }
-    let mut file = Probe::open(path)?.read()?;
+    let mut file = Probe::open(path)?.guess_file_type()?.read()?;
     let preserved_artwork = valid_embedded_artwork(&file);
     // Rebuild the primary tag instead of mutating it. Real music collections often
     // contain malformed frames that can be read but cannot be saved again.
@@ -84,6 +84,115 @@ pub fn write(
     Ok(())
 }
 
+pub fn write_resilient(
+    path: &Path,
+    candidate: &Candidate,
+    artwork: Option<Vec<u8>>,
+    replay_gain: Option<ReplayGain>,
+) -> Result<bool> {
+    match write(path, candidate, artwork.clone(), replay_gain) {
+        Ok(()) => Ok(false),
+        Err(initial_error) => {
+            sanitize_legacy_metadata(path).with_context(|| {
+                format!("initial tag read failed ({initial_error}); lossless tag cleanup failed")
+            })?;
+            write(path, candidate, artwork, replay_gain).with_context(|| {
+                format!("tag cleanup succeeded, but writing still failed ({initial_error})")
+            })?;
+            Ok(true)
+        }
+    }
+}
+
+fn sanitize_legacy_metadata(path: &Path) -> Result<()> {
+    let extension = detected_container_extension(path).unwrap_or_else(|| {
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("audio")
+            .to_ascii_lowercase()
+    });
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio");
+    let repaired = path.with_file_name(format!(
+        ".{stem}.tag-clean-{}.{}",
+        std::process::id(),
+        extension
+    ));
+    let _ = std::fs::remove_file(&repaired);
+    let output = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-fflags",
+            "+discardcorrupt",
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "copy",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-y",
+        ])
+        .arg(&repaired)
+        .output()
+        .context("could not start FFmpeg for lossless tag cleanup")?;
+    if !output.status.success() || !repaired.is_file() {
+        let _ = std::fs::remove_file(&repaired);
+        bail!(
+            "FFmpeg could not remove malformed metadata: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    std::fs::rename(&repaired, path).with_context(|| {
+        format!(
+            "could not replace temporary copy with sanitized audio {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn detected_container_extension(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=format_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    let format = String::from_utf8_lossy(&output.stdout);
+    let names = format.trim().split(',').collect::<Vec<_>>();
+    if names
+        .iter()
+        .any(|name| matches!(*name, "mov" | "mp4" | "m4a" | "3gp" | "3g2" | "mj2"))
+    {
+        Some("m4a".into())
+    } else if names.contains(&"mp3") {
+        Some("mp3".into())
+    } else if names.contains(&"flac") {
+        Some("flac".into())
+    } else if names.contains(&"ogg") {
+        Some("ogg".into())
+    } else {
+        None
+    }
+}
+
 fn valid_embedded_artwork(file: &lofty::file::TaggedFile) -> Option<Vec<u8>> {
     let valid_picture = |tag: &Tag| {
         tag.pictures()
@@ -105,7 +214,7 @@ fn valid_embedded_artwork(file: &lofty::file::TaggedFile) -> Option<Vec<u8>> {
 }
 
 pub fn read_artwork(path: &Path) -> Result<Option<Vec<u8>>> {
-    let file = Probe::open(path)?.read()?;
+    let file = Probe::open(path)?.guess_file_type()?.read()?;
     Ok(valid_embedded_artwork(&file))
 }
 
@@ -256,5 +365,40 @@ mod tests {
             tag.get_string(ItemKey::ReplayGainTrackPeak),
             Some("0.750000")
         );
+    }
+
+    #[test]
+    fn detects_mp4_container_hidden_behind_mp3_extension() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let m4a = directory.path().join("actual.m4a");
+        let disguised = directory.path().join("wrong.mp3");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=0.1")
+            .args(["-c:a", "aac"])
+            .arg(&m4a)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::rename(m4a, &disguised).unwrap();
+
+        assert_eq!(
+            detected_container_extension(&disguised).as_deref(),
+            Some("m4a")
+        );
+        let file = Probe::open(&disguised)
+            .unwrap()
+            .guess_file_type()
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(file.file_type(), lofty::file::FileType::Mp4);
     }
 }

@@ -17,7 +17,10 @@ pub struct AudioInfo {
 }
 
 pub fn read(path: &Path) -> Result<AudioInfo> {
-    let mut info = match Probe::open(path).and_then(|probe| probe.read()) {
+    let tagged = || -> lofty::error::Result<lofty::file::TaggedFile> {
+        Probe::open(path)?.guess_file_type()?.read()
+    };
+    let mut info = match tagged() {
         Ok(tagged) => info_from_tagged(path, &tagged),
         Err(tag_error) => info_from_ffprobe(path).with_context(|| {
             format!("tag reader failed ({tag_error}); FFprobe fallback also failed")
@@ -48,11 +51,7 @@ fn info_from_tagged(path: &Path, tagged: &lofty::file::TaggedFile) -> AudioInfo 
         genre: tag.and_then(|t| t.genre().map(|v| v.into_owned())),
         duration: props.duration().as_secs_f64(),
         bitrate: props.audio_bitrate(),
-        format: path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase(),
+        format: canonical_lofty_format(tagged.file_type(), path),
     }
 }
 
@@ -64,7 +63,7 @@ fn info_from_ffprobe(path: &Path) -> Result<AudioInfo> {
             "-select_streams",
             "a:0",
             "-show_entries",
-            "format=duration,bit_rate:format_tags=title,artist,album,album_artist,track,genre:stream=duration,bit_rate:stream_tags=title,artist,album,album_artist,track,genre",
+            "format=format_name,duration,bit_rate:format_tags=title,artist,album,album_artist,track,genre:stream=codec_name,duration,bit_rate:stream_tags=title,artist,album,album_artist,track,genre",
             "-of",
             "json",
         ])
@@ -114,12 +113,67 @@ fn parse_ffprobe(path: &Path, value: &serde_json::Value) -> Result<AudioInfo> {
         genre: tag("genre"),
         duration,
         bitrate,
-        format: path
+        format: canonical_ffprobe_format(
+            format["format_name"].as_str(),
+            stream["codec_name"].as_str(),
+            path,
+        ),
+    })
+}
+
+fn canonical_lofty_format(file_type: lofty::file::FileType, path: &Path) -> String {
+    use lofty::file::FileType;
+    match file_type {
+        FileType::Aac => "aac",
+        FileType::Aiff => "aiff",
+        FileType::Ape => "ape",
+        FileType::Flac => "flac",
+        FileType::Mpeg => "mp3",
+        FileType::Mp4 => "m4a",
+        FileType::Mpc => "mpc",
+        FileType::Opus => "opus",
+        FileType::Vorbis => "ogg",
+        FileType::Speex => "spx",
+        FileType::Wav => "wav",
+        FileType::WavPack => "wv",
+        _ => path
             .extension()
             .and_then(|extension| extension.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase(),
-    })
+            .unwrap_or_default(),
+    }
+    .to_owned()
+}
+
+fn canonical_ffprobe_format(
+    format_name: Option<&str>,
+    codec_name: Option<&str>,
+    path: &Path,
+) -> String {
+    let format = format_name.unwrap_or_default();
+    if format
+        .split(',')
+        .any(|name| matches!(name, "mov" | "mp4" | "m4a" | "3gp" | "3g2" | "mj2"))
+    {
+        return "m4a".into();
+    }
+    if format.contains("mp3") {
+        return "mp3".into();
+    }
+    if format.contains("flac") {
+        return "flac".into();
+    }
+    if format.contains("ogg") {
+        return if codec_name == Some("opus") {
+            "opus"
+        } else {
+            "ogg"
+        }
+        .into();
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn fill_from_filename(path: &Path, info: &mut AudioInfo) {
@@ -251,5 +305,18 @@ mod tests {
         assert_eq!(info.track_number, Some(3));
         assert_eq!(info.duration, 181.25);
         assert_eq!(info.bitrate, Some(192));
+    }
+
+    #[test]
+    fn ffprobe_corrects_an_mp4_file_with_mp3_extension() {
+        let info = parse_ffprobe(
+            Path::new("wrong.mp3"),
+            &serde_json::json!({
+                "streams": [{"codec_name": "aac", "duration": "173.6", "tags": {}}],
+                "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "tags": {}}
+            }),
+        )
+        .unwrap();
+        assert_eq!(info.format, "m4a");
     }
 }
