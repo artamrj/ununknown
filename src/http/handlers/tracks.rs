@@ -129,6 +129,40 @@ pub async fn update_artwork(
     Ok(Json(serde_json::json!({"cover_url": cover_url})))
 }
 
+pub async fn artwork_preview(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<axum::response::Response> {
+    let (track, candidate) = queries::selected(&s.pool, id).await?;
+    let artwork = match super::apply::resolve_artwork(&s, &track.filename, &candidate).await? {
+        Some(bytes) => Some(bytes),
+        None => tokio::task::spawn_blocking(move || {
+            tag_writer::read_artwork(std::path::Path::new(&track.path))
+        })
+        .await
+        .map_err(anyhow::Error::from)??,
+    }
+    .ok_or_else(|| ApiError::not_found("No valid artwork is available for this track"))?;
+    let mime = artwork_mime(&artwork);
+    Ok(axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, mime)
+        .header(axum::http::header::CACHE_CONTROL, "private, max-age=300")
+        .body(axum::body::Body::from(artwork))
+        .map_err(anyhow::Error::from)?)
+}
+
+fn artwork_mime(data: &[u8]) -> &'static str {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if data.starts_with(b"GIF8") {
+        "image/gif"
+    } else if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
+}
+
 pub async fn resolve_source(
     State(s): State<Arc<AppState>>,
     Json(value): Json<SourceLookupRequest>,

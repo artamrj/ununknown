@@ -1,4 +1,4 @@
-use crate::infrastructure::provider_cache::{ProviderCache, release_key};
+use crate::infrastructure::provider_cache::{ProviderCache, search_key};
 use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{Duration, Utc};
@@ -20,14 +20,9 @@ pub async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
-pub async fn fetch_cached(
-    pool: &SqlitePool,
-    client: &Client,
-    release_id: &str,
-    url: &str,
-) -> Result<Vec<u8>> {
-    let key = release_key(release_id);
-    if let Some(value) = ProviderCache::get(pool, "coverart", &key).await?
+pub async fn fetch_url_cached(pool: &SqlitePool, client: &Client, url: &str) -> Result<Vec<u8>> {
+    let key = search_key(url);
+    if let Some(value) = ProviderCache::get(pool, "artwork-url", &key).await?
         && let Some(encoded) = value["data_base64"].as_str()
     {
         return Ok(STANDARD.decode(encoded)?);
@@ -35,9 +30,9 @@ pub async fn fetch_cached(
     let data = fetch(client, url).await?;
     ProviderCache::put(
         pool,
-        "coverart",
+        "artwork-url",
         &key,
-        &serde_json::json!({ "data_base64": STANDARD.encode(&data) }),
+        &serde_json::json!({"data_base64": STANDARD.encode(&data), "url": url}),
         Utc::now() + Duration::days(30),
     )
     .await?;
@@ -47,7 +42,7 @@ pub async fn fetch_cached(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::provider_cache::{ProviderCache, release_key};
+    use crate::infrastructure::provider_cache::ProviderCache;
 
     async fn test_pool() -> SqlitePool {
         let dir = tempfile::tempdir().unwrap();
@@ -60,22 +55,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_cover_art_decodes_bytes() {
+    async fn cached_cover_art_by_url_decodes_bytes() {
         let pool = test_pool().await;
         ProviderCache::put(
             &pool,
-            "coverart",
-            &release_key("release-1"),
+            "artwork-url",
+            &search_key("http://127.0.0.1:1/should-not-be-called"),
             &serde_json::json!({ "data_base64": STANDARD.encode([1_u8, 2, 3]) }),
             Utc::now() + Duration::days(1),
         )
         .await
         .unwrap();
 
-        let data = fetch_cached(
+        let data = fetch_url_cached(
             &pool,
             &Client::new(),
-            "release-1",
             "http://127.0.0.1:1/should-not-be-called",
         )
         .await

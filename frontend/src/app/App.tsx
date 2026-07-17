@@ -233,11 +233,13 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
     await api(`/tracks/${track.id}/artwork`, { method: "PUT", body: JSON.stringify({ cover_url: coverUrl }) });
     await onSaved();
   };
-  return <div className="track"><div className="artwork-control"><Artwork candidate={candidate} /><button className="link" onClick={setCover}>Set cover</button></div><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
+  return <div className="track"><div className="artwork-control"><Artwork candidate={candidate} trackId={track.id} /><button className="link" onClick={setCover}>Set cover</button></div><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
 }
 
-function Artwork({ candidate }: { candidate?: Candidate }) {
-  const urls = artworkUrls(candidate);
+function Artwork({ candidate, trackId }: { candidate?: Candidate; trackId?: number }) {
+  const urls = trackId
+    ? [`/api/tracks/${trackId}/artwork/preview?v=${encodeURIComponent(candidate?.cover_url || candidate?.id || "embedded")}`]
+    : artworkUrls(candidate);
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [candidate?.id, candidate?.cover_url]);
   return urls[index]
@@ -246,14 +248,13 @@ function Artwork({ candidate }: { candidate?: Candidate }) {
 }
 
 function artworkUrls(candidate?: Candidate) {
-  const urls: string[] = [];
+  const urls: string[] = candidate?.cover_url ? [candidate.cover_url] : [];
   try {
     const alternatives = JSON.parse(candidate?.score_breakdown || "{}")?.artwork_candidates || [];
     for (const artwork of alternatives) if (typeof artwork?.url === "string") urls.push(artwork.url);
   } catch {
     // A malformed explanation must not break the rest of the review screen.
   }
-  if (candidate?.cover_url) urls.push(candidate.cover_url);
   return [...new Set(urls)];
 }
 

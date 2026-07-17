@@ -25,17 +25,7 @@ pub fn write(
         bail!("{ext} writing skipped because it is conditional/unsafe in this MVP");
     }
     let mut file = Probe::open(path)?.read()?;
-    let preserved_artwork = file
-        .tags()
-        .iter()
-        .flat_map(|tag| tag.pictures())
-        .find(|picture| {
-            matches!(
-                picture.pic_type(),
-                PictureType::CoverFront | PictureType::Other
-            ) && validate_artwork(picture.data()).is_ok()
-        })
-        .map(|picture| picture.data().to_vec());
+    let preserved_artwork = valid_embedded_artwork(&file);
     // Rebuild the primary tag instead of mutating it. Real music collections often
     // contain malformed frames that can be read but cannot be saved again.
     file.insert_tag(Tag::new(file.primary_tag_type()));
@@ -91,6 +81,31 @@ pub fn write(
     }
     file.save_to_path(path, WriteOptions::default())?;
     Ok(())
+}
+
+fn valid_embedded_artwork(file: &lofty::file::TaggedFile) -> Option<Vec<u8>> {
+    let valid_picture = |tag: &Tag| {
+        tag.pictures()
+            .iter()
+            .find(|picture| {
+                matches!(
+                    picture.pic_type(),
+                    PictureType::CoverFront | PictureType::Other
+                ) && validate_artwork(picture.data()).is_ok()
+            })
+            .map(|picture| picture.data().to_vec())
+    };
+    file.primary_tag().and_then(valid_picture).or_else(|| {
+        file.tags()
+            .iter()
+            .filter(|tag| Some(tag.tag_type()) != file.primary_tag().map(Tag::tag_type))
+            .find_map(valid_picture)
+    })
+}
+
+pub fn read_artwork(path: &Path) -> Result<Option<Vec<u8>>> {
+    let file = Probe::open(path)?.read()?;
+    Ok(valid_embedded_artwork(&file))
 }
 
 fn write_replaygain(tag: &mut Tag, replay_gain: ReplayGain) {

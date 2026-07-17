@@ -200,7 +200,16 @@ pub async fn apply(
         let result = tokio::task::spawn_blocking({
             move || {
                 let _permit = write_permit;
+                let expected_artwork = artwork.clone();
                 tag_writer::write(&write_target, &candidate, artwork, replay_gain)?;
+                if let Some(expected) = expected_artwork {
+                    let embedded = tag_writer::read_artwork(&write_target)?.ok_or_else(|| {
+                        anyhow::anyhow!("cover verification found no embedded image")
+                    })?;
+                    if embedded != expected {
+                        anyhow::bail!("embedded cover does not match the validated preview image");
+                    }
+                }
                 Ok::<_, anyhow::Error>(())
             }
         })
@@ -294,12 +303,15 @@ pub async fn apply(
     Ok(())
 }
 
-async fn resolve_artwork(
+pub(super) async fn resolve_artwork(
     state: &Arc<AppState>,
     filename: &str,
     candidate: &crate::infrastructure::providers::Candidate,
 ) -> Result<Option<Vec<u8>>> {
     let mut urls = Vec::<(String, String)>::new();
+    if let Some(url) = candidate.cover_url.as_deref() {
+        urls.push((candidate.provider.clone(), url.to_owned()));
+    }
     if let Some(value) = candidate
         .score_breakdown
         .as_deref()
@@ -313,9 +325,6 @@ async fn resolve_artwork(
                 ));
             }
         }
-    }
-    if let Some(url) = candidate.cover_url.as_deref() {
-        urls.push((candidate.provider.clone(), url.to_owned()));
     }
     let mut seen = HashSet::new();
     urls.retain(|(_, url)| seen.insert(url.clone()));
@@ -334,22 +343,12 @@ async fn resolve_artwork(
     let limiter = state.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await?;
     for (provider, url) in urls {
-        let result = if url.contains("coverartarchive.org") {
-            if let Some(release_id) = candidate.release_id.as_deref() {
-                crate::infrastructure::providers::cover_art_archive::fetch_cached(
-                    &state.pool,
-                    &state.client,
-                    release_id,
-                    &url,
-                )
-                .await
-            } else {
-                crate::infrastructure::providers::cover_art_archive::fetch(&state.client, &url)
-                    .await
-            }
-        } else {
-            crate::infrastructure::providers::cover_art_archive::fetch(&state.client, &url).await
-        };
+        let result = crate::infrastructure::providers::cover_art_archive::fetch_url_cached(
+            &state.pool,
+            &state.client,
+            &url,
+        )
+        .await;
         match result.and_then(|bytes| {
             crate::infrastructure::media::tag_writer::validate_artwork(&bytes)?;
             Ok(bytes)
