@@ -24,6 +24,7 @@ input:focus { border-color: #226b47; box-shadow: 0 0 0 3px #dcebe2; }
 .setup details { grid-column: 1 / -1; border-top: 1px solid #edf0ed; padding-top: 12px; }
 .source-status { grid-column: 1 / -1; display: grid; gap: 4px; padding: 10px 12px; border-radius: 9px; background: #f0f7f3; color: #315d45; font-size: 13px; }
 .source-status small { color: #84631b; }
+.source-status .replaygain-active { color: #315d45; }
 summary { cursor: pointer; font-weight: 800; }
 .setup details > p { margin: 8px 0 12px; font-size: 13px; color: #657068; }
 .key-grid, .manual { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
@@ -37,6 +38,7 @@ label i { color: #226b47; font-size: 11px; }
 .error { margin-bottom: 14px; padding: 12px 14px; border-radius: 10px; background: #fff0ed; color: #a82c19; }
 .results { margin-top: 36px; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 16px; }
+.write-action { display: grid; justify-items: end; gap: 5px; color: #657068; text-align: right; }
 .review { padding: 20px; margin-bottom: 12px; }
 .review > header { display: flex; justify-content: space-between; gap: 20px; }
 .review h3 { overflow-wrap: anywhere; }
@@ -59,5 +61,6 @@ label i { color: #226b47; font-size: 11px; }
   .setup details { grid-column: auto; }
   .key-grid, .manual { grid-template-columns: 1fr; }
   .section-title { align-items: flex-start; flex-direction: column; }
+  .write-action { justify-items: start; text-align: left; }
   .track { grid-template-columns: 1fr; gap: 3px; }
 }

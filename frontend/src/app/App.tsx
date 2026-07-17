@@ -82,7 +82,7 @@ export function App() {
   };
 
   const write = async () => {
-    if (!confirm("Write corrected copies named “Artist - Title” to the output folder?")) return;
+    if (!confirm("Write corrected copies with metadata, cover art, ReplayGain, and “Artist - Title” filenames?")) return;
     try {
       await api("/write", { method: "POST", body: "{}" });
       await refresh();
@@ -125,6 +125,9 @@ export function App() {
         <div className="source-status">
           <span>Active catalogs: Apple Music, MusicBrainz, Wikidata</span>
           {(!setup.sources.fpcalc || !setup.sources.acoustid) && <small>For hard-to-name tracks, install Chromaprint (`fpcalc`) and add an AcoustID key.</small>}
+          {setup.sources.ffmpeg
+            ? <small className="replaygain-active">ReplayGain is active. Track loudness and peak are added when corrected files are written.</small>
+            : <small>Install FFmpeg to add ReplayGain loudness metadata. Other corrections still work.</small>}
         </div>
         <details>
           <summary>Optional source keys</summary>
@@ -153,7 +156,10 @@ export function App() {
         <section className="results">
           <div className="section-title">
             <div><h2>{review.length ? `${review.length} need your help` : "Everything is identified"}</h2><p>{ready.length} tracks are ready to write.</p></div>
-            <button className="primary" disabled={!ready.length} onClick={write}>Write {ready.length} corrected files</button>
+            <div className="write-action">
+              <button className="primary" disabled={!ready.length} onClick={write}>Write {ready.length} corrected files</button>
+              {ready.length > 0 && <small>Includes ReplayGain track gain + peak</small>}
+            </div>
           </div>
           {review.map((track) => <ReviewTrack key={track.id} track={track} onChoose={choose} onSaved={loadTracks} />)}
           <details className="ready-list">

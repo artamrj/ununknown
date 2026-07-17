@@ -125,6 +125,15 @@ CREATE TABLE IF NOT EXISTS fingerprint_cache (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS replaygain_cache (
+  path TEXT PRIMARY KEY,
+  file_size INTEGER NOT NULL,
+  file_mtime_ns INTEGER NOT NULL,
+  track_gain_db REAL NOT NULL,
+  track_peak REAL NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS candidates_track_id ON candidates(track_id);
 CREATE INDEX IF NOT EXISTS tracks_stage ON tracks(stage);
 CREATE INDEX IF NOT EXISTS candidate_sources_candidate_id ON candidate_sources(candidate_id);

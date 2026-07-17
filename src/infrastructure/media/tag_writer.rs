@@ -1,4 +1,4 @@
-use crate::infrastructure::providers::Candidate;
+use crate::infrastructure::{media::replaygain::ReplayGain, providers::Candidate};
 use anyhow::{Result, bail};
 use lofty::{
     config::WriteOptions,
@@ -10,7 +10,12 @@ use lofty::{
 };
 use std::path::Path;
 
-pub fn write(path: &Path, candidate: &Candidate, artwork: Option<Vec<u8>>) -> Result<()> {
+pub fn write(
+    path: &Path,
+    candidate: &Candidate,
+    artwork: Option<Vec<u8>>,
+    replay_gain: Option<ReplayGain>,
+) -> Result<()> {
     let ext = path
         .extension()
         .and_then(|v| v.to_str())
@@ -41,6 +46,9 @@ pub fn write(path: &Path, candidate: &Candidate, artwork: Option<Vec<u8>>) -> Re
     optional(tag, ItemKey::Composer, &candidate.composer);
     optional(tag, ItemKey::Label, &candidate.label);
     optional(tag, ItemKey::RecordingDate, &candidate.year);
+    if let Some(replay_gain) = replay_gain {
+        write_replaygain(tag, replay_gain);
+    }
     optional(
         tag,
         ItemKey::MusicBrainzRecordingId,
@@ -74,6 +82,11 @@ pub fn write(path: &Path, candidate: &Candidate, artwork: Option<Vec<u8>>) -> Re
     Ok(())
 }
 
+fn write_replaygain(tag: &mut Tag, replay_gain: ReplayGain) {
+    set(tag, ItemKey::ReplayGainTrackGain, &replay_gain.gain_tag());
+    set(tag, ItemKey::ReplayGainTrackPeak, &replay_gain.peak_tag());
+}
+
 fn picture_from_bytes(data: Vec<u8>) -> Result<Picture> {
     let mut reader = std::io::Cursor::new(data);
     Ok(Picture::from_reader(&mut reader)?)
@@ -102,5 +115,73 @@ mod tests {
     #[test]
     fn invalid_cover_data_is_rejected() {
         assert!(picture_from_bytes(vec![0; 12]).is_err());
+    }
+
+    #[test]
+    fn replaygain_uses_portable_item_keys() {
+        let mut tag = Tag::new(lofty::tag::TagType::Id3v2);
+        write_replaygain(
+            &mut tag,
+            ReplayGain {
+                track_gain_db: -7.235,
+                track_peak: 0.987_654_3,
+            },
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackGain),
+            Some("-7.24 dB")
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackPeak),
+            Some("0.987654")
+        );
+    }
+
+    #[test]
+    fn replaygain_survives_an_mp3_disk_round_trip() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("round-trip.mp3");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=0.1")
+            .args(["-q:a", "9"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let candidate = Candidate {
+            title: "Round trip".into(),
+            artist: "Test artist".into(),
+            ..Candidate::default()
+        };
+        write(
+            &path,
+            &candidate,
+            None,
+            Some(ReplayGain {
+                track_gain_db: -6.25,
+                track_peak: 0.75,
+            }),
+        )
+        .unwrap();
+
+        let file = Probe::open(&path).unwrap().read().unwrap();
+        let tag = file.primary_tag().unwrap();
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackGain),
+            Some("-6.25 dB")
+        );
+        assert_eq!(
+            tag.get_string(ItemKey::ReplayGainTrackPeak),
+            Some("0.750000")
+        );
     }
 }

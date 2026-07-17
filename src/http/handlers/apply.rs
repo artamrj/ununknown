@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::ActivityLogEntry;
+use crate::infrastructure::media::replaygain;
 use chrono::Utc;
 use std::collections::HashSet;
 
@@ -111,6 +112,46 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         )
         .await;
         let (_, candidate) = queries::selected(&s.pool, item.track_id).await?;
+        s.set_workflow(
+            WorkflowPhase::Apply,
+            "replaygain",
+            "Analyzing playback loudness",
+            i,
+            total as usize,
+            Some(item.current_path.clone()),
+        )
+        .await;
+        let source_path = std::path::Path::new(&item.current_path);
+        let replay_gain = match replaygain::get_or_analyze(&s.pool, source_path).await {
+            Ok(value) => {
+                s.log_entry(
+                    ActivityLogEntry::new("ok", "replaygain", "Measured playback loudness")
+                        .file(item.filename.clone())
+                        .detail(format!(
+                            "Track gain {}; peak {}",
+                            value.gain_tag(),
+                            value.peak_tag()
+                        )),
+                )
+                .await;
+                Some(value)
+            }
+            Err(error) => {
+                // ReplayGain improves compatible players but must never prevent the
+                // user's other corrected metadata from being written.
+                s.log_entry(
+                    ActivityLogEntry::new(
+                        "warn",
+                        "replaygain",
+                        "ReplayGain unavailable; writing other metadata",
+                    )
+                    .file(item.filename.clone())
+                    .error(error.as_ref()),
+                )
+                .await;
+                None
+            }
+        };
         let artwork = if let Some(url) = &candidate.cover_url {
             let limiter = s.artwork_downloads.read().await.clone();
             let _permit = limiter.acquire_owned().await?;
@@ -196,7 +237,7 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         let result = tokio::task::spawn_blocking({
             move || {
                 let _permit = write_permit;
-                tag_writer::write(&write_target, &candidate, artwork)?;
+                tag_writer::write(&write_target, &candidate, artwork, replay_gain)?;
                 Ok::<_, anyhow::Error>(())
             }
         })
