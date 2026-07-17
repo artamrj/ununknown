@@ -155,6 +155,7 @@ pub struct CandidateEdit {
 pub struct SetupRequest {
     input_dir: String,
     output_dir: String,
+    delete_source_after_write: Option<bool>,
     acoustid_key: Option<String>,
     discogs_token: Option<String>,
     lastfm_key: Option<String>,

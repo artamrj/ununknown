@@ -6,9 +6,13 @@ It first checks that each audio stream can be decoded, then tries every configur
 automatic source (audio fingerprinting, MusicBrainz, Apple Music, Deezer, Discogs,
 Last.fm, TheAudioDB, Wikidata, and Cover Art Archive). Reliable matches are selected
 automatically. Uncertain and unmatched files stay in a short review list where you
-can choose a candidate or enter metadata manually. Corrected files are written as
-copies with ReplayGain metadata, so source music is never modified. Damaged audio is
-reported and blocked from the write queue.
+can choose a candidate or enter metadata manually. Corrected files are first written
+as separate copies with ReplayGain metadata. Damaged audio is reported and blocked
+from the write queue.
+
+An optional **Remove input after successful output** setting can turn the copy
+workflow into a move-like workflow. It is disabled by default and removes each
+source only after its corrected destination has been written successfully.
 
 ## Run locally
 

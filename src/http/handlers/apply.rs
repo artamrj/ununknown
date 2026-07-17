@@ -36,10 +36,11 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         });
     }
     let count = items.len();
+    let delete_source_after_write = cfg.delete_source_after_write;
     s.start_apply_workflow().await;
     let state = s.clone();
     tokio::spawn(async move {
-        let result = apply(state.clone(), items).await;
+        let result = apply(state.clone(), items, delete_source_after_write).await;
         if state.workflow_cancelled().await {
             state
                 .finish_workflow(WorkflowPhase::Idle, "idle", "Apply stopped")
@@ -95,7 +96,11 @@ fn temporary_destination(destination: &std::path::Path, track_id: i64) -> PathBu
     parent.join(format!(".{stem}.ununknown-{track_id}.{extension}"))
 }
 
-pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
+pub async fn apply(
+    s: Arc<AppState>,
+    items: Vec<PreviewItem>,
+    delete_source_after_write: bool,
+) -> Result<()> {
     let total = items.len() as i64;
     for (i, item) in items.into_iter().enumerate() {
         if s.workflow_cancelled().await {
@@ -203,6 +208,12 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         };
         let src = PathBuf::from(&item.current_path);
         let dest = PathBuf::from(&item.destination_path);
+        if delete_source_after_write && paths_resolve_to_same_target(&src, &dest).await? {
+            anyhow::bail!(
+                "refusing to remove source because input and output resolve to the same file: {}",
+                src.display()
+            );
+        }
         let temporary = temporary_destination(&dest, item.track_id.0);
         {
             if let Some(parent) = dest.parent()
@@ -242,23 +253,50 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
             }
         })
         .await?;
-        let result = match result {
+        let mut result = match result {
             Ok(_) => tokio::fs::rename(&temporary, &dest)
                 .await
                 .map_err(anyhow::Error::from),
             Err(error) => Err(error),
         };
+        let output_was_written = result.is_ok();
+        if output_was_written && delete_source_after_write {
+            result = remove_source_after_output(&src, &dest).await.map(|_| ());
+            if result.is_ok() {
+                s.log_entry(
+                    ActivityLogEntry::new(
+                        "ok",
+                        "apply",
+                        "Removed original after successful corrected output",
+                    )
+                    .file(item.filename.clone())
+                    .context(serde_json::json!({
+                        "source": src.display().to_string(),
+                        "output": dest.display().to_string()
+                    })),
+                )
+                .await;
+            }
+        }
         let (status, error) = match result {
             Ok(_) => ("applied", None),
             Err(e) => {
                 s.log_entry(
-                    ActivityLogEntry::new("error", "apply", "Tag writing failed")
-                        .file(item.filename.clone())
-                        .error(e.as_ref())
-                        .context(serde_json::json!({
-                            "temporary": temporary.display().to_string(),
-                            "destination": dest.display().to_string()
-                        })),
+                    ActivityLogEntry::new(
+                        "error",
+                        "apply",
+                        if output_was_written {
+                            "Corrected output was written, but original removal failed"
+                        } else {
+                            "Tag writing failed"
+                        },
+                    )
+                    .file(item.filename.clone())
+                    .error(e.as_ref())
+                    .context(serde_json::json!({
+                        "temporary": temporary.display().to_string(),
+                        "destination": dest.display().to_string()
+                    })),
                 )
                 .await;
                 ("failed", Some(format!("{e:#}")))
@@ -304,6 +342,45 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
     Ok(())
 }
 
+async fn paths_resolve_to_same_target(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<bool> {
+    let source = tokio::fs::canonicalize(source).await?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("output file has no parent directory"))?;
+    tokio::fs::create_dir_all(destination_parent).await?;
+    let destination = match tokio::fs::canonicalize(destination).await {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tokio::fs::canonicalize(destination_parent).await?.join(
+                destination
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("output file has no filename"))?,
+            )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(source == destination)
+}
+
+async fn remove_source_after_output(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let output = tokio::fs::metadata(destination)
+        .await
+        .map_err(|error| anyhow::anyhow!("corrected output is unavailable: {error}"))?;
+    if !output.is_file() {
+        anyhow::bail!("corrected output is not a regular file")
+    }
+    tokio::fs::remove_file(source)
+        .await
+        .map_err(|error| anyhow::anyhow!("could not remove original input: {error}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +401,34 @@ mod tests {
         assert_eq!(
             temporary_destination(std::path::Path::new("/output/Artist - Song.mp3"), 42),
             PathBuf::from("/output/.Artist - Song.ununknown-42.mp3")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_is_removed_only_when_corrected_output_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("input.mp3");
+        let output = directory.path().join("output.mp3");
+        tokio::fs::write(&source, b"original").await.unwrap();
+
+        assert!(remove_source_after_output(&source, &output).await.is_err());
+        assert!(source.exists());
+
+        tokio::fs::write(&output, b"corrected").await.unwrap();
+        remove_source_after_output(&source, &output).await.unwrap();
+        assert!(!source.exists());
+        assert_eq!(tokio::fs::read(&output).await.unwrap(), b"corrected");
+    }
+
+    #[tokio::test]
+    async fn identical_source_and_destination_are_detected() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("song.mp3");
+        tokio::fs::write(&source, b"audio").await.unwrap();
+        assert!(
+            paths_resolve_to_same_target(&source, &source)
+                .await
+                .unwrap()
         );
     }
 }

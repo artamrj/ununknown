@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
 import type { Candidate, Setup, Track, TrackPage, Workflow } from "@/api/types";
 
-const emptySetup: Setup = { input_dir: "", output_dir: "", sources: {} };
+const emptySetup: Setup = { input_dir: "", output_dir: "", delete_source_after_write: false, sources: {} };
 const busyPhases = new Set(["scan", "fetch", "apply"]);
 
 export function App() {
@@ -49,6 +49,7 @@ export function App() {
         body: JSON.stringify({
           input_dir: setup.input_dir,
           output_dir: setup.output_dir,
+          delete_source_after_write: setup.delete_source_after_write,
           acoustid_key: keys.acoustid || undefined,
           discogs_token: keys.discogs || undefined,
           lastfm_key: keys.lastfm || undefined,
@@ -82,8 +83,12 @@ export function App() {
   };
 
   const write = async () => {
-    if (!confirm("Write corrected copies with metadata, cover art, ReplayGain, and “Artist - Title” filenames?")) return;
+    const message = setup.delete_source_after_write
+      ? "Write corrected files, then permanently remove each original input file after its output succeeds?"
+      : "Write corrected copies with metadata, cover art, ReplayGain, and “Artist - Title” filenames?";
+    if (!confirm(message)) return;
     try {
+      await saveSetup();
       await api("/write", { method: "POST", body: "{}" });
       await refresh();
     } catch (reason) {
@@ -121,6 +126,10 @@ export function App() {
         <label>
           Corrected copies
           <input value={setup.output_dir} onChange={(event) => setSetup({ ...setup, output_dir: event.target.value })} placeholder="/Users/me/Music/fixed" />
+        </label>
+        <label className={`delete-source-option ${setup.delete_source_after_write ? "enabled" : ""}`}>
+          <input type="checkbox" checked={setup.delete_source_after_write} onChange={(event) => setSetup({ ...setup, delete_source_after_write: event.target.checked })} />
+          <span>Remove input after successful output<small>Off by default. Originals are deleted only after their corrected file is safely written.</small></span>
         </label>
         <div className="source-status">
           <span>Active catalogs: Apple Music, Deezer, MusicBrainz, Wikidata</span>
@@ -161,7 +170,7 @@ export function App() {
             <div><h2>{review.length ? `${review.length} need your help` : "Everything is identified"}</h2><p>{ready.length} tracks are ready to write.</p></div>
             <div className="write-action">
               <button className="primary" disabled={!ready.length} onClick={write}>Write {ready.length} corrected files</button>
-              {ready.length > 0 && <small>Includes ReplayGain track gain + peak</small>}
+              {ready.length > 0 && <small>{setup.delete_source_after_write ? "Successful inputs will be removed" : "Includes ReplayGain track gain + peak"}</small>}
             </div>
           </div>
           {review.map((track) => <ReviewTrack key={track.id} track={track} onChoose={choose} onSaved={loadTracks} />)}
