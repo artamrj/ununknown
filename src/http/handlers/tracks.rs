@@ -89,8 +89,9 @@ pub async fn update_artwork(
     Json(value): Json<ArtworkEdit>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let supplied = value.cover_url.trim();
-    let parsed = reqwest::Url::parse(supplied)
-        .map_err(|_| ApiError::validation("Enter a valid HTTPS image or Spotify track URL"))?;
+    let parsed = reqwest::Url::parse(supplied).map_err(|_| {
+        ApiError::validation("Enter a valid HTTPS image, Spotify, or SoundCloud track URL")
+    })?;
     if parsed.scheme() != "https" {
         return Err(ApiError::validation("Cover URLs must use HTTPS"));
     }
@@ -110,6 +111,12 @@ pub async fn update_artwork(
             .as_str()
             .map(upgrade_spotify_image)
             .ok_or_else(|| ApiError::validation("Spotify did not return cover artwork"))?
+    } else if is_soundcloud_host(parsed.host_str()) {
+        crate::infrastructure::providers::soundcloud::lookup_url(&s.client, supplied)
+            .await
+            .map_err(|error| ApiError::validation(format!("SoundCloud link failed: {error:#}")))?
+            .cover_url
+            .ok_or_else(|| ApiError::validation("SoundCloud did not return cover artwork"))?
     } else {
         supplied.to_owned()
     };
@@ -173,11 +180,20 @@ pub async fn resolve_source(
     State(s): State<Arc<AppState>>,
     Json(value): Json<SourceLookupRequest>,
 ) -> ApiResult<Json<Candidate>> {
-    let candidate =
-        crate::infrastructure::providers::youtube::lookup_url(&s.client, value.url.trim())
-            .await
-            .map_err(|error| ApiError::validation(format!("Source lookup failed: {error:#}")))?;
+    let url = value.url.trim();
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|_| ApiError::validation("Enter a valid YouTube or SoundCloud URL"))?;
+    let candidate = if is_soundcloud_host(parsed.host_str()) {
+        crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
+    } else {
+        crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
+    }
+    .map_err(|error| ApiError::validation(format!("Source lookup failed: {error:#}")))?;
     Ok(Json(candidate))
+}
+
+fn is_soundcloud_host(host: Option<&str>) -> bool {
+    matches!(host, Some("soundcloud.com" | "www.soundcloud.com"))
 }
 
 fn upgrade_spotify_image(url: &str) -> String {

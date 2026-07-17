@@ -188,6 +188,8 @@ pub struct SetupRequest {
     audd_token: Option<String>,
     spotify_client_id: Option<String>,
     spotify_client_secret: Option<String>,
+    soundcloud_client_id: Option<String>,
+    soundcloud_client_secret: Option<String>,
     youtube_api_key: Option<String>,
     discogs_token: Option<String>,
     lastfm_key: Option<String>,

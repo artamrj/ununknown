@@ -84,6 +84,7 @@ pub struct AppState {
     pub artwork_downloads: RwLock<Arc<Semaphore>>,
     pub tag_writes: RwLock<Arc<Semaphore>>,
     pub spotify_auth: crate::infrastructure::providers::spotify::SpotifyAuth,
+    pub soundcloud_auth: crate::infrastructure::providers::soundcloud::SoundCloudAuth,
     pub workflow: RwLock<Workflow>,
 }
 
@@ -102,6 +103,8 @@ impl AppState {
             artwork_downloads: RwLock::new(Arc::new(Semaphore::new(lookup_workers))),
             tag_writes: RwLock::new(Arc::new(Semaphore::new(write_workers))),
             spotify_auth: crate::infrastructure::providers::spotify::SpotifyAuth::default(),
+            soundcloud_auth: crate::infrastructure::providers::soundcloud::SoundCloudAuth::default(
+            ),
             workflow: RwLock::new(Workflow {
                 message: "Ready".into(),
                 ..Default::default()

@@ -49,7 +49,7 @@ pub fn normalize_featured(artist: &str, title: &str) -> Credits {
 
 fn feature_clause(title: &str) -> Option<(usize, usize, &str)> {
     let lower = title.to_ascii_lowercase();
-    for marker in ["(feat. ", "(ft. ", "(featuring "] {
+    for marker in ["(feat. ", "(feat ", "(ft. ", "(ft ", "(featuring "] {
         if let Some(start) = lower.find(marker)
             && let Some(relative_close) = title[start + marker.len()..].find(')')
         {

@@ -698,6 +698,11 @@ async fn identify(
             .collect::<Vec<_>>();
         out.extend(query_spotify(state, limits, cfg, current, filename, &isrcs).await);
     }
+    if !cfg.soundcloud_client_id.trim().is_empty()
+        && !cfg.soundcloud_client_secret.trim().is_empty()
+    {
+        out.extend(query_soundcloud(state, limits, cfg, current, filename).await);
+    }
     out.extend(query_discogs(state, cfg, limits, current, filename).await);
     out.extend(query_lastfm(state, cfg, limits, current, filename).await);
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
@@ -907,6 +912,48 @@ async fn query_spotify(
         }
         Err(error) => {
             handle_provider_error(state, limits, filename, "spotify", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn query_soundcloud(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "soundcloud").await {
+        return Vec::new();
+    }
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let started = Instant::now();
+    match providers::soundcloud::search(
+        &state.client,
+        &state.soundcloud_auth,
+        &cfg.soundcloud_client_id,
+        &cfg.soundcloud_client_secret,
+        title,
+        current.artist.as_deref(),
+    )
+    .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "soundcloud_track_search");
+            }
+            log_provider_count(state, filename, "soundcloud", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "soundcloud", error).await;
             Vec::new()
         }
     }
@@ -1462,6 +1509,7 @@ fn artwork_provider_priority(provider: &str) -> u8 {
     match provider {
         "itunes" | "spotify" => 8,
         "musicbrainz" => 7,
+        "soundcloud" => 6,
         "deezer" => 5,
         "discogs" => 4,
         "audd" | "theaudiodb" => 3,
@@ -1938,6 +1986,7 @@ fn provider_display_name(provider: &str) -> &str {
         "audd" => "AudD",
         "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
+        "soundcloud" => "SoundCloud",
         "spotify" => "Spotify",
         "theaudiodb" => "TheAudioDB",
         "wikidata" => "Wikidata",
@@ -1952,6 +2001,7 @@ fn provider_reason(provider: &str) -> &str {
         "deezer" => "International track, album, ISRC, duration, and cover metadata",
         "audd" => "Audio recognition with ISRC and linked catalog metadata",
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
+        "soundcloud" => "Creator-uploaded title, artist, genre, date, duration, and artwork",
         "spotify" => "ISRC, release, track position, duration, and cover metadata",
         "theaudiodb" => "Track, album, genre, and image enrichment",
         "wikidata" => "Structured identifier and external-link evidence",
