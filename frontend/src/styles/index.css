@@ -64,6 +64,7 @@ label i { color: #226b47; font-size: 11px; }
 .genre { color: #226b47; font-size: 11px; font-style: normal; font-weight: 800; }
 .genre.uncertain { color: #84631b; }
 .manual { margin-top: 15px; padding-top: 15px; border-top: 1px solid #edf0ed; }
+.manual .source-url { grid-column: 1 / -1; }
 .manual .primary { align-self: end; }
 .ready-list { margin-top: 20px; padding: 18px 20px; border: 1px solid #dfe4df; border-radius: 14px; background: white; }
 .track { display: grid; grid-template-columns: 48px minmax(180px, 1fr) minmax(180px, 1fr) minmax(100px, .5fr); gap: 12px; align-items: center; padding: 11px 0; border-top: 1px solid #edf0ed; font-size: 13px; }

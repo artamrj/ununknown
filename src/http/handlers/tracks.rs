@@ -129,6 +129,17 @@ pub async fn update_artwork(
     Ok(Json(serde_json::json!({"cover_url": cover_url})))
 }
 
+pub async fn resolve_source(
+    State(s): State<Arc<AppState>>,
+    Json(value): Json<SourceLookupRequest>,
+) -> ApiResult<Json<Candidate>> {
+    let candidate =
+        crate::infrastructure::providers::youtube::lookup_url(&s.client, value.url.trim())
+            .await
+            .map_err(|error| ApiError::validation(format!("Source lookup failed: {error:#}")))?;
+    Ok(Json(candidate))
+}
+
 fn upgrade_spotify_image(url: &str) -> String {
     url.replace("ab67616d00001e02", "ab67616d0000b273")
         .replace("ab67616d00004851", "ab67616d0000b273")

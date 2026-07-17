@@ -6,6 +6,57 @@ use reqwest::Client;
 use serde_json::Value;
 use sqlx::SqlitePool;
 
+pub async fn lookup_url(client: &Client, url: &str) -> Result<Candidate> {
+    let parsed = reqwest::Url::parse(url)?;
+    let host = parsed.host_str().unwrap_or_default();
+    if !matches!(
+        host,
+        "youtube.com" | "www.youtube.com" | "youtu.be" | "m.youtube.com"
+    ) {
+        bail!("only YouTube source links are supported");
+    }
+    let raw = client
+        .get("https://www.youtube.com/oembed")
+        .query(&[("url", url), ("format", "json")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    candidate_from_oembed(&raw).ok_or_else(|| anyhow::anyhow!("YouTube returned no title"))
+}
+
+fn candidate_from_oembed(raw: &Value) -> Option<Candidate> {
+    let cleaned = clean_video_title(raw["title"].as_str()?);
+    let (artist, title) = split_artist_title(&cleaned).unwrap_or_else(|| {
+        (
+            raw["author_name"]
+                .as_str()
+                .unwrap_or("Unknown YouTube Artist")
+                .to_owned(),
+            cleaned,
+        )
+    });
+    let (artist, title) = move_feature_credit(artist, title);
+    Some(Candidate {
+        provider: "youtube".into(),
+        title,
+        artist,
+        cover_url: raw["thumbnail_url"].as_str().map(str::to_owned),
+        score: 92.0,
+        score_breakdown: Some(
+            serde_json::json!({
+                "source": "youtube_user_source_url",
+                "sources": ["YouTube"],
+                "user_verified_source": true
+            })
+            .to_string(),
+        ),
+        raw_json: raw.to_string(),
+        ..Default::default()
+    })
+}
+
 pub async fn lookup_filename_id(
     pool: &SqlitePool,
     client: &Client,
@@ -72,6 +123,7 @@ fn parse_video(raw: &Value) -> Option<Candidate> {
             .to_owned();
         (channel, cleaned.clone())
     });
+    let (artist, title) = move_feature_credit(artist, title);
     let published = video["snippet"]["publishedAt"].as_str();
     let cover_url = ["maxres", "standard", "high", "medium", "default"]
         .into_iter()
@@ -111,6 +163,9 @@ fn clean_video_title(value: &str) -> String {
         " (lyrics)",
         " [lyrics]",
         " (lyric video)",
+        " | official music video",
+        " | official video",
+        " | official audio",
     ] {
         if lower.ends_with(marker) {
             value.truncate(value.len() - marker.len());
@@ -118,6 +173,24 @@ fn clean_video_title(value: &str) -> String {
         }
     }
     value.trim().to_owned()
+}
+
+fn move_feature_credit(artist: String, title: String) -> (String, String) {
+    let lower = title.to_ascii_lowercase();
+    for marker in [" (feat. ", " (ft. ", " (featuring "] {
+        if let Some(index) = lower.find(marker)
+            && title.ends_with(')')
+        {
+            let featured = title[index + marker.len()..title.len() - 1].trim();
+            if !featured.is_empty() {
+                return (
+                    format!("{} & {featured}", artist.trim()),
+                    title[..index].trim().to_owned(),
+                );
+            }
+        }
+    }
+    (artist, title)
 }
 
 fn split_artist_title(value: &str) -> Option<(String, String)> {
@@ -178,5 +251,17 @@ mod tests {
         assert_eq!(candidate.title, "Song");
         assert_eq!(candidate.duration_delta, Some(201.0));
         assert_eq!(candidate.year.as_deref(), Some("2020"));
+    }
+
+    #[test]
+    fn oembed_moves_featured_artist_into_full_credit() {
+        let candidate = candidate_from_oembed(&serde_json::json!({
+            "title": "Arta - Mi Amor (feat. Saaren) | OFFICIAL MUSIC VIDEO",
+            "author_name": "ARTA", "thumbnail_url": "cover"
+        }))
+        .unwrap();
+        assert_eq!(candidate.title, "Mi Amor");
+        assert_eq!(candidate.artist, "Arta & Saaren");
+        assert_eq!(candidate.cover_url.as_deref(), Some("cover"));
     }
 }

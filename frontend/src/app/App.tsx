@@ -212,11 +212,16 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
 
 function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise<void> }) {
   const [form, setForm] = useState<Record<string, string | number>>({ title: track.current_title || "", artist: track.current_artist || "", album: track.current_album || "", album_artist: track.current_album_artist || "", track_number: track.current_track_number || "", year: "", genre: "", cover_url: "" });
+  const [sourceUrl, setSourceUrl] = useState("");
+  const resolveSource = async () => {
+    const found = await api<Candidate>("/source/resolve", { method: "POST", body: JSON.stringify({ url: sourceUrl }) });
+    setForm({ ...form, title: found.title || form.title, artist: found.artist || form.artist, cover_url: found.cover_url || form.cover_url });
+  };
   const save = async () => {
     await api(`/tracks/${track.id}/manual`, { method: "PUT", body: JSON.stringify({ ...form, track_number: form.track_number ? Number(form.track_number) : null }) });
     await onSaved();
   };
-  return <div className="manual">{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
+  return <div className="manual"><label className="source-url">YouTube source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" /></label><button className="secondary" disabled={!sourceUrl.trim()} onClick={resolveSource}>Use source title and performers</button>{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
 }
 
 function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
