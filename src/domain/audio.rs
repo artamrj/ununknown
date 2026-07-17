@@ -56,6 +56,17 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
 }
 
 fn clean_search_tags(info: &mut AudioInfo) {
+    let bilingual = info.album.as_deref().and_then(|album| {
+        let (_, english) = album.split_once('|')?;
+        let (artist, title) = english.trim().split_once(" - ")?;
+        (!artist.trim().is_empty() && !title.trim().is_empty())
+            .then(|| (artist.trim().to_owned(), title.trim().to_owned()))
+    });
+    if let Some((artist, title)) = bilingual {
+        info.artist = Some(artist);
+        info.title = Some(title);
+        info.album = None;
+    }
     let suspicious_artist = info
         .artist
         .as_deref()
@@ -68,6 +79,24 @@ fn clean_search_tags(info: &mut AudioInfo) {
     if suspicious_artist && let Some((title, artist)) = parsed {
         info.title = Some(title);
         info.artist = Some(artist);
+    }
+    let wide_space_parts = info.title.as_deref().and_then(|value| {
+        let (title, artist) = value.rsplit_once("   ")?;
+        (!title.trim().is_empty() && !artist.trim().is_empty())
+            .then(|| (title.trim().to_owned(), artist.trim().to_owned()))
+    });
+    if info.artist.as_deref().is_none_or(str::is_empty)
+        && let Some((title, artist)) = wide_space_parts
+    {
+        info.title = Some(title);
+        info.artist = Some(artist);
+    }
+    if let Some(artist) = info.artist.as_mut() {
+        *artist = artist
+            .trim()
+            .trim_matches(|ch: char| matches!(ch, ',' | '،' | ';' | '؛'))
+            .trim()
+            .to_owned();
     }
 }
 
@@ -95,5 +124,30 @@ mod tests {
         clean_search_tags(&mut info);
         assert_eq!(info.title.as_deref(), Some("Колыбельная"));
         assert_eq!(info.artist.as_deref(), Some("Jah Khalib"));
+    }
+
+    #[test]
+    fn extracts_artist_after_wide_space_separator() {
+        let mut info = AudioInfo {
+            title: Some("Season 3 Netflix Trailer)   X-Ray Dog".into()),
+            ..Default::default()
+        };
+        clean_search_tags(&mut info);
+        assert_eq!(info.title.as_deref(), Some("Season 3 Netflix Trailer)"));
+        assert_eq!(info.artist.as_deref(), Some("X-Ray Dog"));
+    }
+
+    #[test]
+    fn cleans_bilingual_scraper_tags() {
+        let mut info = AudioInfo {
+            title: Some("محمدرضا علیمردانی - موزیک ویدیو".into()),
+            artist: Some("Mohammadreza Alimardani - Joker".into()),
+            album: Some("محمدرضا علیمردانی - موزیک ویدیو | Mohammadreza Alimardani - Joker".into()),
+            ..Default::default()
+        };
+        clean_search_tags(&mut info);
+        assert_eq!(info.title.as_deref(), Some("Joker"));
+        assert_eq!(info.artist.as_deref(), Some("Mohammadreza Alimardani"));
+        assert_eq!(info.album, None);
     }
 }

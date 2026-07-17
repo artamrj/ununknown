@@ -92,6 +92,50 @@ pub async fn search(
         .collect())
 }
 
+pub async fn artist_aliases(
+    pool: &SqlitePool,
+    client: &Client,
+    user_agent: &str,
+    artist: &str,
+) -> Result<Vec<String>> {
+    validate_user_agent(user_agent)?;
+    let query = format!("artist:\"{artist}\"");
+    let key = format!("artist-aliases:{}", search_key(&query));
+    let raw = if let Some(value) = ProviderCache::get(pool, "musicbrainz", &key).await? {
+        value
+    } else {
+        let value = request_json(
+            client
+                .get("https://musicbrainz.org/ws/2/artist")
+                .query(&[("fmt", "json"), ("limit", "3"), ("query", &query)])
+                .header("User-Agent", user_agent),
+        )
+        .await?;
+        ProviderCache::put(
+            pool,
+            "musicbrainz",
+            &key,
+            &value,
+            Utc::now() + ChronoDuration::days(30),
+        )
+        .await?;
+        value
+    };
+    let mut aliases = raw["artists"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|artist| artist["aliases"].as_array().into_iter().flatten())
+        .filter_map(|alias| alias["name"].as_str())
+        .filter(|alias| alias.is_ascii() && !alias.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    aliases.sort_by_key(|alias| alias.len());
+    aliases.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    aliases.truncate(3);
+    Ok(aliases)
+}
+
 fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     let release = best_recording_release(raw, id);
     let release_group = release.and_then(|v| v.get("release-group"));

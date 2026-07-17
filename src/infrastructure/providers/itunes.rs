@@ -17,10 +17,29 @@ pub async fn search(
         .filter(|value| !value.trim().is_empty())
         .map(|artist| format!("{artist} {title}"))
         .unwrap_or_else(|| title.to_owned());
-    let mut terms = vec![base_term.clone()];
+    let mut terms = vec![base_term.clone(), title.to_owned()];
+    if let Some(short_artist) = artist.and_then(|value| value.split_once(" - ").map(|pair| pair.0))
+    {
+        terms.push(format!("{short_artist} {title}"));
+    }
     if let Some(album) = album.filter(|value| !value.trim().is_empty()) {
         terms.push(format!("{base_term} {album}"));
+        for segment in album
+            .split('|')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            terms.push(segment.to_owned());
+            if let Some(short_artist) =
+                artist.and_then(|value| value.split_once(" - ").map(|pair| pair.0))
+            {
+                terms.push(format!("{short_artist} {segment}"));
+            }
+        }
     }
+    terms.sort();
+    terms.dedup();
+    terms.retain(|term| !term.trim().is_empty());
     let mut out = Vec::new();
     for term in terms {
         out.extend(search_term(pool, client, &term).await?);

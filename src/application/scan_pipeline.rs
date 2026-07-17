@@ -427,8 +427,10 @@ async fn process(
         .await;
     let Some(best) = candidates.first() else {
         state.increment_unmatched().await;
-        let fingerprint_note = if fp.is_empty() || cfg.acoustid_key.is_empty() {
-            " Fingerprint matching is unavailable; install fpcalc and configure an AcoustID key for difficult tracks."
+        let fingerprint_note = if fp.is_empty() {
+            " Fingerprint creation failed; install Chromaprint (fpcalc) to identify difficult tracks."
+        } else if cfg.acoustid_key.is_empty() {
+            " A fingerprint was created, but online fingerprint lookup needs an AcoustID API key."
         } else {
             ""
         };
@@ -451,7 +453,7 @@ async fn process(
             ));
     if !auto_select {
         state.increment_unmatched().await;
-        let message = if best.score >= 70.0 {
+        let message = if best.score >= 40.0 {
             let mut source_names = candidates
                 .iter()
                 .flat_map(candidate_source_list)
@@ -460,11 +462,31 @@ async fn process(
                 .collect::<Vec<_>>();
             source_names.sort();
             let sources = source_names.join(", ");
+            let title_match = info
+                .title
+                .as_deref()
+                .is_some_and(|title| title_similarity(title, &best.title) >= 0.94);
+            let artist_match = info
+                .artist
+                .as_deref()
+                .is_some_and(|artist| artist_similarity(artist, &best.artist) >= 0.75);
             match (
                 candidates.len(),
                 info.album.as_deref(),
                 best.album.as_deref(),
             ) {
+                _ if title_match
+                    && artist_match
+                    && best.duration_delta.is_some_and(|delta| delta > 15.0) =>
+                {
+                    format!(
+                        "Found matching catalog metadata, but this audio is {:.0} seconds longer or shorter; it may be a music-video, live, or edited version. Review before applying it.",
+                        best.duration_delta.unwrap_or_default()
+                    )
+                }
+                _ if title_match && !artist_match => format!(
+                    "Found this title in {sources}, but only by different performers; keep the current artist or enter this performance manually."
+                ),
                 (1, Some(existing), Some(found)) if text_similarity(existing, found) < 0.65 => {
                     format!(
                         "Found one close match from {sources}, but its album “{found}” conflicts with the existing album “{existing}”; review before applying it."
@@ -478,7 +500,7 @@ async fn process(
         } else {
             "No candidate met strict matching rules; counted as unmatched".to_owned()
         };
-        if best.score >= 70.0 {
+        if best.score >= 40.0 {
             persist_review(&state.pool, path, &info, &candidates, &message).await?;
         } else {
             persist_unmatched(&state.pool, path, &info, &message).await?;
@@ -545,7 +567,7 @@ async fn identify(
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
     }
-    match query_itunes(state, current, filename).await {
+    match query_itunes(state, cfg, current, filename).await {
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
     }
@@ -599,6 +621,7 @@ fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
 
 async fn query_itunes(
     state: &Arc<AppState>,
+    cfg: &crate::config::Config,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
@@ -620,6 +643,34 @@ async fn query_itunes(
     .await?;
     for candidate in &mut candidates {
         score_text_candidate(candidate, current, "itunes_catalog_search")?;
+    }
+    let needs_alias_search = current
+        .artist
+        .as_deref()
+        .is_some_and(|artist| !artist.is_ascii())
+        && candidates.iter().all(|candidate| candidate.score < 70.0);
+    if needs_alias_search && let Some(artist) = current.artist.as_deref() {
+        let aliases = providers::musicbrainz::artist_aliases(
+            &state.pool,
+            &state.client,
+            &cfg.musicbrainz_user_agent,
+            artist,
+        )
+        .await
+        .unwrap_or_default();
+        for alias in aliases {
+            let mut alias_info = current.clone();
+            alias_info.artist = Some(alias.clone());
+            let Ok(mut alias_candidates) =
+                providers::itunes::search(&state.pool, &state.client, "", Some(&alias), None).await
+            else {
+                continue;
+            };
+            for candidate in &mut alias_candidates {
+                score_text_candidate(candidate, &alias_info, "itunes_artist_alias_search")?;
+            }
+            candidates.extend(alias_candidates);
+        }
     }
     log_provider_count(state, filename, "itunes", candidates.len(), started).await;
     Ok(candidates)
@@ -875,6 +926,7 @@ fn score_text_candidate(
     current: &audio::AudioInfo,
     source: &str,
 ) -> Result<()> {
+    preserve_album_context_for_catalog_single(candidate, current);
     let title = current
         .title
         .as_deref()
@@ -883,7 +935,7 @@ fn score_text_candidate(
     let artist = current
         .artist
         .as_deref()
-        .map(|value| text_similarity(value, &candidate.artist))
+        .map(|value| artist_similarity(value, &candidate.artist))
         .unwrap_or_default();
     let album_context = match (current.album.as_deref(), candidate.album.as_deref()) {
         (Some(left), Some(right)) => text_similarity(left, right),
@@ -898,8 +950,23 @@ fn score_text_candidate(
         "musicbrainz" => 82.0,
         _ => 78.0,
     };
-    let score = ((0.35 * title) + (0.25 * artist) + (0.25 * album_context) + (0.15 * duration))
-        .clamp(0.0, 1.0)
+    let has_album_context = current
+        .album
+        .as_deref()
+        .is_some_and(|album| !album.trim().is_empty() && !album.trim().starts_with('@'))
+        && candidate.album.is_some();
+    let score = if has_album_context {
+        (0.35 * title) + (0.25 * artist) + (0.25 * album_context) + (0.15 * duration)
+    } else if current
+        .artist
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        (0.45 * title) + (0.35 * artist) + (0.20 * duration)
+    } else {
+        (0.75 * title) + (0.25 * duration)
+    }
+    .clamp(0.0, 1.0)
         * 100.0;
     candidate.score = score.min(provider_cap);
     let mut value = serde_json::json!({
@@ -918,11 +985,47 @@ fn score_text_candidate(
     Ok(())
 }
 
+fn preserve_album_context_for_catalog_single(
+    candidate: &mut providers::Candidate,
+    current: &audio::AudioInfo,
+) {
+    let Some(current_album) = current
+        .album
+        .as_deref()
+        .filter(|album| !album.trim().is_empty() && !album.trim().starts_with('@'))
+    else {
+        return;
+    };
+    let is_catalog_single = candidate
+        .album
+        .as_deref()
+        .is_some_and(|album| album.to_lowercase().contains("single"));
+    let album_track = current.track_number.is_some_and(|number| number > 1);
+    let duration_close = candidate
+        .duration_delta
+        .is_some_and(|duration| (current.duration - duration).abs() <= 5.0);
+    let text_exact = current
+        .title
+        .as_deref()
+        .is_some_and(|title| title_similarity(title, &candidate.title) >= 0.94)
+        && current
+            .artist
+            .as_deref()
+            .is_some_and(|artist| artist_similarity(artist, &candidate.artist) >= 0.90);
+    if is_catalog_single && album_track && duration_close && text_exact {
+        candidate.album = Some(current_album.to_owned());
+        candidate.track_number = current.track_number.map(i64::from);
+        candidate.track_total = None;
+        candidate.release_id = None;
+    }
+}
+
 fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()> {
     let snapshot = candidates.to_vec();
     for candidate in candidates {
         let mut sources = candidate_source_list(candidate);
         let mut agreeing_providers = HashSet::new();
+        let mut disagreeing_providers = HashSet::new();
         for other in &snapshot {
             if other.provider == candidate.provider {
                 continue;
@@ -939,6 +1042,7 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
                 }
             } else if text_close(&candidate.title, &other.title, 0.55)
                 && !text_close(&candidate.artist, &other.artist, 0.55)
+                && disagreeing_providers.insert(other.provider.as_str())
             {
                 candidate.score = (candidate.score - 4.0).max(0.0);
             }
@@ -956,7 +1060,6 @@ fn dedupe_candidates(candidates: &mut Vec<providers::Candidate>) {
             normalize_match_key(&candidate.title),
             normalize_match_key(&candidate.artist),
             normalize_match_key(candidate.album.as_deref().unwrap_or_default()),
-            normalize_match_key(candidate.release_id.as_deref().unwrap_or_default()),
         ]
         .join("|");
         seen.insert(key)
@@ -990,7 +1093,7 @@ fn unique_exact_catalog_match(
     current: &audio::AudioInfo,
 ) -> bool {
     if !matches!(best.provider.as_str(), "itunes" | "musicbrainz")
-        || best.duration_delta.is_none_or(|delta| delta > 3.0)
+        || best.duration_delta.is_none_or(|delta| delta > 5.0)
     {
         return false;
     }
@@ -1000,30 +1103,34 @@ fn unique_exact_catalog_match(
     let Some(artist) = current.artist.as_deref() else {
         return false;
     };
-    if title_similarity(title, &best.title) < 0.94 || !text_close(artist, &best.artist, 0.96) {
+    if title_similarity(title, &best.title) < 0.94 || artist_similarity(artist, &best.artist) < 0.90
+    {
         return false;
     }
     let current_album = current
         .album
         .as_deref()
         .filter(|album| !album.trim().is_empty() && !album.trim().starts_with('@'));
-    if let Some(album) = current_album
-        && best
-            .album
-            .as_deref()
-            .is_none_or(|candidate_album| text_similarity(album, candidate_album) < 0.65)
-    {
+    let best_album_similarity = current_album
+        .zip(best.album.as_deref())
+        .map(|(album, candidate_album)| text_similarity(album, candidate_album));
+    if best_album_similarity.is_some_and(|similarity| similarity < 0.65) {
         return false;
     }
+    let required_album_similarity = if best_album_similarity.is_some_and(|value| value >= 0.90) {
+        0.90
+    } else {
+        0.65
+    };
     candidates
         .iter()
         .filter(|candidate| {
             title_similarity(title, &candidate.title) >= 0.94
-                && text_close(artist, &candidate.artist, 0.96)
-                && candidate.duration_delta.is_some_and(|delta| delta <= 3.0)
+                && artist_similarity(artist, &candidate.artist) >= 0.90
+                && candidate.duration_delta.is_some_and(|delta| delta <= 5.0)
                 && current_album.is_none_or(|album| {
                     candidate.album.as_deref().is_some_and(|candidate_album| {
-                        text_similarity(album, candidate_album) >= 0.65
+                        text_similarity(album, candidate_album) >= required_album_similarity
                     })
                 })
         })
@@ -1036,13 +1143,43 @@ fn unique_exact_catalog_match(
 fn title_similarity(left: &str, right: &str) -> f64 {
     let left_key = normalize_match_key(left);
     let right_key = normalize_match_key(right);
-    if left_key.len().min(right_key.len()) >= 8
-        && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key))
+    let left_words = normalized_words(left);
+    let right_words = normalized_words(right);
+    let (shorter_words, longer_words) = if left_words.len() <= right_words.len() {
+        (&left_words, &right_words)
+    } else {
+        (&right_words, &left_words)
+    };
+    if (left_key.len().min(right_key.len()) >= 4
+        && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key)))
+        || (shorter_words.len() >= 3
+            && shorter_words.iter().all(|word| longer_words.contains(word)))
     {
         0.96
     } else {
         text_similarity(left, right)
     }
+}
+
+fn artist_similarity(left: &str, right: &str) -> f64 {
+    let direct = text_similarity(left, right);
+    let left_key = normalize_match_key(left);
+    let right_key = normalize_match_key(right);
+    if left_key.len().min(right_key.len()) >= 5
+        && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key))
+    {
+        direct.max(0.92)
+    } else {
+        direct
+    }
+}
+
+fn normalized_words(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 fn text_similarity(left: &str, right: &str) -> f64 {
@@ -1881,5 +2018,33 @@ mod tests {
             &candidates,
             &info
         ));
+    }
+
+    #[test]
+    fn exact_single_keeps_known_album_track_context() {
+        let info = audio::AudioInfo {
+            title: Some("Khaar".into()),
+            artist: Some("Amir Tataloo".into()),
+            album: Some("Barzakh".into()),
+            track_number: Some(11),
+            duration: 427.102,
+            ..Default::default()
+        };
+        let mut candidate = providers::Candidate {
+            provider: "itunes".into(),
+            title: "Khaar".into(),
+            artist: "Amir Tataloo".into(),
+            album: Some("Khaar - Single".into()),
+            track_number: Some(1),
+            track_total: Some(1),
+            duration_delta: Some(427.076),
+            release_id: Some("single-release".into()),
+            ..Default::default()
+        };
+        preserve_album_context_for_catalog_single(&mut candidate, &info);
+        assert_eq!(candidate.album.as_deref(), Some("Barzakh"));
+        assert_eq!(candidate.track_number, Some(11));
+        assert_eq!(candidate.track_total, None);
+        assert_eq!(candidate.release_id, None);
     }
 }
