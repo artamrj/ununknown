@@ -46,9 +46,8 @@ fields keep a source disabled.
 - **Spotify** verifies identified tracks by ISRC and contributes release, artwork,
   track number, and date metadata. Create an app at
   <https://developer.spotify.com/dashboard> and enter its client ID and secret.
-- **Genius** contributes song identity, artist credits, album, release date, and
-  song artwork. Create an API client at <https://genius.com/api-clients> and enter
-  its client access token. Pasted Genius song links can also fill the manual editor.
+- **Genius** contributes song identity, artist credits, album, release date, genre,
+  and artwork without a key. Pasted Genius song links can fill the manual editor.
 - **YouTube Data API** recovers evidence from filenames that contain an exact
   YouTube video ID, which is common for downloaded Persian and international
   music. Enable YouTube Data API v3 and create a key in

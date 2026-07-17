@@ -61,7 +61,6 @@ export function App() {
           youtube_api_key: keys.youtube || undefined,
           discogs_token: keys.discogs || undefined,
           lastfm_key: keys.lastfm || undefined,
-          genius_access_token: keys.genius || undefined,
           theaudiodb_key: keys.theaudiodb || undefined,
         }),
       });
@@ -173,7 +172,7 @@ export function App() {
           {setup.sources.youtube && <small className="recognition-active">Exact YouTube video-ID recovery is active for downloaded filenames.</small>}
           {setup.sources.soundcloud && <small className="recognition-active">SoundCloud track-link metadata and cover lookup is active without a key.</small>}
           {setup.sources.radiojavan && <small className="recognition-active">Radio Javan metadata search, song-link lookup, and original cover art are active without a key.</small>}
-          {setup.sources.genius && <small className="recognition-active">Genius metadata search, song-link lookup, and song artwork are active.</small>}
+          {setup.sources.genius && <small className="recognition-active">Genius metadata search, song-link lookup, and album artwork are active without a key.</small>}
           {setup.sources.ffmpeg
             ? <small className="replaygain-active">ReplayGain is active. Track loudness and peak are added when corrected files are written.</small>
             : <small>Install FFmpeg to add ReplayGain loudness metadata. Other corrections still work.</small>}
@@ -183,8 +182,8 @@ export function App() {
         </div>
         <details>
           <summary>Optional source keys</summary>
-          <p>Apple Music, Deezer, MusicBrainz, Radio Javan, Cover Art Archive, and Wikidata work without keys. Recognition services are called only when useful.</p>
-          <p className="provider-links">Create credentials: <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">AcoustID</a> · <a href="https://dashboard.audd.io/" target="_blank" rel="noreferrer">AudD</a> · <a href="https://genius.com/api-clients" target="_blank" rel="noreferrer">Genius</a> · <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify</a> · <a href="https://developers.soundcloud.com/docs/api/register-app" target="_blank" rel="noreferrer">SoundCloud</a> · <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube</a></p>
+          <p>Apple Music, Deezer, MusicBrainz, Radio Javan, Genius, Cover Art Archive, and Wikidata work without keys. Recognition services are called only when useful.</p>
+          <p className="provider-links">Create credentials: <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">AcoustID</a> · <a href="https://dashboard.audd.io/" target="_blank" rel="noreferrer">AudD</a> · <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify</a> · <a href="https://developers.soundcloud.com/docs/api/register-app" target="_blank" rel="noreferrer">SoundCloud</a> · <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube</a></p>
           <div className="key-grid">
             <Secret label="AcoustID (fingerprints)" active={setup.sources.acoustid} value={keys.acoustid} onChange={(value) => setKeys({ ...keys, acoustid: value })} />
             <Secret label="AudD token (fallback recognition)" active={setup.sources.audd} value={keys.audd} onChange={(value) => setKeys({ ...keys, audd: value })} />
@@ -195,7 +194,6 @@ export function App() {
             <Secret label="YouTube Data API key" active={setup.sources.youtube} value={keys.youtube} onChange={(value) => setKeys({ ...keys, youtube: value })} />
             <Secret label="Discogs" active={setup.sources.discogs} value={keys.discogs} onChange={(value) => setKeys({ ...keys, discogs: value })} />
             <Secret label="Last.fm" active={setup.sources.lastfm} value={keys.lastfm} onChange={(value) => setKeys({ ...keys, lastfm: value })} />
-            <Secret label="Genius client access token" active={setup.sources.genius} value={keys.genius} onChange={(value) => setKeys({ ...keys, genius: value })} />
             <Secret label="TheAudioDB" active={setup.sources.theaudiodb} value={keys.theaudiodb} onChange={(value) => setKeys({ ...keys, theaudiodb: value })} />
           </div>
         </details>
@@ -263,25 +261,36 @@ function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?:
     cover_url: candidate?.cover_url || "",
   });
   const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceFeedback, setSourceFeedback] = useState<{ error?: boolean; text: string }>();
+  const [resolvingSource, setResolvingSource] = useState(false);
   const resolveSource = async () => {
-    const found = await api<Candidate>("/source/resolve", { method: "POST", body: JSON.stringify({ url: sourceUrl }) });
-    setForm({
-      ...form,
-      title: found.title || form.title,
-      artist: found.artist || form.artist,
-      album: found.album || form.album,
-      album_artist: found.album_artist || form.album_artist,
-      track_number: found.track_number || form.track_number,
-      year: found.year || form.year,
-      genre: found.genre || form.genre,
-      cover_url: found.cover_url || form.cover_url,
-    });
+    setResolvingSource(true);
+    setSourceFeedback(undefined);
+    try {
+      const found = await api<Candidate>("/source/resolve", { method: "POST", body: JSON.stringify({ url: sourceUrl }) });
+      setForm({
+        ...form,
+        title: found.title || form.title,
+        artist: found.artist || form.artist,
+        album: found.album || form.album,
+        album_artist: found.album_artist || form.album_artist,
+        track_number: found.track_number || form.track_number,
+        year: found.year || form.year,
+        genre: found.genre || form.genre,
+        cover_url: found.cover_url || form.cover_url,
+      });
+      setSourceFeedback({ text: `Loaded ${found.artist || "artist"} — ${found.title || "track"}, metadata, and cover.` });
+    } catch (reason) {
+      setSourceFeedback({ error: true, text: (reason as Error).message });
+    } finally {
+      setResolvingSource(false);
+    }
   };
   const save = async () => {
     await api(`/tracks/${track.id}/manual`, { method: "PUT", body: JSON.stringify({ ...form, track_number: form.track_number ? Number(form.track_number) : null }) });
     await onSaved();
   };
-  return <div className="manual"><label className="source-url">Spotify, SoundCloud, Radio Javan, Genius, or YouTube source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://genius.com/Artist-song-lyrics" /></label><button className="secondary" disabled={!sourceUrl.trim()} onClick={resolveSource}>Use source metadata and cover</button>{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
+  return <div className="manual"><label className="source-url">Spotify, SoundCloud, Radio Javan, Genius, or YouTube source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://genius.com/Artist-song-lyrics" /></label><button className="secondary" disabled={!sourceUrl.trim() || resolvingSource} onClick={resolveSource}>{resolvingSource ? "Loading source…" : "Use source metadata and cover"}</button>{sourceFeedback && <small className={`source-feedback${sourceFeedback.error ? " error" : ""}`}>{sourceFeedback.text}</small>}{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
 }
 
 function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {

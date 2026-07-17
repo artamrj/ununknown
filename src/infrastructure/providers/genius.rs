@@ -7,12 +7,13 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 
 const PROVIDER: &str = "genius";
-const API_BASE: &str = "https://api.genius.com";
+const WEB_API_BASE: &str = "https://genius.com/api";
+const BROWSER_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/138 Safari/537.36";
 
 pub async fn search(
     pool: &SqlitePool,
     client: &Client,
-    access_token: &str,
     title: &str,
     artist: Option<&str>,
 ) -> Result<Vec<Candidate>> {
@@ -20,45 +21,37 @@ pub async fn search(
     if query.is_empty() {
         return Ok(Vec::new());
     }
-    let raw = search_raw(pool, client, access_token, &query).await?;
-    let mut candidates = Vec::new();
-    for result in search_results(&raw).into_iter().take(5) {
-        let detail = match result["id"].as_i64() {
-            Some(id) => song_detail(pool, client, access_token, id).await.ok(),
-            None => None,
-        };
-        if let Some(candidate) = candidate_from_song(
-            detail
-                .as_ref()
-                .and_then(|value| {
-                    value["response"]["song"]
-                        .as_object()
-                        .map(|_| &value["response"]["song"])
-                })
-                .unwrap_or(result),
-        ) {
+    let raw = search_raw(pool, client, &query).await?;
+    let results = search_results(&raw);
+    let detail = match results.first().and_then(|result| result["id"].as_i64()) {
+        Some(id) => song_detail(pool, client, id).await.ok(),
+        None => None,
+    };
+    let mut candidates = results
+        .into_iter()
+        .take(5)
+        .filter_map(candidate_from_song)
+        .collect::<Vec<_>>();
+    if let Some(detail) = detail
+        && let Some(candidate) = candidate_from_song(&detail["response"]["song"])
+    {
+        if let Some(first) = candidates.first_mut() {
+            *first = candidate;
+        } else {
             candidates.push(candidate);
         }
     }
     Ok(candidates)
 }
 
-pub async fn lookup_url(
-    pool: &SqlitePool,
-    client: &Client,
-    access_token: &str,
-    url: &str,
-) -> Result<Candidate> {
-    if access_token.trim().is_empty() {
-        bail!("add a Genius client access token in Optional source keys first");
-    }
+pub async fn lookup_url(pool: &SqlitePool, client: &Client, url: &str) -> Result<Candidate> {
     let path = song_path(url)?;
     let query = path
         .trim_start_matches('/')
         .strip_suffix("-lyrics")
         .unwrap_or_default()
         .replace('-', " ");
-    let raw = search_raw(pool, client, access_token, &query).await?;
+    let raw = search_raw(pool, client, &query).await?;
     let result = search_results(&raw)
         .into_iter()
         .find(|result| {
@@ -71,7 +64,7 @@ pub async fn lookup_url(
     let id = result["id"]
         .as_i64()
         .ok_or_else(|| anyhow::anyhow!("Genius returned a song without an ID"))?;
-    let detail = song_detail(pool, client, access_token, id).await?;
+    let detail = song_detail(pool, client, id).await?;
     let song = &detail["response"]["song"];
     let mut candidate = candidate_from_song(song)
         .ok_or_else(|| anyhow::anyhow!("Genius returned no usable song metadata"))?;
@@ -95,20 +88,16 @@ fn search_query(title: &str, artist: Option<&str>) -> String {
     }
 }
 
-async fn search_raw(
-    pool: &SqlitePool,
-    client: &Client,
-    access_token: &str,
-    query: &str,
-) -> Result<Value> {
+async fn search_raw(pool: &SqlitePool, client: &Client, query: &str) -> Result<Value> {
     let key = search_key(query);
     if let Some(value) = ProviderCache::get(pool, PROVIDER, &key).await? {
         return Ok(value);
     }
     let value = request_json(
         client
-            .get(format!("{API_BASE}/search"))
-            .bearer_auth(access_token.trim())
+            .get(format!("{WEB_API_BASE}/search/song"))
+            .header("User-Agent", BROWSER_USER_AGENT)
+            .header("Accept", "application/json")
             .query(&[("q", query)]),
     )
     .await?;
@@ -116,21 +105,16 @@ async fn search_raw(
     Ok(value)
 }
 
-async fn song_detail(
-    pool: &SqlitePool,
-    client: &Client,
-    access_token: &str,
-    id: i64,
-) -> Result<Value> {
+async fn song_detail(pool: &SqlitePool, client: &Client, id: i64) -> Result<Value> {
     let key = format!("song:{id}");
     if let Some(value) = ProviderCache::get(pool, PROVIDER, &key).await? {
         return Ok(value);
     }
     let value = request_json(
         client
-            .get(format!("{API_BASE}/songs/{id}"))
-            .bearer_auth(access_token.trim())
-            .query(&[("text_format", "plain")]),
+            .get(format!("{WEB_API_BASE}/songs/{id}"))
+            .header("User-Agent", BROWSER_USER_AGENT)
+            .header("Accept", "application/json"),
     )
     .await?;
     ProviderCache::put(
@@ -161,6 +145,13 @@ async fn request_json(request: RequestBuilder) -> Result<Value> {
 fn search_results(raw: &Value) -> Vec<&Value> {
     raw["response"]["hits"]
         .as_array()
+        .or_else(|| {
+            raw["response"]["sections"]
+                .as_array()?
+                .iter()
+                .find(|section| section["type"].as_str() == Some("song"))?["hits"]
+                .as_array()
+        })
         .into_iter()
         .flatten()
         .filter(|hit| hit["type"].as_str().is_none_or(|kind| kind == "song"))
@@ -190,8 +181,9 @@ fn candidate_from_song(song: &Value) -> Option<Candidate> {
         release_date,
         genre: nonempty(song["primary_tag"]["name"].as_str()).map(str::to_owned),
         cover_url: nonempty(
-            song["song_art_image_url"]
+            song["album"]["cover_art_url"]
                 .as_str()
+                .or_else(|| song["song_art_image_url"].as_str())
                 .or_else(|| song["header_image_url"].as_str()),
         )
         .map(str::to_owned),
@@ -243,7 +235,10 @@ mod tests {
             "title": "Lonely Day",
             "artist_names": "System Of A Down",
             "primary_artist": {"name": "System Of A Down"},
-            "album": {"name": "Hypnotize"},
+            "album": {
+                "name": "Hypnotize",
+                "cover_art_url": "https://images.genius.com/hypnotize.png"
+            },
             "release_date_components": {"year": 2005, "month": 11, "day": 18},
             "song_art_image_url": "https://images.genius.com/lonely-day.jpg"
         })
@@ -258,7 +253,22 @@ mod tests {
         assert_eq!(candidate.album.as_deref(), Some("Hypnotize"));
         assert_eq!(candidate.release_date.as_deref(), Some("2005-11-18"));
         assert_eq!(candidate.year.as_deref(), Some("2005"));
-        assert!(candidate.cover_url.unwrap().contains("images.genius.com"));
+        assert_eq!(
+            candidate.cover_url.as_deref(),
+            Some("https://images.genius.com/hypnotize.png")
+        );
+    }
+
+    #[test]
+    fn parses_keyless_web_search_sections() {
+        let raw = serde_json::json!({
+            "response": {"sections": [
+                {"type": "song", "hits": [{"type": "song", "result": song()}]}
+            ]}
+        });
+        let results = search_results(&raw);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "Lonely Day");
     }
 
     #[test]

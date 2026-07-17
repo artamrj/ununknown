@@ -29,7 +29,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "youtube": !cfg.youtube_api_key.is_empty(),
             "discogs": !cfg.discogs_token.is_empty(),
             "lastfm": !cfg.lastfm_key.is_empty(),
-            "genius": !cfg.genius_access_token.is_empty(),
+            "genius": true,
             "theaudiodb": !cfg.theaudiodb_key.is_empty()
         }
     }))
@@ -108,12 +108,6 @@ pub async fn update_setup(
     }
     if let Some(value) = body.lastfm_key.filter(|value| !value.trim().is_empty()) {
         cfg.lastfm_key = value.trim().into();
-    }
-    if let Some(value) = body
-        .genius_access_token
-        .filter(|value| !value.trim().is_empty())
-    {
-        cfg.genius_access_token = value.trim().into();
     }
     if let Some(value) = body.theaudiodb_key.filter(|value| !value.trim().is_empty()) {
         cfg.theaudiodb_key = value.trim().into();

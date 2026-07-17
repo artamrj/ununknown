@@ -489,17 +489,11 @@ pub async fn update_artwork(
             .cover_url
             .ok_or_else(|| ApiError::validation("Radio Javan did not return cover artwork"))?
     } else if is_genius_host(parsed.host_str()) {
-        let access_token = s.config.read().await.genius_access_token.clone();
-        crate::infrastructure::providers::genius::lookup_url(
-            &s.pool,
-            &s.client,
-            &access_token,
-            supplied,
-        )
-        .await
-        .map_err(|error| ApiError::validation(format!("Genius link failed: {error:#}")))?
-        .cover_url
-        .ok_or_else(|| ApiError::validation("Genius did not return cover artwork"))?
+        crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, supplied)
+            .await
+            .map_err(|error| ApiError::validation(format!("Genius link failed: {error:#}")))?
+            .cover_url
+            .ok_or_else(|| ApiError::validation("Genius did not return cover artwork"))?
     } else {
         supplied.to_owned()
     };
@@ -645,9 +639,7 @@ pub async fn resolve_source(
     } else if is_radiojavan_host(parsed.host_str()) {
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
     } else if is_genius_host(parsed.host_str()) {
-        let access_token = s.config.read().await.genius_access_token.clone();
-        crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, &access_token, url)
-            .await
+        crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, url).await
     } else {
         crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
     }

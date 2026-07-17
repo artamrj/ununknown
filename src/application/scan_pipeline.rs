@@ -717,7 +717,9 @@ async fn identify(
     }
     out.extend(query_deezer(state, limits, current, filename).await);
     out.extend(query_radiojavan(state, limits, current, filename).await);
-    out.extend(query_genius(state, cfg, limits, current, filename).await);
+    if needs_genius_enrichment(&out) {
+        out.extend(query_genius(state, limits, current, filename).await);
+    }
     let has_strong_free_candidate = out.iter().any(|candidate| candidate.score >= 90.0);
     if !acoustid_matched
         && !has_strong_free_candidate
@@ -750,7 +752,9 @@ async fn identify(
             }
             out.extend(query_deezer(state, limits, &recognized_info, filename).await);
             out.extend(query_radiojavan(state, limits, &recognized_info, filename).await);
-            out.extend(query_genius(state, cfg, limits, &recognized_info, filename).await);
+            if needs_genius_enrichment(&out) {
+                out.extend(query_genius(state, limits, &recognized_info, filename).await);
+            }
         }
         out.extend(audd_candidates);
     }
@@ -1145,16 +1149,11 @@ async fn query_radiojavan(
 
 async fn query_genius(
     state: &Arc<AppState>,
-    cfg: &crate::config::Config,
     limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
     if provider_disabled(limits, "genius").await {
-        return Vec::new();
-    }
-    let access_token = cfg.genius_access_token.trim();
-    if access_token.is_empty() {
         return Vec::new();
     }
     let Some(title) = current
@@ -1165,14 +1164,8 @@ async fn query_genius(
         return Vec::new();
     };
     let started = Instant::now();
-    match providers::genius::search(
-        &state.pool,
-        &state.client,
-        access_token,
-        title,
-        current.artist.as_deref(),
-    )
-    .await
+    match providers::genius::search(&state.pool, &state.client, title, current.artist.as_deref())
+        .await
     {
         Ok(mut candidates) => {
             for candidate in &mut candidates {
@@ -1186,6 +1179,20 @@ async fn query_genius(
             Vec::new()
         }
     }
+}
+
+fn needs_genius_enrichment(candidates: &[providers::Candidate]) -> bool {
+    !candidates.iter().any(|candidate| {
+        candidate.score >= 90.0
+            && candidate
+                .album
+                .as_deref()
+                .is_some_and(|album| !album.trim().is_empty())
+            && candidate
+                .cover_url
+                .as_deref()
+                .is_some_and(|cover| !cover.trim().is_empty())
+    })
 }
 
 async fn query_musicbrainz_acoustid(
@@ -2877,5 +2884,22 @@ mod tests {
 
         assert!(candidate.score >= 90.0);
         assert!(candidate.duration_delta.is_some_and(|delta| delta < 1.0));
+    }
+
+    #[test]
+    fn genius_is_reserved_for_incomplete_or_weak_catalog_results() {
+        let complete = providers::Candidate {
+            score: 94.0,
+            album: Some("Hypnotize".into()),
+            cover_url: Some("https://example.test/hypnotize.jpg".into()),
+            ..Default::default()
+        };
+        let missing_cover = providers::Candidate {
+            cover_url: None,
+            ..complete.clone()
+        };
+        assert!(!needs_genius_enrichment(&[complete]));
+        assert!(needs_genius_enrichment(&[missing_cover]));
+        assert!(needs_genius_enrichment(&[]));
     }
 }

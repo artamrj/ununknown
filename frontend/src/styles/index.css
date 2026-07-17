@@ -80,6 +80,8 @@ label i { color: #226b47; font-size: 11px; }
 .metadata-health.compact { margin-top: 3px; }
 .manual { margin-top: 15px; padding-top: 15px; border-top: 1px solid #edf0ed; }
 .manual .source-url { grid-column: 1 / -1; }
+.manual .source-feedback { align-self: center; color: #315d45; }
+.manual .source-feedback.error { margin: 0; padding: 8px 10px; color: #a82c19; }
 .manual .primary { align-self: end; }
 .ready-list { margin-top: 20px; padding: 18px 20px; border: 1px solid #dfe4df; border-radius: 14px; background: white; }
 .track { display: grid; grid-template-columns: 76px minmax(190px, 1.1fr) minmax(250px, 1.3fr) minmax(160px, .8fr) 100px; gap: 14px; align-items: center; padding: 16px 0; border-top: 1px solid #edf0ed; font-size: 13px; }

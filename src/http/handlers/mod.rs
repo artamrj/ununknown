@@ -198,7 +198,6 @@ pub struct SetupRequest {
     youtube_api_key: Option<String>,
     discogs_token: Option<String>,
     lastfm_key: Option<String>,
-    genius_access_token: Option<String>,
     theaudiodb_key: Option<String>,
 }
 
