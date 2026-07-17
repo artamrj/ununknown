@@ -209,6 +209,7 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
   const corrupt = track.status === "corrupt";
   return <article className="review card">
     <header><div><h3>{track.filename}</h3><p className={corrupt ? "corrupt-message" : undefined}>{track.stage_message || track.error || "No reliable match was found."}</p>{corrupt && track.error && <small className="corrupt-detail">{track.error}</small>}</div><span>{Math.round(track.duration || 0)}s</span></header>
+    <audio className="review-player" controls preload="none" src={`/api/tracks/${track.id}/audio`} aria-label={`Play ${track.filename}`} />
     {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button>)}</div>}
     {!corrupt && <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>}
     {!corrupt && manual && <ManualEditor track={track} onSaved={onSaved} />}

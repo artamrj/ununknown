@@ -13,6 +13,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/identify", post(handlers::start_scan))
         .route("/stop", post(handlers::stop_scan))
         .route("/tracks", get(handlers::list_tracks))
+        .route("/tracks/{id}/audio", get(handlers::track_audio))
         .route("/source/resolve", post(handlers::resolve_source))
         .route("/tracks/{id}/choose", post(handlers::select_candidate))
         .route(

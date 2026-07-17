@@ -55,6 +55,7 @@ label i { color: #226b47; font-size: 11px; }
 .review .corrupt-message { color: #a82c19; font-weight: 800; }
 .review .corrupt-detail { display: block; max-width: 720px; margin-top: 6px; color: #8a4a40; overflow-wrap: anywhere; }
 .review header > span { color: #657068; }
+.review-player { display: block; width: min(100%, 440px); height: 36px; margin-top: 12px; }
 .candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 9px; margin: 16px 0; }
 .candidates button { display: grid; gap: 4px; text-align: left; padding: 12px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 .candidates button:hover { border-color: #226b47; background: #f0f7f3; }

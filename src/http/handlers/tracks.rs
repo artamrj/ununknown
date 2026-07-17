@@ -1,4 +1,6 @@
 use super::*;
+use axum::http::{HeaderMap, StatusCode, header};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<TrackPage>> {
     let tracks: Vec<Track> = sqlx::query_as(&format!(
@@ -17,6 +19,113 @@ pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Track
         items.push(WorkspaceTrack { track, candidates });
     }
     Ok(Json(TrackPage { items, total }))
+}
+
+pub async fn track_audio(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+    headers: HeaderMap,
+) -> ApiResult<axum::response::Response> {
+    let track = queries::track(&s.pool, id).await?;
+    let path = std::path::Path::new(&track.path);
+    let metadata = tokio::fs::metadata(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ApiError::not_found("audio source file no longer exists")
+        } else {
+            ApiError::from(error)
+        }
+    })?;
+    let total = metadata.len();
+    if total == 0 {
+        return Err(ApiError::validation("audio source file is empty"));
+    }
+    let requested = match parse_byte_range(
+        headers
+            .get(header::RANGE)
+            .and_then(|value| value.to_str().ok()),
+        total,
+    ) {
+        Ok(range) => range,
+        Err(()) => {
+            return Ok(axum::response::Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+                .body(axum::body::Body::empty())
+                .map_err(anyhow::Error::from)?);
+        }
+    };
+    let (start, end, status) = requested.map_or((0, total - 1, StatusCode::OK), |(start, end)| {
+        (start, end, StatusCode::PARTIAL_CONTENT)
+    });
+    let length = usize::try_from(end - start + 1)
+        .map_err(|_| ApiError::validation("requested audio range is too large"))?;
+    let mut file = tokio::fs::File::open(path).await?;
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut bytes = vec![0_u8; length];
+    file.read_exact(&mut bytes).await?;
+
+    let mut response = axum::response::Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, audio_mime(&track))
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, length.to_string())
+        .header(header::CACHE_CONTROL, "private, no-store");
+    if status == StatusCode::PARTIAL_CONTENT {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}"),
+        );
+    }
+    Ok(response
+        .body(axum::body::Body::from(bytes))
+        .map_err(anyhow::Error::from)?)
+}
+
+fn parse_byte_range(
+    value: Option<&str>,
+    total: u64,
+) -> std::result::Result<Option<(u64, u64)>, ()> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.strip_prefix("bytes=").ok_or(())?;
+    if value.contains(',') {
+        return Err(());
+    }
+    let (start, end) = value.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        return Ok(Some((total.saturating_sub(suffix), total - 1)));
+    }
+    let start = start.parse::<u64>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total - 1
+    } else {
+        end.parse::<u64>().map_err(|_| ())?.min(total - 1)
+    };
+    if end < start {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
+
+fn audio_mime(track: &Track) -> &'static str {
+    match track.format.as_deref().unwrap_or_default() {
+        "mp3" => "audio/mpeg",
+        "m4a" | "mp4" | "aac" => "audio/mp4",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "opus" => "audio/ogg; codecs=opus",
+        "wav" => "audio/wav",
+        "aiff" | "aif" => "audio/aiff",
+        _ => "application/octet-stream",
+    }
 }
 
 pub async fn select_candidate(
@@ -333,5 +442,15 @@ mod tests {
                 "Correct artist".into()
             )
         );
+    }
+
+    #[test]
+    fn parses_browser_audio_ranges() {
+        assert_eq!(parse_byte_range(None, 100), Ok(None));
+        assert_eq!(parse_byte_range(Some("bytes=0-9"), 100), Ok(Some((0, 9))));
+        assert_eq!(parse_byte_range(Some("bytes=90-"), 100), Ok(Some((90, 99))));
+        assert_eq!(parse_byte_range(Some("bytes=-10"), 100), Ok(Some((90, 99))));
+        assert!(parse_byte_range(Some("bytes=100-"), 100).is_err());
+        assert!(parse_byte_range(Some("items=0-9"), 100).is_err());
     }
 }
