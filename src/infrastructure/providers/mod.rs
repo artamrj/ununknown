@@ -1,12 +1,15 @@
 pub mod acoustid;
+pub mod audd;
 pub mod cover_art_archive;
 pub mod deezer;
 pub mod discogs;
 pub mod itunes;
 pub mod lastfm;
 pub mod musicbrainz;
+pub mod spotify;
 pub mod theaudiodb;
 pub mod wikidata;
+pub mod youtube;
 
 use serde::{Deserialize, Serialize};
 

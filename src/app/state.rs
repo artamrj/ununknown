@@ -83,6 +83,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub artwork_downloads: RwLock<Arc<Semaphore>>,
     pub tag_writes: RwLock<Arc<Semaphore>>,
+    pub spotify_auth: crate::infrastructure::providers::spotify::SpotifyAuth,
     pub workflow: RwLock<Workflow>,
 }
 
@@ -100,6 +101,7 @@ impl AppState {
                 .expect("HTTP client should build"),
             artwork_downloads: RwLock::new(Arc::new(Semaphore::new(lookup_workers))),
             tag_writes: RwLock::new(Arc::new(Semaphore::new(write_workers))),
+            spotify_auth: crate::infrastructure::providers::spotify::SpotifyAuth::default(),
             workflow: RwLock::new(Workflow {
                 message: "Ready".into(),
                 ..Default::default()

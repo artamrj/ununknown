@@ -51,6 +51,10 @@ export function App() {
           output_dir: setup.output_dir,
           delete_source_after_write: setup.delete_source_after_write,
           acoustid_key: keys.acoustid || undefined,
+          audd_token: keys.audd || undefined,
+          spotify_client_id: keys.spotify_client_id || undefined,
+          spotify_client_secret: keys.spotify_client_secret || undefined,
+          youtube_api_key: keys.youtube || undefined,
           discogs_token: keys.discogs || undefined,
           lastfm_key: keys.lastfm || undefined,
           theaudiodb_key: keys.theaudiodb || undefined,
@@ -132,8 +136,10 @@ export function App() {
           <span>Remove input after successful output<small>Off by default. Originals are deleted only after their corrected file is safely written.</small></span>
         </label>
         <div className="source-status">
-          <span>Active catalogs: Apple Music, Deezer, MusicBrainz, Wikidata</span>
-          {(!setup.sources.fpcalc || !setup.sources.acoustid) && <small>For hard-to-name tracks, install Chromaprint (`fpcalc`) and add an AcoustID key.</small>}
+          <span>Active catalogs: Apple Music, Deezer, MusicBrainz, Wikidata{setup.sources.spotify ? ", Spotify" : ""}</span>
+          {(!setup.sources.fpcalc || !setup.sources.acoustid) && <small>For hard-to-name tracks, install Chromaprint (`fpcalc`) and <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">add a free AcoustID application key</a>.</small>}
+          {setup.sources.audd && <small className="recognition-active">AudD fallback recognition is active for fingerprints AcoustID cannot identify.</small>}
+          {setup.sources.youtube && <small className="recognition-active">Exact YouTube video-ID recovery is active for downloaded filenames.</small>}
           {setup.sources.ffmpeg
             ? <small className="replaygain-active">ReplayGain is active. Track loudness and peak are added when corrected files are written.</small>
             : <small>Install FFmpeg to add ReplayGain loudness metadata. Other corrections still work.</small>}
@@ -143,9 +149,14 @@ export function App() {
         </div>
         <details>
           <summary>Optional source keys</summary>
-          <p>Apple Music, MusicBrainz, Cover Art Archive, and Wikidata work without keys.</p>
+          <p>Apple Music, Deezer, MusicBrainz, Cover Art Archive, and Wikidata work without keys. Recognition services are called only when useful.</p>
+          <p className="provider-links">Create credentials: <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">AcoustID</a> · <a href="https://dashboard.audd.io/" target="_blank" rel="noreferrer">AudD</a> · <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify</a> · <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube</a></p>
           <div className="key-grid">
             <Secret label="AcoustID (fingerprints)" active={setup.sources.acoustid} value={keys.acoustid} onChange={(value) => setKeys({ ...keys, acoustid: value })} />
+            <Secret label="AudD token (fallback recognition)" active={setup.sources.audd} value={keys.audd} onChange={(value) => setKeys({ ...keys, audd: value })} />
+            <Secret label="Spotify client ID" active={setup.sources.spotify} value={keys.spotify_client_id} onChange={(value) => setKeys({ ...keys, spotify_client_id: value })} />
+            <Secret label="Spotify client secret" active={setup.sources.spotify} value={keys.spotify_client_secret} onChange={(value) => setKeys({ ...keys, spotify_client_secret: value })} />
+            <Secret label="YouTube Data API key" active={setup.sources.youtube} value={keys.youtube} onChange={(value) => setKeys({ ...keys, youtube: value })} />
             <Secret label="Discogs" active={setup.sources.discogs} value={keys.discogs} onChange={(value) => setKeys({ ...keys, discogs: value })} />
             <Secret label="Last.fm" active={setup.sources.lastfm} value={keys.lastfm} onChange={(value) => setKeys({ ...keys, lastfm: value })} />
             <Secret label="TheAudioDB" active={setup.sources.theaudiodb} value={keys.theaudiodb} onChange={(value) => setKeys({ ...keys, theaudiodb: value })} />

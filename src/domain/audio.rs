@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use lofty::{file::AudioFile, prelude::*, probe::Probe};
 use serde::Serialize;
 use std::path::Path;
@@ -17,10 +17,21 @@ pub struct AudioInfo {
 }
 
 pub fn read(path: &Path) -> Result<AudioInfo> {
-    let tagged = Probe::open(path)?.read()?;
+    let mut info = match Probe::open(path).and_then(|probe| probe.read()) {
+        Ok(tagged) => info_from_tagged(path, &tagged),
+        Err(tag_error) => info_from_ffprobe(path).with_context(|| {
+            format!("tag reader failed ({tag_error}); FFprobe fallback also failed")
+        })?,
+    };
+    fill_from_filename(path, &mut info);
+    clean_search_tags(&mut info);
+    Ok(info)
+}
+
+fn info_from_tagged(path: &Path, tagged: &lofty::file::TaggedFile) -> AudioInfo {
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
     let props = tagged.properties();
-    let mut info = AudioInfo {
+    AudioInfo {
         title: tag.and_then(|t| t.title().map(|v| v.into_owned())),
         artist: tag.and_then(|t| t.artist().map(|v| v.into_owned())),
         album: tag.and_then(|t| t.album().map(|v| v.into_owned())),
@@ -37,7 +48,76 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase(),
+    }
+}
+
+fn info_from_ffprobe(path: &Path) -> Result<AudioInfo> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "format=duration,bit_rate:format_tags=title,artist,album,album_artist,track,genre:stream=duration,bit_rate:stream_tags=title,artist,album,album_artist,track,genre",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .context("could not start ffprobe")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "ffprobe could not read audio: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_ffprobe(path, &serde_json::from_slice(&output.stdout)?)
+}
+
+fn parse_ffprobe(path: &Path, value: &serde_json::Value) -> Result<AudioInfo> {
+    let format = &value["format"];
+    let stream = value["streams"]
+        .as_array()
+        .and_then(|streams| streams.first())
+        .unwrap_or(&serde_json::Value::Null);
+    let format_tags = &format["tags"];
+    let stream_tags = &stream["tags"];
+    let tag = |name: &str| {
+        format_tags[name]
+            .as_str()
+            .or_else(|| stream_tags[name].as_str())
+            .map(str::to_owned)
     };
+    let number = |name: &str| {
+        format[name]
+            .as_str()
+            .or_else(|| stream[name].as_str())
+            .and_then(|number| number.parse::<f64>().ok())
+    };
+    let duration = number("duration").ok_or_else(|| anyhow!("ffprobe returned no duration"))?;
+    let bitrate = number("bit_rate").map(|value| (value / 1000.0).round() as u32);
+    Ok(AudioInfo {
+        title: tag("title"),
+        artist: tag("artist"),
+        album: tag("album"),
+        album_artist: tag("album_artist"),
+        track_number: tag("track")
+            .as_deref()
+            .and_then(|track| track.split('/').next())
+            .and_then(|track| track.parse().ok()),
+        genre: tag("genre"),
+        duration,
+        bitrate,
+        format: path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+    })
+}
+
+fn fill_from_filename(path: &Path, info: &mut AudioInfo) {
     if info.title.as_deref().is_none_or(str::is_empty) {
         let stem = path
             .file_stem()
@@ -53,8 +133,6 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
             info.title = Some(stem.trim().to_owned());
         }
     }
-    clean_search_tags(&mut info);
-    Ok(info)
 }
 
 fn clean_search_tags(info: &mut AudioInfo) {
@@ -151,5 +229,22 @@ mod tests {
         assert_eq!(info.title.as_deref(), Some("Joker"));
         assert_eq!(info.artist.as_deref(), Some("Mohammadreza Alimardani"));
         assert_eq!(info.album, None);
+    }
+
+    #[test]
+    fn parses_ffprobe_fallback_metadata() {
+        let info = parse_ffprobe(
+            Path::new("Artist - Song.mp3"),
+            &serde_json::json!({
+                "streams": [{"duration": "181.25", "bit_rate": "192000", "tags": {}}],
+                "format": {"tags": {"title": "Song", "artist": "Artist", "track": "3/10"}}
+            }),
+        )
+        .unwrap();
+        assert_eq!(info.title.as_deref(), Some("Song"));
+        assert_eq!(info.artist.as_deref(), Some("Artist"));
+        assert_eq!(info.track_number, Some(3));
+        assert_eq!(info.duration, 181.25);
+        assert_eq!(info.bitrate, Some(192));
     }
 }

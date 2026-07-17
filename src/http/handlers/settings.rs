@@ -21,6 +21,9 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "ffmpeg": ffmpeg,
             "integrity_check": crate::infrastructure::media::integrity::available(),
             "acoustid": !cfg.acoustid_key.is_empty(),
+            "audd": !cfg.audd_token.is_empty(),
+            "spotify": !cfg.spotify_client_id.is_empty() && !cfg.spotify_client_secret.is_empty(),
+            "youtube": !cfg.youtube_api_key.is_empty(),
             "discogs": !cfg.discogs_token.is_empty(),
             "lastfm": !cfg.lastfm_key.is_empty(),
             "theaudiodb": !cfg.theaudiodb_key.is_empty()
@@ -62,6 +65,27 @@ pub async fn update_setup(
     cfg.delete_source_after_write = delete_source_after_write;
     if let Some(value) = body.acoustid_key.filter(|value| !value.trim().is_empty()) {
         cfg.acoustid_key = value.trim().into();
+    }
+    if let Some(value) = body.audd_token.filter(|value| !value.trim().is_empty()) {
+        cfg.audd_token = value.trim().into();
+    }
+    if let Some(value) = body
+        .spotify_client_id
+        .filter(|value| !value.trim().is_empty())
+    {
+        cfg.spotify_client_id = value.trim().into();
+    }
+    if let Some(value) = body
+        .spotify_client_secret
+        .filter(|value| !value.trim().is_empty())
+    {
+        cfg.spotify_client_secret = value.trim().into();
+    }
+    if let Some(value) = body
+        .youtube_api_key
+        .filter(|value| !value.trim().is_empty())
+    {
+        cfg.youtube_api_key = value.trim().into();
     }
     if let Some(value) = body.discogs_token.filter(|value| !value.trim().is_empty()) {
         cfg.discogs_token = value.trim().into();

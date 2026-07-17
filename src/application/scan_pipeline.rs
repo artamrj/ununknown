@@ -44,6 +44,12 @@ enum ProcessOutcome {
     Corrupt,
 }
 
+#[derive(Clone, Copy)]
+struct FingerprintEvidence<'a> {
+    value: &'a str,
+    duration: f64,
+}
+
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
     state
@@ -473,7 +479,19 @@ async fn process(
             "MusicBrainz lookups are queued at one request per second",
         )
         .await;
-    let mut candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
+    let mut candidates = identify(
+        state,
+        &cfg,
+        limits,
+        path,
+        FingerprintEvidence {
+            value: &fp,
+            duration,
+        },
+        &info,
+        filename,
+    )
+    .await?;
     let raw_candidate_count = candidates.len();
     dedupe_candidates(&mut candidates);
     sort_candidates_for_decision(&mut candidates);
@@ -604,8 +622,8 @@ async fn identify(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
     limits: &Arc<PipelineLimits>,
-    fingerprint: &str,
-    duration: f64,
+    path: &Path,
+    fingerprint: FingerprintEvidence<'_>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
@@ -613,8 +631,8 @@ async fn identify(
         state,
         cfg,
         limits,
-        fingerprint,
-        duration,
+        fingerprint.value,
+        fingerprint.duration,
         current,
         filename,
     )
@@ -626,6 +644,10 @@ async fn identify(
             Vec::new()
         }
     };
+    let acoustid_matched = !out.is_empty();
+    if !cfg.youtube_api_key.trim().is_empty() {
+        out.extend(query_youtube(state, limits, &cfg.youtube_api_key, current, filename).await);
+    }
     match query_musicbrainz_text(state, cfg, current, filename).await {
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
@@ -635,6 +657,32 @@ async fn identify(
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
     }
     out.extend(query_deezer(state, limits, current, filename).await);
+    let has_strong_free_candidate = out.iter().any(|candidate| candidate.score >= 90.0);
+    if !acoustid_matched
+        && !has_strong_free_candidate
+        && !cfg.audd_token.trim().is_empty()
+        && !fingerprint.value.is_empty()
+    {
+        out.extend(
+            query_audd(
+                state,
+                limits,
+                &cfg.audd_token,
+                path,
+                fingerprint.value,
+                current,
+                filename,
+            )
+            .await,
+        );
+    }
+    if !cfg.spotify_client_id.trim().is_empty() && !cfg.spotify_client_secret.trim().is_empty() {
+        let isrcs = out
+            .iter()
+            .filter_map(|candidate| candidate.isrc.clone())
+            .collect::<Vec<_>>();
+        out.extend(query_spotify(state, limits, cfg, current, filename, &isrcs).await);
+    }
     out.extend(query_discogs(state, cfg, limits, current, filename).await);
     out.extend(query_lastfm(state, cfg, limits, current, filename).await);
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
@@ -702,13 +750,145 @@ fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
         3
     } else if matches!(
         candidate.provider.as_str(),
-        "musicbrainz" | "itunes" | "deezer"
+        "musicbrainz" | "itunes" | "deezer" | "spotify"
     ) {
         2
     } else if candidate_source_count(candidate) >= 2 {
         1
     } else {
         0
+    }
+}
+
+async fn query_audd(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    token: &str,
+    path: &Path,
+    fingerprint: &str,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "audd").await {
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match providers::audd::recognize(
+        &state.pool,
+        &state.client,
+        token,
+        path,
+        fingerprint,
+        current.duration,
+    )
+    .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                candidate.duration_delta = candidate
+                    .duration_delta
+                    .map(|candidate_duration| (current.duration - candidate_duration).abs());
+                if let Some(raw) = candidate.score_breakdown.as_deref()
+                    && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw)
+                {
+                    value["duration_delta"] = serde_json::json!(candidate.duration_delta);
+                    candidate.score_breakdown = Some(value.to_string());
+                }
+            }
+            log_provider_count(state, filename, "audd", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "audd", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn query_youtube(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    api_key: &str,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "youtube").await {
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match providers::youtube::lookup_filename_id(&state.pool, &state.client, api_key, filename)
+        .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "youtube_exact_video_id");
+            }
+            log_provider_count(state, filename, "youtube", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "youtube", error).await;
+            Vec::new()
+        }
+    }
+}
+
+async fn query_spotify(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    cfg: &crate::config::Config,
+    current: &audio::AudioInfo,
+    filename: &str,
+    isrcs: &[String],
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "spotify").await {
+        return Vec::new();
+    }
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let started = Instant::now();
+    match providers::spotify::search(
+        &state.client,
+        &state.spotify_auth,
+        &cfg.spotify_client_id,
+        &cfg.spotify_client_secret,
+        title,
+        current.artist.as_deref(),
+        isrcs,
+    )
+    .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let identifier_match = candidate.isrc.as_deref().is_some_and(|candidate_isrc| {
+                    isrcs
+                        .iter()
+                        .any(|isrc| isrc.eq_ignore_ascii_case(candidate_isrc))
+                });
+                let _ = score_text_candidate(candidate, current, "spotify_catalog_search");
+                if identifier_match {
+                    candidate.score = candidate.score.max(96.0);
+                    if let Some(raw) = candidate.score_breakdown.as_deref()
+                        && let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw)
+                    {
+                        value["identifier_match"] = serde_json::json!("isrc");
+                        value["final_score"] = serde_json::json!(candidate.score);
+                        candidate.score_breakdown = Some(value.to_string());
+                    }
+                }
+            }
+            log_provider_count(state, filename, "spotify", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "spotify", error).await;
+            Vec::new()
+        }
     }
 }
 
@@ -1207,8 +1387,10 @@ fn candidate_has_fingerprint(candidate: &providers::Candidate) -> bool {
         .score_breakdown
         .as_deref()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value["acoustid"].as_f64())
-        .is_some_and(|value| value > 0.0)
+        .is_some_and(|value| {
+            value["acoustid"].as_f64().is_some_and(|score| score > 0.0)
+                || value["audio_recognition"].as_bool() == Some(true)
+        })
 }
 
 fn candidate_source_count(candidate: &providers::Candidate) -> usize {
@@ -1220,8 +1402,10 @@ fn unique_exact_catalog_match(
     candidates: &[providers::Candidate],
     current: &audio::AudioInfo,
 ) -> bool {
-    if !matches!(best.provider.as_str(), "itunes" | "musicbrainz")
-        || best.duration_delta.is_none_or(|delta| delta > 5.0)
+    if !matches!(
+        best.provider.as_str(),
+        "itunes" | "musicbrainz" | "deezer" | "spotify"
+    ) || best.duration_delta.is_none_or(|delta| delta > 5.0)
     {
         return false;
     }
@@ -1327,6 +1511,14 @@ fn duration_match(delta: f64) -> f64 {
 }
 
 fn candidate_agrees(left: &providers::Candidate, right: &providers::Candidate) -> bool {
+    if left
+        .isrc
+        .as_deref()
+        .zip(right.isrc.as_deref())
+        .is_some_and(|(left_isrc, right_isrc)| left_isrc.eq_ignore_ascii_case(right_isrc))
+    {
+        return true;
+    }
     text_close(&left.title, &right.title, 0.82)
         && text_close(&left.artist, &right.artist, 0.75)
         && match (left.album.as_deref(), right.album.as_deref()) {
@@ -1632,10 +1824,13 @@ fn provider_display_name(provider: &str) -> &str {
         "acoustid" => "AcoustID",
         "discogs" => "Discogs",
         "deezer" => "Deezer",
+        "audd" => "AudD",
         "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
+        "spotify" => "Spotify",
         "theaudiodb" => "TheAudioDB",
         "wikidata" => "Wikidata",
+        "youtube" => "YouTube",
         _ => "MusicBrainz",
     }
 }
@@ -1644,9 +1839,12 @@ fn provider_reason(provider: &str) -> &str {
     match provider {
         "discogs" => "Release, label, catalog, and physical media metadata",
         "deezer" => "International track, album, ISRC, duration, and cover metadata",
+        "audd" => "Audio recognition with ISRC and linked catalog metadata",
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
+        "spotify" => "ISRC, release, track position, duration, and cover metadata",
         "theaudiodb" => "Track, album, genre, and image enrichment",
         "wikidata" => "Structured identifier and external-link evidence",
+        "youtube" => "Exact source-video title, channel, date, and duration evidence",
         _ => "Canonical recording and release metadata",
     }
 }

@@ -42,7 +42,12 @@ pub async fn check(pool: &SqlitePool, path: &Path) -> Result<Integrity> {
     .bind(mtime_ns)
     .fetch_optional(pool)
     .await?;
-    if let Some((is_healthy, diagnostic)) = cached {
+    if let Some((is_healthy, diagnostic)) = cached
+        && (is_healthy
+            || !diagnostic
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Invalid PNG signature")))
+    {
         return Ok(if is_healthy {
             Integrity::Healthy
         } else {
@@ -96,7 +101,10 @@ pub async fn check(pool: &SqlitePool, path: &Path) -> Result<Integrity> {
 
 fn classify(success: bool, stderr: &str) -> Integrity {
     let diagnostic = stderr.trim();
-    if success && diagnostic.is_empty() {
+    // FFmpeg may report a malformed attached picture while returning success
+    // because the selected audio stream decoded completely. Artwork is replaced
+    // during tag writing, so only a failed audio decode blocks the track.
+    if success {
         return Integrity::Healthy;
     }
     let diagnostic = if diagnostic.is_empty() {
@@ -118,11 +126,11 @@ mod tests {
     }
 
     #[test]
-    fn decoder_error_is_corrupt_even_if_decoder_recovers() {
-        assert!(matches!(
-            classify(true, "Invalid frame header"),
-            Integrity::Corrupt(detail) if detail == "Invalid frame header"
-        ));
+    fn non_audio_warning_does_not_mark_successful_decode_corrupt() {
+        assert_eq!(
+            classify(true, "Invalid PNG signature 0xFFD8FFE0"),
+            Integrity::Healthy
+        );
     }
 
     #[test]
