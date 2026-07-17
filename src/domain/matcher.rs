@@ -65,6 +65,7 @@ pub fn score(input: CandidateInput<'_>) -> ScoreBreakdown {
     }
 }
 
+#[cfg(test)]
 pub fn auto_selectable(
     top_score: f64,
     second_score: Option<f64>,

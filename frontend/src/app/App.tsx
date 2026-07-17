@@ -119,7 +119,7 @@ export function App() {
   const busy = workflow ? busyPhases.has(workflow.phase) : false;
 
   const autoApprove = async () => {
-    if (!confirm(`Smart-select matches for up to ${autoApprovable} review tracks? Song identity, version, duration, source agreement, and album context will be checked. Uncertain tracks will stay in review.`)) return;
+    if (!confirm(`Smart-select and complete metadata for up to ${autoApprovable} review tracks? Song identity, version, duration, album, source agreement, and verified cover art will be checked. Ambiguous or incomplete tracks will stay in review.`)) return;
     setAutoApproving(true);
     setError("");
     setNotice("");
@@ -128,7 +128,7 @@ export function App() {
       await loadTracks();
       const details = [
         `${result.approved} review tracks smart-approved.`,
-        result.low_confidence ? `${result.low_confidence} ambiguous matches were left for review.` : "",
+        result.low_confidence ? `${result.low_confidence} ambiguous or incomplete matches were left for review.` : "",
         result.unavailable ? `${result.unavailable} tracks have no usable candidate or cannot be written.` : "",
       ].filter(Boolean).join(" ");
       setNotice(details);
@@ -214,10 +214,10 @@ export function App() {
           <div className="section-title">
             <div><h2>{review.length ? `${review.length} need your help` : "Everything is identified"}</h2><p>{ready.length} tracks are ready to write.</p></div>
             <div className="write-action">
-              {autoApprovable > 0 && <button className="secondary" disabled={autoApproving} onClick={autoApprove}>{autoApproving ? "Analyzing matches…" : `Smart auto-select ${autoApprovable} reviews`}</button>}
+              {autoApprovable > 0 && <button className="secondary" disabled={autoApproving} onClick={autoApprove}>{autoApproving ? "Checking and completing metadata…" : `Smart auto-select ${autoApprovable} reviews`}</button>}
               <button className="primary" disabled={!ready.length} onClick={write}>Write {ready.length} corrected files</button>
               {autoApprovable > 0
-                ? <small>Checks recording, version, duration, sources, and album—not just score.</small>
+                ? <small>Checks recording, version, duration, sources, album, cover, and metadata completeness—not just score.</small>
                 : ready.length > 0 && <small>{setup.delete_source_after_write ? "Successful inputs will be removed" : "Includes ReplayGain track gain + peak"}</small>}
             </div>
           </div>
@@ -242,7 +242,7 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
   return <article className="review card">
     <header><div><h3>{track.filename}</h3><p className={corrupt ? "corrupt-message" : undefined}>{track.stage_message || track.error || "No reliable match was found."}</p>{corrupt && track.error && <small className="corrupt-detail">{track.error}</small>}</div><span>{Math.round(track.duration || 0)}s</span></header>
     <audio className="review-player" controls preload="none" src={`/api/tracks/${track.id}/audio`} aria-label={`Play ${track.filename}`} />
-    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <div className="candidate-pair" key={candidate.id}><button onClick={() => onChoose(track.id, candidate.id)}><span className="provider-badge">From {candidateSources(candidate)}</span><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button><GoogleCheck candidate={candidate} /></div>)}</div>}
+    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <div className="candidate-pair" key={candidate.id}><button onClick={() => onChoose(track.id, candidate.id)}><span className="provider-badge">From {candidateSources(candidate)}</span><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, candidate.track_number ? `Track ${candidate.track_number}` : "", `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /><MetadataHealth candidate={candidate} compact /></button><GoogleCheck candidate={candidate} /></div>)}</div>}
     {!corrupt && <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>}
     {!corrupt && manual && <ManualEditor track={track} onSaved={onSaved} />}
   </article>;
@@ -303,12 +303,22 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
   };
   return <div className="track">
     <div className="artwork-control"><Artwork candidate={candidate} trackId={track.id} /><button className="link" onClick={setCover}>Set cover</button></div>
-    <span>{track.filename}</span>
-    <b>→ {outputName}</b>
+    <div className="track-identity">
+      <small>{track.filename}</small>
+      <strong>{candidate?.title || "Missing title"}</strong>
+      <span>{candidate?.artist || "Missing artist"}</span>
+      <small>Output: {outputName}</small>
+    </div>
+    <div className="metadata-facts">
+      <span><small>Album</small><b>{candidate?.album || "Missing"}</b></span>
+      <span><small>Year</small><b>{candidate?.year || candidate?.release_date?.slice(0, 4) || "Missing"}</b></span>
+      <span><small>Genre</small><b>{genreText(candidate) || "Missing"}</b></span>
+      <span><small>Track</small><b>{candidate?.track_number ? `${candidate.track_number}${candidate.track_total ? ` / ${candidate.track_total}` : ""}` : "Missing"}</b></span>
+    </div>
     <div className="track-metadata">
       {candidate && <span className="provider-badge">From {candidateSources(candidate)}</span>}
-      <small>{[candidate?.album, candidate?.year, genreText(candidate)].filter(Boolean).join(" · ")}</small>
-      {track.stage_message?.startsWith("Smart auto-approved") && <small className="selection-reason">{track.stage_message}</small>}
+      <MetadataHealth candidate={candidate} />
+      {track.stage_message && <small className="selection-reason">{track.stage_message}</small>}
       <div className="track-actions">
         <button className="link" onClick={() => setEditing(!editing)}>{editing ? "Close editor" : "Edit metadata"}</button>
         <button className="link undo" disabled={undoing} onClick={undoIdentification}>{undoing ? "Returning…" : "Undo identification"}</button>
@@ -393,6 +403,41 @@ function candidateSources(candidate: Candidate) {
 function GenreLabel({ candidate }: { candidate: Candidate }) {
   const text = genreText(candidate);
   return text ? <em className="genre">{text}</em> : <em className="genre uncertain">Genre needs review</em>;
+}
+
+function MetadataHealth({ candidate, compact = false }: { candidate?: Candidate; compact?: boolean }) {
+  if (!candidate) return <span className="metadata-health incomplete">Metadata missing</span>;
+  const audit = metadataAudit(candidate);
+  return <span className={`metadata-health ${audit.coreComplete ? "complete" : "incomplete"}${compact ? " compact" : ""}`} title={audit.missing.length ? `Missing: ${audit.missing.join(", ")}` : "Core metadata is complete"}>
+    {audit.score}% metadata{audit.missing.length ? ` · missing ${audit.missing.slice(0, compact ? 1 : 3).join(", ")}` : " · complete"}
+  </span>;
+}
+
+function metadataAudit(candidate: Candidate) {
+  try {
+    const stored = JSON.parse(candidate.score_breakdown || "{}")?.metadata_completion;
+    if (stored && typeof stored.score === "number" && Array.isArray(stored.missing_fields)) {
+      return { score: stored.score, coreComplete: stored.core_complete === true, missing: stored.missing_fields as string[] };
+    }
+  } catch {
+    // Compute a display-only audit when older candidates have no worker report.
+  }
+  const fields: Array<[string, boolean, number]> = [
+    ["title", Boolean(candidate.title?.trim()), 18],
+    ["artist", Boolean(candidate.artist?.trim()), 18],
+    ["album", Boolean(candidate.album?.trim()), 16],
+    ["cover", Boolean(candidate.cover_url?.trim()), 16],
+    ["year", Boolean(candidate.year?.trim() || candidate.release_date?.trim()), 10],
+    ["genre", Boolean(candidate.genre?.trim()), 8],
+    ["track number", Boolean(candidate.track_number), 6],
+    ["album artist", Boolean(candidate.album_artist?.trim()), 4],
+    ["ISRC", Boolean(candidate.isrc?.trim()), 4],
+  ];
+  return {
+    score: fields.filter(([, present]) => present).reduce((total, [, , weight]) => total + weight, 0),
+    coreComplete: fields.slice(0, 4).every(([, present]) => present),
+    missing: fields.filter(([, present]) => !present).map(([name]) => name),
+  };
 }
 
 function genreText(candidate?: Candidate) {

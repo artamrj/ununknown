@@ -34,6 +34,7 @@ struct PersistJob {
     path: PathBuf,
     info: audio::AudioInfo,
     candidate: providers::Candidate,
+    message: String,
     result: oneshot::Sender<Result<()>>,
 }
 
@@ -522,17 +523,16 @@ async fn process(
         state.log("warn", "match", Some(filename), &message).await;
         return Ok(ProcessOutcome::NeedsReview);
     };
-    let second_score = comparable_second_score(&candidates);
-    let has_safe_evidence = candidate_has_fingerprint(best) || candidate_source_count(best) >= 2;
-    let exact_unique = unique_exact_catalog_match(best, &candidates, &info);
-    let auto_select = exact_unique
-        || (has_safe_evidence
-            && crate::domain::matcher::auto_selectable(
-                best.score,
-                second_score,
-                best.duration_delta,
-            ));
-    if !auto_select {
+    let smart_decision = crate::application::smart_approval::rank(
+        crate::application::smart_approval::TrackEvidence {
+            filename,
+            title: info.title.as_deref(),
+            artist: info.artist.as_deref(),
+            album: info.album.as_deref(),
+        },
+        &candidates,
+    );
+    let Some(smart_decision) = smart_decision else {
         state.increment_unmatched().await;
         let message = if best.score >= 40.0 {
             let mut source_names = candidates
@@ -588,8 +588,66 @@ async fn process(
         }
         state.log("warn", "match", Some(filename), &message).await;
         return Ok(ProcessOutcome::NeedsReview);
+    };
+    let embedded_cover = tokio::task::spawn_blocking({
+        let path = path.to_path_buf();
+        move || {
+            crate::infrastructure::media::tag_writer::read_artwork(&path)
+                .ok()
+                .flatten()
+                .is_some()
+        }
+    })
+    .await
+    .unwrap_or(false);
+    let mut candidate = candidates[smart_decision.candidate_index].clone();
+    crate::application::metadata_completion::complete(
+        &mut candidate,
+        &candidates,
+        info.album.as_deref(),
+        embedded_cover,
+    );
+    let limiter = state.artwork_downloads.read().await.clone();
+    let _permit = limiter.acquire_owned().await?;
+    crate::application::metadata_completion::ensure_usable_cover(
+        &state.pool,
+        &state.client,
+        &mut candidate,
+        embedded_cover,
+    )
+    .await;
+    let completion =
+        crate::application::metadata_completion::reassess(&mut candidate, embedded_cover);
+    state
+        .log(
+            if completion.core_complete {
+                "ok"
+            } else {
+                "warn"
+            },
+            "metadata_completion",
+            Some(filename),
+            &completion.summary(),
+        )
+        .await;
+    if !completion.core_complete {
+        state.increment_unmatched().await;
+        candidates[smart_decision.candidate_index] = candidate;
+        candidates.swap(0, smart_decision.candidate_index);
+        let message = format!(
+            "A recording match was found, but the metadata worker could not find {}. It remains in review instead of creating an incomplete identification.",
+            completion.missing_fields.join(", ")
+        );
+        persist_review(&state.pool, path, &info, &candidates, &message).await?;
+        state.log("warn", "match", Some(filename), &message).await;
+        return Ok(ProcessOutcome::NeedsReview);
     }
-    let candidate = candidates.remove(0);
+    let selection_message = format!(
+        "Smart auto-selected ({:.0}%): {}; {}",
+        smart_decision.confidence,
+        smart_decision.explanation,
+        completion.summary()
+    );
     state
         .log(
             "ok",
@@ -607,6 +665,7 @@ async fn process(
             path: path.to_path_buf(),
             info,
             candidate,
+            message: selection_message,
             result: result_tx,
         })
         .await
@@ -760,16 +819,6 @@ fn sort_candidates_for_decision(candidates: &mut [providers::Candidate]) {
             .cmp(&candidate_trust_tier(a))
             .then_with(|| b.score.total_cmp(&a.score))
     });
-}
-
-fn comparable_second_score(candidates: &[providers::Candidate]) -> Option<f64> {
-    let best = candidates.first()?;
-    let best_tier = candidate_trust_tier(best);
-    candidates
-        .iter()
-        .skip(1)
-        .find(|candidate| candidate_trust_tier(candidate) == best_tier)
-        .map(|candidate| candidate.score)
 }
 
 fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
@@ -1651,6 +1700,7 @@ fn candidate_source_count(candidate: &providers::Candidate) -> usize {
     candidate_source_list(candidate).len()
 }
 
+#[cfg(test)]
 fn unique_exact_catalog_match(
     best: &providers::Candidate,
     candidates: &[providers::Candidate],
@@ -1928,7 +1978,9 @@ async fn db_writer(
         let mut tx = state.pool.begin().await?;
         let mut results = Vec::with_capacity(batch.len());
         for job in &batch {
-            results.push(persist_match(&mut tx, &job.path, &job.info, &job.candidate).await);
+            results.push(
+                persist_match(&mut tx, &job.path, &job.info, &job.candidate, &job.message).await,
+            );
         }
         let failed = results
             .iter()
@@ -1963,6 +2015,7 @@ async fn persist_match(
     path: &Path,
     info: &audio::AudioInfo,
     c: &providers::Candidate,
+    message: &str,
 ) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     let text = path.to_string_lossy();
@@ -1979,12 +2032,12 @@ async fn persist_match(
             .bind(id)
             .execute(&mut **tx)
             .await?;
-        sqlx::query("UPDATE tracks SET filename=?,format=?,duration=?,current_title=?,current_artist=?,current_album=?,current_album_artist=?,current_track_number=?,status='selected',error=NULL,is_missing=0,last_seen_at=?,last_scanned_at=?,stage='ready',updated_at=?,selected_candidate_id=NULL WHERE id=?")
-            .bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(id).execute(&mut **tx).await?;
+        sqlx::query("UPDATE tracks SET filename=?,format=?,duration=?,current_title=?,current_artist=?,current_album=?,current_album_artist=?,current_track_number=?,status='selected',error=NULL,is_missing=0,last_seen_at=?,last_scanned_at=?,stage='ready',stage_message=?,updated_at=?,selected_candidate_id=NULL WHERE id=?")
+            .bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(message).bind(&now).bind(id).execute(&mut **tx).await?;
         id
     } else {
-        sqlx::query("INSERT INTO tracks(path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'selected',0,?,?,?,'ready',?)")
-            .bind(text.as_ref()).bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(&now).execute(&mut **tx).await?.last_insert_rowid()
+        sqlx::query("INSERT INTO tracks(path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage,stage_message,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'selected',0,?,?,?,'ready',?,?)")
+            .bind(text.as_ref()).bind(filename).bind(&info.format).bind(info.duration).bind(&info.title).bind(&info.artist).bind(&info.album).bind(&info.album_artist).bind(info.track_number.map(i64::from)).bind(&now).bind(&now).bind(&now).bind(message).bind(&now).execute(&mut **tx).await?.last_insert_rowid()
     };
     let cid = insert_candidate(tx, id, c).await?;
     sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
@@ -2581,13 +2634,18 @@ mod tests {
         sort_candidates_for_decision(&mut candidates);
 
         assert_eq!(candidates[0].provider, "musicbrainz");
-        assert_eq!(comparable_second_score(&candidates), None);
         assert!(candidate_has_fingerprint(&candidates[0]));
-        assert!(crate::domain::matcher::auto_selectable(
-            candidates[0].score,
-            comparable_second_score(&candidates),
-            candidates[0].duration_delta
-        ));
+        let decision = crate::application::smart_approval::rank(
+            crate::application::smart_approval::TrackEvidence {
+                filename: "The Weeknd - Out of Time.mp3",
+                title: Some("Out of Time"),
+                artist: Some("The Weeknd"),
+                album: Some("Dawn FM"),
+            },
+            &candidates,
+        )
+        .unwrap();
+        assert_eq!(candidates[decision.candidate_index].provider, "musicbrainz");
     }
 
     #[test]

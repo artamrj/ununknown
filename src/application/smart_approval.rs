@@ -15,7 +15,15 @@ pub struct Decision {
     pub explanation: String,
 }
 
+#[derive(Debug)]
+pub struct RankedDecision {
+    pub candidate_index: usize,
+    pub confidence: f64,
+    pub explanation: String,
+}
+
 struct Evaluated<'a> {
+    index: usize,
     candidate: &'a Candidate,
     total: f64,
     title_similarity: f64,
@@ -32,16 +40,26 @@ struct Evaluated<'a> {
 }
 
 pub fn select(evidence: TrackEvidence<'_>, candidates: &[Candidate]) -> Option<Decision> {
+    let ranked = rank(evidence, candidates)?;
+    Some(Decision {
+        candidate_id: candidates.get(ranked.candidate_index)?.id?,
+        confidence: ranked.confidence,
+        explanation: ranked.explanation,
+    })
+}
+
+pub fn rank(evidence: TrackEvidence<'_>, candidates: &[Candidate]) -> Option<RankedDecision> {
     let source_text = [evidence.filename, evidence.title.unwrap_or_default()].join(" ");
     let expected_variants = version_tags(&source_text);
     let mut evaluated = candidates
         .iter()
-        .filter(|candidate| {
-            candidate.id.is_some()
-                && !candidate.title.trim().is_empty()
-                && !candidate.artist.trim().is_empty()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            !candidate.title.trim().is_empty() && !candidate.artist.trim().is_empty()
         })
-        .map(|candidate| evaluate(&evidence, candidate, &expected_variants, candidates))
+        .map(|(index, candidate)| {
+            evaluate(index, &evidence, candidate, &expected_variants, candidates)
+        })
         .filter(is_supported)
         .collect::<Vec<_>>();
     evaluated.sort_by(|left, right| right.total.total_cmp(&left.total));
@@ -84,8 +102,8 @@ pub fn select(evidence: TrackEvidence<'_>, candidates: &[Candidate]) -> Option<D
     }
 
     let confidence = best.total.clamp(0.0, 99.0);
-    Some(Decision {
-        candidate_id: best.candidate.id?,
+    Some(RankedDecision {
+        candidate_index: best.index,
         confidence,
         explanation: if reasons.is_empty() {
             "strong combined evidence".to_owned()
@@ -96,6 +114,7 @@ pub fn select(evidence: TrackEvidence<'_>, candidates: &[Candidate]) -> Option<D
 }
 
 fn evaluate<'a>(
+    index: usize,
     evidence: &TrackEvidence<'_>,
     candidate: &'a Candidate,
     expected_variants: &BTreeSet<&'static str>,
@@ -152,17 +171,29 @@ fn evaluate<'a>(
     } else {
         0.0
     };
-    let metadata_score = [
-        candidate.release_date.is_some() || candidate.year.is_some(),
-        candidate.track_number.is_some(),
-        candidate.cover_url.is_some(),
-        candidate.genre.is_some(),
-        candidate.release_type.is_some(),
-    ]
-    .into_iter()
-    .filter(|present| *present)
-    .count() as f64
-        * 0.6;
+    let metadata_score = if meaningful_album(candidate.album.as_deref()).is_some() {
+        3.0
+    } else {
+        -4.0
+    } + if candidate.cover_url.is_some() {
+        3.0
+    } else {
+        -2.0
+    } + if candidate.release_date.is_some() || candidate.year.is_some() {
+        2.0
+    } else {
+        0.0
+    } + if candidate.track_number.is_some() {
+        1.5
+    } else {
+        0.0
+    } + if candidate.genre.is_some() { 1.5 } else { 0.0 }
+        + if candidate.album_artist.is_some() {
+            1.0
+        } else {
+            0.0
+        }
+        + if candidate.isrc.is_some() { 1.0 } else { 0.0 };
     let original_album = existing_album.is_none()
         && is_album_release(candidate)
         && original_album_year(candidate, candidates)
@@ -195,6 +226,7 @@ fn evaluate<'a>(
         + if candidate.is_compilation { -7.0 } else { 0.0 };
 
     Evaluated {
+        index,
         candidate,
         total,
         title_similarity,
@@ -539,6 +571,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(decision.candidate_id, 1);
+    }
+
+    #[test]
+    fn complete_catalog_row_beats_a_slightly_higher_incomplete_row() {
+        let incomplete = candidate(1, "deezer", "Perfect", "÷ (Deluxe)", 98.0);
+        let mut complete = candidate(2, "itunes", "Perfect", "÷ (Deluxe)", 95.0);
+        complete.album_artist = Some("Ed Sheeran".into());
+        complete.year = Some("2017".into());
+        complete.genre = Some("Pop".into());
+        complete.track_number = Some(5);
+        complete.cover_url = Some("https://example.test/divide.jpg".into());
+        complete.isrc = Some("GBAHS1700024".into());
+
+        let decision = select(
+            TrackEvidence {
+                filename: "Ed Sheeran - Perfect.mp3",
+                title: Some("Perfect"),
+                artist: Some("Ed Sheeran"),
+                album: Some("Divide (Deluxe)"),
+            },
+            &[incomplete, complete],
+        )
+        .unwrap();
+
+        assert_eq!(decision.candidate_id, 2);
     }
 
     #[test]

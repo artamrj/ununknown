@@ -72,7 +72,45 @@ pub async fn auto_approve_review(
             album: track.current_album.as_deref(),
         };
         if let Some(decision) = crate::application::smart_approval::select(evidence, &candidates) {
-            decisions.push((track.id, decision));
+            let Some(mut selected) = candidates
+                .iter()
+                .find(|candidate| candidate.id == Some(decision.candidate_id))
+                .cloned()
+            else {
+                unavailable += 1;
+                continue;
+            };
+            let path = std::path::PathBuf::from(&track.path);
+            let embedded_cover = tokio::task::spawn_blocking(move || {
+                crate::infrastructure::media::tag_writer::read_artwork(&path)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+            .await
+            .unwrap_or(false);
+            crate::application::metadata_completion::complete(
+                &mut selected,
+                &candidates,
+                track.current_album.as_deref(),
+                embedded_cover,
+            );
+            let limiter = s.artwork_downloads.read().await.clone();
+            let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
+            crate::application::metadata_completion::ensure_usable_cover(
+                &s.pool,
+                &s.client,
+                &mut selected,
+                embedded_cover,
+            )
+            .await;
+            let completion =
+                crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
+            if completion.core_complete {
+                decisions.push((track.id, decision, selected, completion));
+            } else {
+                low_confidence += 1;
+            }
         } else {
             low_confidence += 1;
         }
@@ -81,11 +119,14 @@ pub async fn auto_approve_review(
     let mut transaction = s.pool.begin().await?;
     let updated_at = chrono::Utc::now().to_rfc3339();
     let mut approved = 0_u64;
-    for (track_id, decision) in decisions {
+    for (track_id, decision, candidate, completion) in decisions {
         let message = format!(
-            "Smart auto-approved ({:.0}%): {}",
-            decision.confidence, decision.explanation
+            "Smart auto-approved ({:.0}%): {}; {}",
+            decision.confidence,
+            decision.explanation,
+            completion.summary()
         );
+        persist_completed_candidate(&mut transaction, &candidate).await?;
         approved += sqlx::query(
             "UPDATE tracks
              SET selected_candidate_id=?,status='selected',stage='ready',stage_message=?,updated_at=?
@@ -229,21 +270,89 @@ pub async fn select_candidate(
     let candidate_id = body
         .candidate_id
         .ok_or_else(|| ApiError::validation("candidate is required"))?;
-    let belongs: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM candidates WHERE id=? AND track_id=?)")
-            .bind(candidate_id.0)
-            .bind(id.0)
-            .fetch_one(&s.pool)
-            .await?;
-    if !belongs {
+    let track = queries::track(&s.pool, id).await?;
+    let rows = queries::candidates(&s.pool, id).await?;
+    let candidates = rows.iter().map(CandidateRow::value).collect::<Vec<_>>();
+    let Some(mut selected) = candidates
+        .iter()
+        .find(|candidate| candidate.id == Some(candidate_id.0))
+        .cloned()
+    else {
         return Err(ApiError::not_found("candidate not found for this track"));
-    }
-    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message=NULL WHERE id=?")
+    };
+    let source_path = std::path::PathBuf::from(&track.path);
+    let embedded_cover = tokio::task::spawn_blocking(move || {
+        crate::infrastructure::media::tag_writer::read_artwork(&source_path)
+            .ok()
+            .flatten()
+            .is_some()
+    })
+    .await
+    .unwrap_or(false);
+    crate::application::metadata_completion::complete(
+        &mut selected,
+        &candidates,
+        track.current_album.as_deref(),
+        embedded_cover,
+    );
+    let limiter = s.artwork_downloads.read().await.clone();
+    let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
+    crate::application::metadata_completion::ensure_usable_cover(
+        &s.pool,
+        &s.client,
+        &mut selected,
+        embedded_cover,
+    )
+    .await;
+    let completion =
+        crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
+    let mut transaction = s.pool.begin().await?;
+    persist_completed_candidate(&mut transaction, &selected).await?;
+    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message=?,updated_at=? WHERE id=?")
         .bind(candidate_id.0)
+        .bind(format!("Selected by you; {}", completion.summary()))
+        .bind(chrono::Utc::now().to_rfc3339())
         .bind(id.0)
-        .execute(&s.pool)
+        .execute(&mut *transaction)
         .await?;
+    transaction.commit().await?;
     Ok(Json(serde_json::json!({"selected": true})))
+}
+
+async fn persist_completed_candidate(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    candidate: &Candidate,
+) -> Result<()> {
+    let id = candidate
+        .id
+        .ok_or_else(|| anyhow::anyhow!("completed candidate has no database ID"))?;
+    sqlx::query(
+        "UPDATE candidates SET title=?,artist=?,album=?,album_artist=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,genre=?,composer=?,label=?,isrc=?,cover_url=?,release_country=?,release_date=?,release_type=?,release_secondary_types=?,is_compilation=?,score_breakdown=? WHERE id=?",
+    )
+    .bind(&candidate.title)
+    .bind(&candidate.artist)
+    .bind(&candidate.album)
+    .bind(&candidate.album_artist)
+    .bind(candidate.track_number)
+    .bind(candidate.track_total)
+    .bind(candidate.disc_number)
+    .bind(candidate.disc_total)
+    .bind(&candidate.year)
+    .bind(&candidate.genre)
+    .bind(&candidate.composer)
+    .bind(&candidate.label)
+    .bind(&candidate.isrc)
+    .bind(&candidate.cover_url)
+    .bind(&candidate.release_country)
+    .bind(&candidate.release_date)
+    .bind(&candidate.release_type)
+    .bind(&candidate.release_secondary_types)
+    .bind(candidate.is_compilation)
+    .bind(&candidate.score_breakdown)
+    .bind(id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 pub async fn return_to_review(
@@ -600,6 +709,19 @@ mod tests {
         let database = directory.path().join("auto-approve.sqlite");
         let pool = db::connect(database.to_str().unwrap()).await.unwrap();
         let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        crate::infrastructure::provider_cache::ProviderCache::put(
+            &pool,
+            "artwork-url",
+            &crate::infrastructure::provider_cache::search_key(
+                "https://example.test/cover.jpg",
+            ),
+            &serde_json::json!({
+                "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            }),
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
 
         let review_id = insert_test_track(&pool, "/music/review.mp3", "needs_review", 0).await;
         let smart_id = insert_test_candidate(&pool, review_id, "Song", 90.0).await;
@@ -710,7 +832,7 @@ mod tests {
         title: &str,
         score: f64,
     ) -> i64 {
-        sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,duration_delta,score,score_breakdown) VALUES(?,'deezer',?,'Artist',1.0,?,'{\"sources\":[\"Deezer\"]}')")
+        sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,cover_url,duration_delta,score,score_breakdown) VALUES(?,'deezer',?,'Artist','Album','https://example.test/cover.jpg',1.0,?,'{\"sources\":[\"Deezer\"]}')")
             .bind(track_id)
             .bind(title)
             .bind(score)

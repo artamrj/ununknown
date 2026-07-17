@@ -65,9 +65,11 @@ metadata, duration, release date, and original-resolution cover art.
 4. Resolve files that need help individually, or use **Smart auto-select** to analyze review
    candidates in bulk. It combines recording identity, version markers, duration, independent
    source agreement, existing album context, release type, and compilation status instead of
-   blindly taking the highest score. Ambiguous, unmatched, damaged, and missing tracks remain in
-   review. Any identified track can be returned to review with **Undo identification** without
-   discarding its candidate choices.
+   blindly taking the highest score. A completion worker then merges missing metadata only from
+   agreeing recordings and compatible releases, verifies the actual cover image, and keeps tracks
+   without a title, artist, album, or usable cover in review. Ambiguous, unmatched, damaged, and
+   incomplete tracks remain in review. Any identified track can be returned to review with
+   **Undo identification** without discarding its candidate choices.
 5. Select **Write corrected files**.
 
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,

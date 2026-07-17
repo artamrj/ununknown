@@ -1,5 +1,5 @@
 export type Setup = { input_dir: string; output_dir: string; delete_source_after_write: boolean; sources: Record<string, boolean> };
-export type Candidate = { id: number; provider?: string; title?: string; artist?: string; album?: string; album_artist?: string; track_number?: number; year?: string; genre?: string; cover_url?: string; score_breakdown?: string; score: number };
+export type Candidate = { id: number; provider?: string; title?: string; artist?: string; album?: string; album_artist?: string; track_number?: number; track_total?: number; disc_number?: number; disc_total?: number; year?: string; genre?: string; composer?: string; label?: string; isrc?: string; release_date?: string; cover_url?: string; score_breakdown?: string; score: number };
 export type Track = { id: number; filename: string; duration?: number; current_title?: string; current_artist?: string; current_album?: string; current_album_artist?: string; current_track_number?: number; selected_candidate_id?: number; status: string; stage: string; stage_message?: string; error?: string; is_missing: boolean; candidates: Candidate[] };
 export type TrackPage = { items: Track[]; total: number };
 export type AutoApproveResult = { approved: number; remaining: number; low_confidence: number; unavailable: number };
