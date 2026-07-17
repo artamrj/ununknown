@@ -60,7 +60,11 @@ automatically written unless it passes the existing confidence and ambiguity rul
 1. Enter an input and output folder.
 2. Optionally add source API keys.
 3. Select **Scan and identify**.
-4. Resolve only the files that need help.
+4. Resolve files that need help individually, or use **Smart auto-select** to analyze review
+   candidates in bulk. It combines recording identity, version markers, duration, independent
+   source agreement, existing album context, release type, and compilation status instead of
+   blindly taking the highest score. Ambiguous, unmatched, damaged, and missing tracks remain in
+   review.
 5. Select **Write corrected files**.
 
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,

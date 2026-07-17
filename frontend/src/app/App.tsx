@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/api/client";
-import type { Candidate, Setup, Track, TrackPage, Workflow } from "@/api/types";
+import type { AutoApproveResult, Candidate, Setup, Track, TrackPage, Workflow } from "@/api/types";
 
 const emptySetup: Setup = { input_dir: "", output_dir: "", delete_source_after_write: false, sources: {} };
 const busyPhases = new Set(["scan", "fetch", "apply"]);
@@ -11,7 +11,9 @@ export function App() {
   const [workflow, setWorkflow] = useState<Workflow>();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
+  const [autoApproving, setAutoApproving] = useState(false);
 
   const loadTracks = useCallback(async () => {
     const page = await api<TrackPage>("/tracks?page_size=10000");
@@ -110,7 +112,32 @@ export function App() {
     () => tracks.filter((track) => track.stage !== "ready" && track.stage !== "skipped"),
     [tracks],
   );
+  const autoApprovable = useMemo(
+    () => review.filter((track) => track.stage === "review" && track.status !== "corrupt" && !track.is_missing && track.candidates.length > 0).length,
+    [review],
+  );
   const busy = workflow ? busyPhases.has(workflow.phase) : false;
+
+  const autoApprove = async () => {
+    if (!confirm(`Smart-select matches for up to ${autoApprovable} review tracks? Song identity, version, duration, source agreement, and album context will be checked. Uncertain tracks will stay in review.`)) return;
+    setAutoApproving(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api<AutoApproveResult>("/tracks/auto-approve", { method: "POST", body: "{}" });
+      await loadTracks();
+      const details = [
+        `${result.approved} review tracks smart-approved.`,
+        result.low_confidence ? `${result.low_confidence} ambiguous matches were left for review.` : "",
+        result.unavailable ? `${result.unavailable} tracks have no usable candidate or cannot be written.` : "",
+      ].filter(Boolean).join(" ");
+      setNotice(details);
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setAutoApproving(false);
+    }
+  };
 
   return (
     <main>
@@ -123,6 +150,7 @@ export function App() {
       </header>
 
       {error && <div className="error">{error}</div>}
+      {notice && <div className="notice">{notice}</div>}
 
       <section className="setup card">
         <label>
@@ -185,8 +213,11 @@ export function App() {
           <div className="section-title">
             <div><h2>{review.length ? `${review.length} need your help` : "Everything is identified"}</h2><p>{ready.length} tracks are ready to write.</p></div>
             <div className="write-action">
+              {autoApprovable > 0 && <button className="secondary" disabled={autoApproving} onClick={autoApprove}>{autoApproving ? "Analyzing matches…" : `Smart auto-select ${autoApprovable} reviews`}</button>}
               <button className="primary" disabled={!ready.length} onClick={write}>Write {ready.length} corrected files</button>
-              {ready.length > 0 && <small>{setup.delete_source_after_write ? "Successful inputs will be removed" : "Includes ReplayGain track gain + peak"}</small>}
+              {autoApprovable > 0
+                ? <small>Checks recording, version, duration, sources, and album—not just score.</small>
+                : ready.length > 0 && <small>{setup.delete_source_after_write ? "Successful inputs will be removed" : "Includes ReplayGain track gain + peak"}</small>}
             </div>
           </div>
           {review.map((track) => <ReviewTrack key={track.id} track={track} onChoose={choose} onSaved={loadTracks} />)}
@@ -256,6 +287,7 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
     <div className="track-metadata">
       {candidate && <span className="provider-badge">From {candidateSources(candidate)}</span>}
       <small>{[candidate?.album, candidate?.year, genreText(candidate)].filter(Boolean).join(" · ")}</small>
+      {track.stage_message?.startsWith("Smart auto-approved") && <small className="selection-reason">{track.stage_message}</small>}
       <button className="link" onClick={() => setEditing(!editing)}>{editing ? "Close editor" : "Edit metadata"}</button>
     </div>
     {candidate && <GoogleCheck candidate={candidate} compact />}

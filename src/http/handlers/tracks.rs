@@ -21,6 +21,99 @@ pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Track
     Ok(Json(TrackPage { items, total }))
 }
 
+pub async fn auto_approve_review(
+    State(s): State<Arc<AppState>>,
+) -> ApiResult<Json<AutoApproveResult>> {
+    if s.workflow_running().await {
+        return Err(ApiError::conflict(
+            "Wait for the current scan or write operation to finish",
+        ));
+    }
+
+    let tracks: Vec<Track> = sqlx::query_as(&format!(
+        "SELECT {} FROM tracks WHERE stage='review' AND selected_candidate_id IS NULL ORDER BY id",
+        queries::TRACK_FIELDS
+    ))
+    .fetch_all(&s.pool)
+    .await?;
+    let candidate_rows: Vec<CandidateRow> = sqlx::query_as(
+        "SELECT candidates.* FROM candidates
+         JOIN tracks ON tracks.id=candidates.track_id
+         WHERE tracks.stage='review' AND tracks.selected_candidate_id IS NULL
+         ORDER BY candidates.track_id, candidates.id",
+    )
+    .fetch_all(&s.pool)
+    .await?;
+    let mut candidates_by_track = std::collections::HashMap::new();
+    for row in candidate_rows {
+        candidates_by_track
+            .entry(row.track_id.0)
+            .or_insert_with(Vec::new)
+            .push(row.value());
+    }
+
+    let mut decisions = Vec::new();
+    let mut low_confidence = 0_u64;
+    let mut unavailable = 0_u64;
+    for track in tracks {
+        if track.status == "corrupt" || track.is_missing {
+            unavailable += 1;
+            continue;
+        }
+        let candidates = candidates_by_track.remove(&track.id.0).unwrap_or_default();
+        if candidates.is_empty() {
+            unavailable += 1;
+            continue;
+        }
+        let evidence = crate::application::smart_approval::TrackEvidence {
+            filename: &track.filename,
+            title: track.current_title.as_deref(),
+            artist: track.current_artist.as_deref(),
+            album: track.current_album.as_deref(),
+        };
+        if let Some(decision) = crate::application::smart_approval::select(evidence, &candidates) {
+            decisions.push((track.id, decision));
+        } else {
+            low_confidence += 1;
+        }
+    }
+
+    let mut transaction = s.pool.begin().await?;
+    let updated_at = chrono::Utc::now().to_rfc3339();
+    let mut approved = 0_u64;
+    for (track_id, decision) in decisions {
+        let message = format!(
+            "Smart auto-approved ({:.0}%): {}",
+            decision.confidence, decision.explanation
+        );
+        approved += sqlx::query(
+            "UPDATE tracks
+             SET selected_candidate_id=?,status='selected',stage='ready',stage_message=?,updated_at=?
+             WHERE id=? AND stage='review' AND selected_candidate_id IS NULL",
+        )
+        .bind(decision.candidate_id)
+        .bind(message)
+        .bind(&updated_at)
+        .bind(track_id.0)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+    }
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tracks WHERE stage='review' AND selected_candidate_id IS NULL",
+    )
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    Ok(Json(AutoApproveResult {
+        approved,
+        remaining,
+        low_confidence,
+        unavailable,
+    }))
+}
+
 pub async fn track_audio(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
@@ -442,6 +535,84 @@ mod tests {
                 "Correct artist".into()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn auto_approve_uses_smart_selection_and_leaves_unsafe_tracks() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("auto-approve.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+
+        let review_id = insert_test_track(&pool, "/music/review.mp3", "needs_review", 0).await;
+        let smart_id = insert_test_candidate(&pool, review_id, "Song", 90.0).await;
+        let highest_id = insert_test_candidate(&pool, review_id, "Song (Live)", 99.0).await;
+        let corrupt_id = insert_test_track(&pool, "/music/corrupt.mp3", "corrupt", 0).await;
+        insert_test_candidate(&pool, corrupt_id, "Must stay", 99.0).await;
+        insert_test_track(&pool, "/music/unmatched.mp3", "needs_review", 0).await;
+        let missing_id = insert_test_track(&pool, "/music/missing.mp3", "needs_review", 1).await;
+        insert_test_candidate(&pool, missing_id, "Missing source", 99.0).await;
+
+        let result = auto_approve_review(State(state)).await.unwrap().0;
+
+        assert_eq!(result.approved, 1);
+        assert_eq!(result.remaining, 3);
+        assert_eq!(result.low_confidence, 0);
+        assert_eq!(result.unavailable, 3);
+        let selected: (Option<i64>, String, String, Option<String>) = sqlx::query_as(
+            "SELECT selected_candidate_id,status,stage,stage_message FROM tracks WHERE id=?",
+        )
+        .bind(review_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(selected.0, Some(smart_id));
+        assert_ne!(selected.0, Some(highest_id));
+        assert_eq!(selected.1, "selected");
+        assert_eq!(selected.2, "ready");
+        assert!(selected.3.unwrap().starts_with("Smart auto-approved"));
+        let untouched: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM tracks WHERE id IN (?,?) AND stage='review' AND selected_candidate_id IS NULL",
+        )
+        .bind(corrupt_id)
+        .bind(missing_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(untouched, 2);
+    }
+
+    async fn insert_test_track(
+        pool: &sqlx::SqlitePool,
+        path: &str,
+        status: &str,
+        is_missing: i64,
+    ) -> i64 {
+        sqlx::query("INSERT INTO tracks(path,filename,current_title,current_artist,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES(?,?,'Song','Artist',?,?,'now','now','now','review')")
+            .bind(path)
+            .bind(path.rsplit('/').next().unwrap())
+            .bind(status)
+            .bind(is_missing)
+            .execute(pool)
+            .await
+            .unwrap()
+            .last_insert_rowid()
+    }
+
+    async fn insert_test_candidate(
+        pool: &sqlx::SqlitePool,
+        track_id: i64,
+        title: &str,
+        score: f64,
+    ) -> i64 {
+        sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,duration_delta,score,score_breakdown) VALUES(?,'deezer',?,'Artist',1.0,?,'{\"sources\":[\"Deezer\"]}')")
+            .bind(track_id)
+            .bind(title)
+            .bind(score)
+            .execute(pool)
+            .await
+            .unwrap()
+            .last_insert_rowid()
     }
 
     #[test]

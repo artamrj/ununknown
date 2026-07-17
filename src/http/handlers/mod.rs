@@ -26,8 +26,8 @@ pub use apply::start_apply;
 pub use scan::{start_scan, stop_scan};
 pub use settings::{setup, update_setup};
 pub use tracks::{
-    artwork_preview, candidate_artwork_preview, list_tracks, manual_candidate, resolve_source,
-    select_candidate, track_audio, update_artwork,
+    artwork_preview, auto_approve_review, candidate_artwork_preview, list_tracks, manual_candidate,
+    resolve_source, select_candidate, track_audio, update_artwork,
 };
 pub use workspace::workspace;
 
@@ -212,6 +212,14 @@ pub struct WorkspaceTrack {
 pub struct TrackPage {
     items: Vec<WorkspaceTrack>,
     total: i64,
+}
+
+#[derive(Serialize)]
+pub struct AutoApproveResult {
+    approved: u64,
+    remaining: i64,
+    low_confidence: u64,
+    unavailable: u64,
 }
 
 fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<String> {
