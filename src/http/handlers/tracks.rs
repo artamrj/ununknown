@@ -61,11 +61,13 @@ pub async fn manual_candidate(
             "Damaged audio cannot be marked ready; repair or replace the source file first",
         ));
     }
-    let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(id.0).bind("manual").bind(value.title.trim()).bind(value.artist.trim())
         .bind(value.album).bind(value.album_artist).bind(value.track_number).bind(value.track_total)
         .bind(value.disc_number).bind(value.disc_total).bind(value.year).bind(value.genre)
-        .bind(value.composer).bind(value.label).bind(value.isrc).bind(100.0).bind("{}")
+        .bind(value.composer).bind(value.label).bind(value.isrc)
+        .bind(value.cover_url.filter(|url| !url.trim().is_empty()))
+        .bind(100.0).bind("{}")
         .execute(&s.pool).await?;
     let candidate_id = result.last_insert_rowid();
     sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message='Entered manually' WHERE id=?")
@@ -109,6 +111,7 @@ mod tests {
                 composer: None,
                 label: None,
                 isrc: None,
+                cover_url: Some("https://example.test/cover.jpg".into()),
             }),
         )
         .await

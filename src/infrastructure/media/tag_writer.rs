@@ -25,6 +25,17 @@ pub fn write(
         bail!("{ext} writing skipped because it is conditional/unsafe in this MVP");
     }
     let mut file = Probe::open(path)?.read()?;
+    let preserved_artwork = file
+        .tags()
+        .iter()
+        .flat_map(|tag| tag.pictures())
+        .find(|picture| {
+            matches!(
+                picture.pic_type(),
+                PictureType::CoverFront | PictureType::Other
+            ) && validate_artwork(picture.data()).is_ok()
+        })
+        .map(|picture| picture.data().to_vec());
     // Rebuild the primary tag instead of mutating it. Real music collections often
     // contain malformed frames that can be read but cannot be saved again.
     file.insert_tag(Tag::new(file.primary_tag_type()));
@@ -73,7 +84,7 @@ pub fn write(
     if let Some(v) = candidate.disc_total {
         tag.set_disk_total(v as u32);
     }
-    if let Some(data) = artwork {
+    if let Some(data) = artwork.or(preserved_artwork) {
         let mut picture = picture_from_bytes(data)?;
         picture.set_pic_type(PictureType::CoverFront);
         tag.push_picture(picture);
@@ -91,6 +102,13 @@ fn picture_from_bytes(data: Vec<u8>) -> Result<Picture> {
     let mut reader = std::io::Cursor::new(data);
     Ok(Picture::from_reader(&mut reader)?)
 }
+
+pub fn validate_artwork(data: &[u8]) -> Result<()> {
+    if data.len() > 20 * 1024 * 1024 {
+        bail!("cover image exceeds the 20 MB safety limit");
+    }
+    picture_from_bytes(data.to_vec()).map(|_| ())
+}
 fn set(tag: &mut Tag, key: ItemKey, value: &str) {
     tag.insert_text(key, value.into());
 }
@@ -103,7 +121,14 @@ fn optional(tag: &mut Tag, key: ItemKey, value: &Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD};
     use lofty::picture::MimeType;
+
+    fn one_pixel_png() -> Vec<u8> {
+        STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap()
+    }
 
     #[test]
     fn cover_image_type_is_detected_before_embedding() {
@@ -115,6 +140,38 @@ mod tests {
     #[test]
     fn invalid_cover_data_is_rejected() {
         assert!(picture_from_bytes(vec![0; 12]).is_err());
+    }
+
+    #[test]
+    fn existing_valid_cover_survives_when_catalog_has_no_artwork() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preserve-cover.mp3");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=0.1")
+            .args(["-q:a", "9"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let candidate = Candidate {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            ..Default::default()
+        };
+        let artwork = one_pixel_png();
+        write(&path, &candidate, Some(artwork.clone()), None).unwrap();
+        write(&path, &candidate, None, None).unwrap();
+
+        let file = Probe::open(&path).unwrap().read().unwrap();
+        assert_eq!(file.primary_tag().unwrap().pictures()[0].data(), artwork);
     }
 
     #[test]

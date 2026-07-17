@@ -59,12 +59,15 @@ label i { color: #226b47; font-size: 11px; }
 .candidates button { display: grid; gap: 4px; text-align: left; padding: 12px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 .candidates button:hover { border-color: #226b47; background: #f0f7f3; }
 .candidates span, .candidates small { color: #657068; }
+.artwork { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: #e9eeea; }
+.artwork.missing { display: grid; place-items: center; padding: 7px; box-sizing: border-box; color: #84631b; font-size: 10px; font-weight: 800; text-align: center; }
 .genre { color: #226b47; font-size: 11px; font-style: normal; font-weight: 800; }
 .genre.uncertain { color: #84631b; }
 .manual { margin-top: 15px; padding-top: 15px; border-top: 1px solid #edf0ed; }
 .manual .primary { align-self: end; }
 .ready-list { margin-top: 20px; padding: 18px 20px; border: 1px solid #dfe4df; border-radius: 14px; background: white; }
-.track { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) minmax(100px, .5fr); gap: 12px; padding: 11px 0; border-top: 1px solid #edf0ed; font-size: 13px; }
+.track { display: grid; grid-template-columns: 48px minmax(180px, 1fr) minmax(180px, 1fr) minmax(100px, .5fr); gap: 12px; align-items: center; padding: 11px 0; border-top: 1px solid #edf0ed; font-size: 13px; }
+.track .artwork { width: 48px; height: 48px; }
 .track:first-of-type { margin-top: 12px; }
 .track span, .track small { color: #657068; overflow-wrap: anywhere; }
 @media (max-width: 720px) {

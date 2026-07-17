@@ -185,9 +185,17 @@ fn classify(raw: &str) -> Classification {
         quality,
     };
     match value.as_str() {
-        "farsi" | "persian" => result(Some("Persian Pop"), Some(("Persian", "fas")), 0.70),
+        "farsi" | "persian" | "iranian" => {
+            result(Some("Persian Pop"), Some(("Persian", "fas")), 0.70)
+        }
         "persian pop" => result(Some("Persian Pop"), Some(("Persian", "fas")), 1.0),
         "persian rap" => result(Some("Hip-Hop/Rap"), Some(("Persian", "fas")), 1.0),
+        "persian traditional"
+        | "iranian traditional"
+        | "iranian classical music"
+        | "persian classical music" => {
+            result(Some("Persian Traditional"), Some(("Persian", "fas")), 1.0)
+        }
         "worldwide" | "world" | "world music" => result(Some("World"), None, 0.45),
         "rap" | "hip hop" | "hiphop" | "hip hop/rap" | "pop rap" | "trap" => {
             result(Some("Hip-Hop/Rap"), None, 1.0)
@@ -195,23 +203,38 @@ fn classify(raw: &str) -> Classification {
         "r&b" | "rnb" | "r&b/soul" | "soul" | "alternative r&b" | "contemporary r&b" => {
             result(Some("R&B/Soul"), None, 1.0)
         }
-        "alternative" | "indie" | "indie pop" => result(Some("Alternative"), None, 1.0),
-        "alternative rock" | "indie rock" | "rock" | "rock music" | "pop rock" => {
-            result(Some("Rock"), None, 1.0)
+        "alternative" | "indie" | "indie pop" | "dream pop" | "shoegaze" => {
+            result(Some("Alternative"), None, 1.0)
         }
-        "pop" | "pop music" | "dance pop" | "electropop" => result(Some("Pop"), None, 1.0),
+        "alternative rock" | "indie rock" | "rock" | "rock music" | "pop rock" | "punk"
+        | "punk rock" | "post punk" | "hard rock" => result(Some("Rock"), None, 1.0),
+        "pop" | "pop music" | "dance pop" | "electropop" | "synthpop" | "synth pop"
+        | "adult contemporary" | "traditional pop" => result(Some("Pop"), None, 1.0),
         "soundtrack" | "stage & screen" | "film score" | "score" | "trailer music" => {
             result(Some("Soundtrack"), None, 1.0)
         }
-        "electronic" | "electronica" | "dance" | "edm" => result(Some("Electronic"), None, 1.0),
-        "folk" | "folk pop" => result(Some("Folk"), None, 1.0),
+        "electronic" | "electronica" | "dance" | "edm" | "house" | "deep house" | "techno"
+        | "trance" | "ambient" | "downtempo" | "dubstep" => result(Some("Electronic"), None, 1.0),
+        "folk" | "folk pop" | "traditional folk" | "contemporary folk" => {
+            result(Some("Folk"), None, 1.0)
+        }
         "jazz" => result(Some("Jazz"), None, 1.0),
         "classical" => result(Some("Classical"), None, 1.0),
         "country" | "country music" => result(Some("Country"), None, 1.0),
         "reggae" => result(Some("Reggae"), None, 1.0),
-        "metal" | "heavy metal" => result(Some("Metal"), None, 1.0),
+        "metal" | "heavy metal" | "alternative metal" | "nu metal" | "metalcore" => {
+            result(Some("Metal"), None, 1.0)
+        }
         "blues" => result(Some("Blues"), None, 1.0),
-        "latin" | "latin pop" => result(Some("Latin"), None, 1.0),
+        "latin" | "latin pop" | "reggaeton" | "salsa" | "bachata" => {
+            result(Some("Latin"), None, 1.0)
+        }
+        "turkish pop" => result(Some("Turkish Pop"), Some(("Turkish", "tur")), 1.0),
+        "arabic pop" => result(Some("Arabic Pop"), Some(("Arabic", "ara")), 1.0),
+        "k pop" | "kpop" => result(Some("K-Pop"), Some(("Korean", "kor")), 1.0),
+        "children's music" | "childrens music" | "children" => {
+            result(Some("Children's Music"), None, 1.0)
+        }
         "singer/songwriter" | "singer songwriter" => result(Some("Singer/Songwriter"), None, 1.0),
         _ => result(None, None, 0.0),
     }

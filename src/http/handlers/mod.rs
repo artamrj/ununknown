@@ -149,6 +149,7 @@ pub struct CandidateEdit {
     composer: Option<String>,
     label: Option<String>,
     isrc: Option<String>,
+    cover_url: Option<String>,
 }
 
 #[derive(Deserialize)]

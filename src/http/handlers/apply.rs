@@ -157,55 +157,7 @@ pub async fn apply(
                 None
             }
         };
-        let artwork = if let Some(url) = &candidate.cover_url {
-            let limiter = s.artwork_downloads.read().await.clone();
-            let _permit = limiter.acquire_owned().await?;
-            if let Some(release_id) = candidate.release_id.as_deref() {
-                match crate::infrastructure::providers::cover_art_archive::fetch_cached(
-                    &s.pool, &s.client, release_id, url,
-                )
-                .await
-                {
-                    Ok(bytes) => {
-                        s.log_entry(
-                            ActivityLogEntry::new("ok", "artwork", "Downloaded cover art")
-                                .file(item.filename.clone())
-                                .context(serde_json::json!({"release_id": release_id})),
-                        )
-                        .await;
-                        Some(bytes)
-                    }
-                    Err(error) => {
-                        s.log_entry(
-                            ActivityLogEntry::new("warn", "artwork", "Cover art download failed")
-                                .file(item.filename.clone())
-                                .error(error.as_ref())
-                                .context(serde_json::json!({"release_id": release_id, "url": url})),
-                        )
-                        .await;
-                        None
-                    }
-                }
-            } else {
-                match crate::infrastructure::providers::cover_art_archive::fetch(&s.client, url)
-                    .await
-                {
-                    Ok(bytes) => Some(bytes),
-                    Err(error) => {
-                        s.log_entry(
-                            ActivityLogEntry::new("warn", "artwork", "Cover art download failed")
-                                .file(item.filename.clone())
-                                .error(error.as_ref())
-                                .context(serde_json::json!({"url": url})),
-                        )
-                        .await;
-                        None
-                    }
-                }
-            }
-        } else {
-            None
-        };
+        let artwork = resolve_artwork(&s, &item.filename, &candidate).await?;
         let src = PathBuf::from(&item.current_path);
         let dest = PathBuf::from(&item.destination_path);
         if delete_source_after_write && paths_resolve_to_same_target(&src, &dest).await? {
@@ -340,6 +292,103 @@ pub async fn apply(
         }
     }
     Ok(())
+}
+
+async fn resolve_artwork(
+    state: &Arc<AppState>,
+    filename: &str,
+    candidate: &crate::infrastructure::providers::Candidate,
+) -> Result<Option<Vec<u8>>> {
+    let mut urls = Vec::<(String, String)>::new();
+    if let Some(url) = candidate.cover_url.as_deref() {
+        urls.push((candidate.provider.clone(), url.to_owned()));
+    }
+    if let Some(value) = candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+        for item in value["artwork_candidates"].as_array().into_iter().flatten() {
+            if let Some(url) = item["url"].as_str() {
+                urls.push((
+                    item["provider"].as_str().unwrap_or("catalog").to_owned(),
+                    url.to_owned(),
+                ));
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    urls.retain(|(_, url)| seen.insert(url.clone()));
+    if urls.is_empty() {
+        state
+            .log(
+                "info",
+                "artwork",
+                Some(filename),
+                "No catalog cover was available; preserving a valid embedded cover if present",
+            )
+            .await;
+        return Ok(None);
+    }
+
+    let limiter = state.artwork_downloads.read().await.clone();
+    let _permit = limiter.acquire_owned().await?;
+    for (provider, url) in urls {
+        let result = if url.contains("coverartarchive.org") {
+            if let Some(release_id) = candidate.release_id.as_deref() {
+                crate::infrastructure::providers::cover_art_archive::fetch_cached(
+                    &state.pool,
+                    &state.client,
+                    release_id,
+                    &url,
+                )
+                .await
+            } else {
+                crate::infrastructure::providers::cover_art_archive::fetch(&state.client, &url)
+                    .await
+            }
+        } else {
+            crate::infrastructure::providers::cover_art_archive::fetch(&state.client, &url).await
+        };
+        match result.and_then(|bytes| {
+            crate::infrastructure::media::tag_writer::validate_artwork(&bytes)?;
+            Ok(bytes)
+        }) {
+            Ok(bytes) => {
+                state
+                    .log_entry(
+                        ActivityLogEntry::new("ok", "artwork", "Downloaded valid cover art")
+                            .file(filename.to_owned())
+                            .context(serde_json::json!({"provider": provider, "url": url})),
+                    )
+                    .await;
+                return Ok(Some(bytes));
+            }
+            Err(error) => {
+                state
+                    .log_entry(
+                        ActivityLogEntry::new(
+                            "warn",
+                            "artwork",
+                            "Artwork source failed; trying the next matching source",
+                        )
+                        .file(filename.to_owned())
+                        .error(error.as_ref())
+                        .context(serde_json::json!({"provider": provider, "url": url})),
+                    )
+                    .await;
+            }
+        }
+    }
+    state
+        .log(
+            "warn",
+            "artwork",
+            Some(filename),
+            "No catalog artwork could be downloaded; preserving a valid embedded cover if present",
+        )
+        .await;
+    Ok(None)
 }
 
 async fn paths_resolve_to_same_target(

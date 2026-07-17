@@ -204,14 +204,14 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
   const corrupt = track.status === "corrupt";
   return <article className="review card">
     <header><div><h3>{track.filename}</h3><p className={corrupt ? "corrupt-message" : undefined}>{track.stage_message || track.error || "No reliable match was found."}</p>{corrupt && track.error && <small className="corrupt-detail">{track.error}</small>}</div><span>{Math.round(track.duration || 0)}s</span></header>
-    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button>)}</div>}
+    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button>)}</div>}
     {!corrupt && <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>}
     {!corrupt && manual && <ManualEditor track={track} onSaved={onSaved} />}
   </article>;
 }
 
 function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise<void> }) {
-  const [form, setForm] = useState<Record<string, string | number>>({ title: track.current_title || "", artist: track.current_artist || "", album: track.current_album || "", album_artist: track.current_album_artist || "", track_number: track.current_track_number || "", year: "", genre: "" });
+  const [form, setForm] = useState<Record<string, string | number>>({ title: track.current_title || "", artist: track.current_artist || "", album: track.current_album || "", album_artist: track.current_album_artist || "", track_number: track.current_track_number || "", year: "", genre: "", cover_url: "" });
   const save = async () => {
     await api(`/tracks/${track.id}/manual`, { method: "PUT", body: JSON.stringify({ ...form, track_number: form.track_number ? Number(form.track_number) : null }) });
     await onSaved();
@@ -222,7 +222,27 @@ function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise
 function TrackSummary({ track, candidate }: { track: Track; candidate?: Candidate }) {
   const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
   const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
-  return <div className="track"><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
+  return <div className="track"><Artwork candidate={candidate} /><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
+}
+
+function Artwork({ candidate }: { candidate?: Candidate }) {
+  const urls = artworkUrls(candidate);
+  const [index, setIndex] = useState(0);
+  useEffect(() => setIndex(0), [candidate?.id, candidate?.cover_url]);
+  return urls[index]
+    ? <img className="artwork" src={urls[index]} alt={`Cover for ${candidate?.album || candidate?.title || "track"}`} loading="lazy" onError={() => setIndex((current) => current + 1)} />
+    : <span className="artwork missing">No catalog cover</span>;
+}
+
+function artworkUrls(candidate?: Candidate) {
+  const urls = candidate?.cover_url ? [candidate.cover_url] : [];
+  try {
+    const alternatives = JSON.parse(candidate?.score_breakdown || "{}")?.artwork_candidates || [];
+    for (const artwork of alternatives) if (typeof artwork?.url === "string") urls.push(artwork.url);
+  } catch {
+    // A malformed explanation must not break the rest of the review screen.
+  }
+  return [...new Set(urls)];
 }
 
 function safeName(value: string) {

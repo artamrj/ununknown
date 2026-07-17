@@ -1,19 +1,23 @@
 use crate::infrastructure::provider_cache::{ProviderCache, release_key};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{Duration, Utc};
 use reqwest::Client;
 use sqlx::SqlitePool;
 
 pub async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
-    Ok(client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?
-        .to_vec())
+    let response = client.get(url).send().await?.error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > 20 * 1024 * 1024)
+    {
+        bail!("cover image exceeds the 20 MB safety limit");
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() > 20 * 1024 * 1024 {
+        bail!("cover image exceeds the 20 MB safety limit");
+    }
+    Ok(bytes.to_vec())
 }
 
 pub async fn fetch_cached(

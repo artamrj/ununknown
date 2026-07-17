@@ -688,6 +688,7 @@ async fn identify(
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
     out.extend(query_wikidata(state, limits, current, filename).await);
     apply_source_agreement(&mut out)?;
+    enrich_artwork_fallbacks(&mut out)?;
     let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, current) {
         if let Some(artist) = current.artist.as_deref() {
             match providers::wikidata::artist_genres(&state.pool, &state.client, artist).await {
@@ -1358,6 +1359,81 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
         set_score_sources(candidate, sources)?;
     }
     Ok(())
+}
+
+fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<()> {
+    let snapshot = candidates.to_vec();
+    for candidate in candidates {
+        let mut artwork = snapshot
+            .iter()
+            .filter(|other| artwork_agrees(candidate, other))
+            .filter_map(|other| {
+                other.cover_url.as_deref().map(|url| {
+                    (
+                        artwork_provider_priority(&other.provider),
+                        other.score,
+                        other.provider.clone(),
+                        url.to_owned(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        artwork.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.total_cmp(&left.1))
+        });
+        artwork.dedup_by(|left, right| left.3 == right.3);
+        if candidate.cover_url.is_none() {
+            candidate.cover_url = artwork.first().map(|item| item.3.clone());
+        }
+        if artwork.is_empty() {
+            continue;
+        }
+        let mut breakdown = candidate
+            .score_breakdown
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        breakdown["artwork_candidates"] = serde_json::Value::Array(
+            artwork
+                .into_iter()
+                .map(|(_, _, provider, url)| {
+                    serde_json::json!({
+                        "provider": provider_display_name(&provider),
+                        "url": url
+                    })
+                })
+                .collect(),
+        );
+        candidate.score_breakdown = Some(breakdown.to_string());
+    }
+    Ok(())
+}
+
+fn artwork_agrees(left: &providers::Candidate, right: &providers::Candidate) -> bool {
+    if !candidate_agrees(left, right) {
+        return false;
+    }
+    match (left.album.as_deref(), right.album.as_deref()) {
+        (Some(left_album), Some(right_album)) => text_close(left_album, right_album, 0.65),
+        (Some(_), None) => false,
+        _ => true,
+    }
+}
+
+fn artwork_provider_priority(provider: &str) -> u8 {
+    match provider {
+        "musicbrainz" => 7,
+        "itunes" | "spotify" => 6,
+        "deezer" => 5,
+        "discogs" => 4,
+        "audd" | "theaudiodb" => 3,
+        "lastfm" => 2,
+        "youtube" => 1,
+        _ => 0,
+    }
 }
 
 fn dedupe_candidates(candidates: &mut Vec<providers::Candidate>) {
@@ -2214,6 +2290,49 @@ mod tests {
                 .unwrap()
                 .contains(&serde_json::json!("Last.fm"))
         );
+    }
+
+    #[test]
+    fn artwork_fallbacks_keep_matching_catalog_covers_only() {
+        let mut candidates = vec![
+            providers::Candidate {
+                provider: "musicbrainz".into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: Some("Album".into()),
+                score: 94.0,
+                ..Default::default()
+            },
+            providers::Candidate {
+                provider: "itunes".into(),
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: Some("Album".into()),
+                cover_url: Some("https://example.test/correct.jpg".into()),
+                score: 91.0,
+                ..Default::default()
+            },
+            providers::Candidate {
+                provider: "youtube".into(),
+                title: "Song".into(),
+                artist: "Different Artist".into(),
+                cover_url: Some("https://example.test/wrong.jpg".into()),
+                score: 60.0,
+                ..Default::default()
+            },
+        ];
+
+        enrich_artwork_fallbacks(&mut candidates).unwrap();
+
+        assert_eq!(
+            candidates[0].cover_url.as_deref(),
+            Some("https://example.test/correct.jpg")
+        );
+        let details: serde_json::Value =
+            serde_json::from_str(candidates[0].score_breakdown.as_deref().unwrap()).unwrap();
+        let serialized = details["artwork_candidates"].to_string();
+        assert!(serialized.contains("correct.jpg"));
+        assert!(!serialized.contains("wrong.jpg"));
     }
 
     #[test]
