@@ -98,6 +98,9 @@ fn parse_results(raw: &Value) -> Vec<Candidate> {
                     .and_then(|date| date.get(..10))
                     .map(str::to_owned),
                 genre: value["primaryGenreName"].as_str().map(str::to_owned),
+                cover_url: value["artworkUrl100"]
+                    .as_str()
+                    .map(|url| url.replace("100x100bb", "1200x1200bb")),
                 duration_delta: value["trackTimeMillis"]
                     .as_f64()
                     .map(|value| value / 1000.0),
@@ -125,6 +128,7 @@ mod tests {
             "trackTimeMillis": 427076,
             "releaseDate": "2019-06-23T12:00:00Z",
             "primaryGenreName": "Pop",
+            "artworkUrl100": "https://example.test/100x100bb.jpg",
             "trackNumber": 1,
             "trackCount": 1
         }]}));
@@ -132,5 +136,9 @@ mod tests {
         assert_eq!(candidates[0].artist, "Amir Tataloo");
         assert_eq!(candidates[0].release_date.as_deref(), Some("2019-06-23"));
         assert_eq!(candidates[0].duration_delta, Some(427.076));
+        assert_eq!(
+            candidates[0].cover_url.as_deref(),
+            Some("https://example.test/1200x1200bb.jpg")
+        );
     }
 }

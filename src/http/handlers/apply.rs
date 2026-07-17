@@ -1,6 +1,7 @@
 use super::*;
 use crate::app::ActivityLogEntry;
 use chrono::Utc;
+use std::collections::HashSet;
 
 pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     if s.workflow_running().await {
@@ -20,13 +21,17 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         ));
     }
     let mut items = Vec::new();
+    let mut reserved_destinations = HashSet::new();
     for (track, candidate) in selected {
-        let dest = destination(&cfg, &track, &candidate)?;
+        let dest = unique_destination(
+            PathBuf::from(destination(&cfg, &track, &candidate)?),
+            &mut reserved_destinations,
+        );
         items.push(PreviewItem {
             track_id: track.id,
             filename: track.filename.clone(),
             current_path: track.path.clone(),
-            destination_path: dest,
+            destination_path: dest.to_string_lossy().into_owned(),
         });
     }
     let count = items.len();
@@ -49,6 +54,29 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         }
     });
     Ok(Json(serde_json::json!({"started": true, "count": count})))
+}
+
+fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf {
+    if !base.exists() && reserved.insert(base.clone()) {
+        return base;
+    }
+    let parent = base.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = base
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Corrected track");
+    let extension = base.extension().and_then(|value| value.to_str());
+    for number in 2.. {
+        let filename = match extension {
+            Some(extension) => format!("{stem} ({number}).{extension}"),
+            None => format!("{stem} ({number})"),
+        };
+        let candidate = parent.join(filename);
+        if !candidate.exists() && reserved.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
@@ -209,4 +237,20 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_destinations_get_numbered_without_overwrite() {
+        let mut reserved = HashSet::new();
+        let base = PathBuf::from("/output/Artist - Song.mp3");
+        assert_eq!(unique_destination(base.clone(), &mut reserved), base);
+        assert_eq!(
+            unique_destination(base, &mut reserved),
+            PathBuf::from("/output/Artist - Song (2).mp3")
+        );
+    }
 }

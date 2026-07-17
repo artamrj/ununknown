@@ -82,7 +82,7 @@ export function App() {
   };
 
   const write = async () => {
-    if (!confirm("Write the selected metadata to copies in the output folder?")) return;
+    if (!confirm("Write corrected copies named “Artist - Title” to the output folder?")) return;
     try {
       await api("/write", { method: "POST", body: "{}" });
       await refresh();
@@ -190,5 +190,11 @@ function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise
 }
 
 function TrackSummary({ track, candidate }: { track: Track; candidate?: Candidate }) {
-  return <div className="track"><span>{track.filename}</span><b>{candidate ? `${candidate.artist} — ${candidate.title}` : "Selected"}</b><small>{candidate?.album}</small></div>;
+  const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
+  const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
+  return <div className="track"><span>{track.filename}</span><b>→ {outputName}</b><small>{candidate?.album}</small></div>;
+}
+
+function safeName(value: string) {
+  return value.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").replace(/^[ .]+|[ .]+$/g, "");
 }

@@ -174,7 +174,7 @@ pub struct TrackPage {
     total: i64,
 }
 
-fn destination(cfg: &Config, track: &Track, _candidate: &Candidate) -> Result<String> {
+fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<String> {
     let source = std::path::Path::new(&track.path);
     let relative = source
         .strip_prefix(&cfg.input_dir)
@@ -182,8 +182,79 @@ fn destination(cfg: &Config, track: &Track, _candidate: &Candidate) -> Result<St
         .filter(|path| !path.as_os_str().is_empty())
         .or_else(|| source.file_name().map(std::path::Path::new))
         .ok_or_else(|| anyhow!("audio file has no filename"))?;
+    let parent = relative
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty());
+    let artist = safe_filename_part(&candidate.artist, "Unknown Artist");
+    let title = safe_filename_part(&candidate.title, "Unknown Title");
+    let mut basename = truncate_utf8(&format!("{artist} - {title}"), 220).to_owned();
+    if let Some(extension) = extension {
+        basename.push('.');
+        basename.push_str(&extension.to_ascii_lowercase());
+    }
     Ok(PathBuf::from(&cfg.output_dir)
-        .join(relative)
+        .join(parent)
+        .join(basename)
         .to_string_lossy()
         .into_owned())
+}
+
+fn safe_filename_part(value: &str, fallback: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = cleaned.trim_matches([' ', '.']);
+    if cleaned.is_empty() {
+        fallback.to_owned()
+    } else {
+        cleaned.to_owned()
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].trim_end()
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::*;
+
+    #[test]
+    fn filename_parts_preserve_unicode_and_remove_forbidden_characters() {
+        assert_eq!(
+            safe_filename_part("  فریدون / فرخزاد:  ", "fallback"),
+            "فریدون فرخزاد"
+        );
+        assert_eq!(safe_filename_part("...", "Unknown Title"), "Unknown Title");
+    }
+
+    #[test]
+    fn utf8_truncation_does_not_split_character() {
+        let value = "آهنگ".repeat(100);
+        let truncated = truncate_utf8(&value, 220);
+        assert!(truncated.len() <= 220);
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
 }

@@ -57,17 +57,18 @@ pub fn write(path: &Path, candidate: &Candidate, artwork: Option<Vec<u8>>) -> Re
     if let Some(v) = candidate.disc_total {
         tag.set_disk_total(v as u32);
     }
-    if let Some(data) = artwork
-        && tag.pictures().is_empty()
-    {
-        tag.push_picture(
-            Picture::unchecked(data)
-                .pic_type(PictureType::CoverFront)
-                .build(),
-        );
+    if let Some(data) = artwork {
+        let mut picture = picture_from_bytes(data)?;
+        picture.set_pic_type(PictureType::CoverFront);
+        tag.push_picture(picture);
     }
     file.save_to_path(path, WriteOptions::default())?;
     Ok(())
+}
+
+fn picture_from_bytes(data: Vec<u8>) -> Result<Picture> {
+    let mut reader = std::io::Cursor::new(data);
+    Ok(Picture::from_reader(&mut reader)?)
 }
 fn set(tag: &mut Tag, key: ItemKey, value: &str) {
     tag.insert_text(key, value.into());
@@ -75,5 +76,23 @@ fn set(tag: &mut Tag, key: ItemKey, value: &str) {
 fn optional(tag: &mut Tag, key: ItemKey, value: &Option<String>) {
     if let Some(value) = value {
         set(tag, key, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lofty::picture::MimeType;
+
+    #[test]
+    fn cover_image_type_is_detected_before_embedding() {
+        let png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+        let picture = picture_from_bytes(png).unwrap();
+        assert_eq!(picture.mime_type(), Some(&MimeType::Png));
+    }
+
+    #[test]
+    fn invalid_cover_data_is_rejected() {
+        assert!(picture_from_bytes(vec![0; 12]).is_err());
     }
 }
