@@ -56,10 +56,16 @@ label i { color: #226b47; font-size: 11px; }
 .review .corrupt-detail { display: block; max-width: 720px; margin-top: 6px; color: #8a4a40; overflow-wrap: anywhere; }
 .review header > span { color: #657068; }
 .review-player { display: block; width: min(100%, 440px); height: 36px; margin-top: 12px; }
-.candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 9px; margin: 16px 0; }
+.candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 9px; margin: 16px 0; }
+.candidate-pair { display: grid; grid-template-columns: minmax(0, 1fr) 88px; gap: 6px; min-width: 0; }
 .candidates button { display: grid; gap: 4px; text-align: left; padding: 12px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 .candidates button:hover { border-color: #226b47; background: #f0f7f3; }
 .candidates span, .candidates small { color: #657068; }
+.candidates .provider-badge { width: fit-content; padding: 3px 6px; border-radius: 999px; background: #e5f1e9; color: #315d45; font-size: 9px; font-weight: 800; line-height: 1.2; }
+.google-check { display: flex; flex-direction: column; justify-content: center; gap: 5px; padding: 9px; border: 1px solid #dfe4df; border-radius: 10px; background: #fff; color: #315d45; text-decoration: none; font-size: 11px; }
+.google-check:hover { border-color: #226b47; background: #f0f7f3; }
+.google-check small { font-size: 9px; line-height: 1.25; }
+.google-check > span { color: #226b47; font-size: 14px; }
 .artwork { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: #e9eeea; }
 .artwork.missing { display: grid; place-items: center; padding: 7px; box-sizing: border-box; color: #84631b; font-size: 10px; font-weight: 800; text-align: center; }
 .genre { color: #226b47; font-size: 11px; font-style: normal; font-weight: 800; }

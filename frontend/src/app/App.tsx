@@ -210,7 +210,7 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
   return <article className="review card">
     <header><div><h3>{track.filename}</h3><p className={corrupt ? "corrupt-message" : undefined}>{track.stage_message || track.error || "No reliable match was found."}</p>{corrupt && track.error && <small className="corrupt-detail">{track.error}</small>}</div><span>{Math.round(track.duration || 0)}s</span></header>
     <audio className="review-player" controls preload="none" src={`/api/tracks/${track.id}/audio`} aria-label={`Play ${track.filename}`} />
-    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button>)}</div>}
+    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <div className="candidate-pair" key={candidate.id}><button onClick={() => onChoose(track.id, candidate.id)}><span className="provider-badge">From {candidateSources(candidate)}</span><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button><a className="google-check" href={googleMetadataUrl(candidate)} target="_blank" rel="noreferrer" aria-label={`Verify the release of ${candidate.artist} ${candidate.title} on Google`}><b>Check on Google</b><small>Album or single?<br />Album name?<br />Original year?</small><span aria-hidden="true">↗</span></a></div>)}</div>}
     {!corrupt && <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>}
     {!corrupt && manual && <ManualEditor track={track} onSaved={onSaved} />}
   </article>;
@@ -268,6 +268,40 @@ function artworkUrls(candidate?: Candidate) {
 
 function safeName(value: string) {
   return value.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").replace(/^[ .]+|[ .]+$/g, "");
+}
+
+function googleMetadataUrl(candidate: Candidate) {
+  const artist = String(candidate.artist || "").replaceAll('"', "");
+  const title = String(candidate.title || "").replaceAll('"', "");
+  const terms = `"${artist}" "${title}" song album or single album name original release year`;
+  return `https://www.google.com/search?q=${encodeURIComponent(terms)}`;
+}
+
+function candidateSources(candidate: Candidate) {
+  try {
+    const sources = JSON.parse(candidate.score_breakdown || "{}")?.sources;
+    if (Array.isArray(sources) && sources.length > 0) {
+      return [...new Set(sources.filter((source): source is string => typeof source === "string"))].join(" + ");
+    }
+  } catch {
+    // Fall back to the primary provider when evidence JSON is malformed.
+  }
+  const names: Record<string, string> = {
+    acoustid: "AcoustID",
+    audd: "AudD",
+    deezer: "Deezer",
+    discogs: "Discogs",
+    itunes: "Apple Music",
+    lastfm: "Last.fm",
+    musicbrainz: "MusicBrainz",
+    soundcloud: "SoundCloud",
+    spotify: "Spotify",
+    theaudiodb: "TheAudioDB",
+    wikidata: "Wikidata",
+    youtube: "YouTube",
+    manual: "Manual entry",
+  };
+  return names[candidate.provider || ""] || candidate.provider || "Catalog";
 }
 
 function GenreLabel({ candidate }: { candidate: Candidate }) {

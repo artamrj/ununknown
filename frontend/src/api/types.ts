@@ -1,5 +1,5 @@
 export type Setup = { input_dir: string; output_dir: string; delete_source_after_write: boolean; sources: Record<string, boolean> };
-export type Candidate = { id: number; title?: string; artist?: string; album?: string; album_artist?: string; year?: string; genre?: string; cover_url?: string; score_breakdown?: string; score: number };
+export type Candidate = { id: number; provider?: string; title?: string; artist?: string; album?: string; album_artist?: string; year?: string; genre?: string; cover_url?: string; score_breakdown?: string; score: number };
 export type Track = { id: number; filename: string; duration?: number; current_title?: string; current_artist?: string; current_album?: string; current_album_artist?: string; current_track_number?: number; selected_candidate_id?: number; status: string; stage: string; stage_message?: string; error?: string; candidates: Candidate[] };
 export type TrackPage = { items: Track[]; total: number };
 export type Workflow = { phase: "idle" | "scan" | "fetch" | "preview" | "apply" | "finish" | "failed"; message: string; current_file?: string; current: number; total: number; processed: number; matched: number; unmatched: number; failed: number };
