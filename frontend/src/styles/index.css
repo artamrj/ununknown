@@ -87,6 +87,9 @@ label i { color: #226b47; font-size: 11px; }
 .track span, .track small { color: #657068; overflow-wrap: anywhere; }
 .track-metadata { display: grid; gap: 5px; align-items: start; }
 .track-metadata .selection-reason { color: #315d45; font-weight: 700; }
+.track-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.track-actions .undo { color: #8b5a22; }
+.track-actions .undo:disabled { opacity: .45; cursor: default; }
 .track > .manual { grid-column: 1 / -1; width: 100%; margin-top: 4px; padding: 15px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 @media (max-width: 720px) {
   main { padding-top: 28px; }

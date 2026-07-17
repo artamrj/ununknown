@@ -246,6 +246,45 @@ pub async fn select_candidate(
     Ok(Json(serde_json::json!({"selected": true})))
 }
 
+pub async fn return_to_review(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if s.workflow_running().await {
+        return Err(ApiError::conflict(
+            "Wait for the current scan or write operation to finish",
+        ));
+    }
+    let track = queries::track(&s.pool, id).await?;
+    if track.selected_candidate_id.is_none() {
+        return Err(ApiError::validation(
+            "This track does not have an identification to undo",
+        ));
+    }
+    let message = if track.output_path.is_some() {
+        "Returned to review; the existing corrected output was not removed"
+    } else {
+        "Returned to review"
+    };
+    let changed = sqlx::query(
+        "UPDATE tracks
+         SET selected_candidate_id=NULL,status='needs_review',stage='review',stage_message=?,updated_at=?
+         WHERE id=? AND selected_candidate_id IS NOT NULL",
+    )
+    .bind(message)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(id.0)
+    .execute(&s.pool)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Err(ApiError::conflict(
+            "The track identification was already changed",
+        ));
+    }
+    Ok(Json(serde_json::json!({"returned_to_review": true})))
+}
+
 pub async fn manual_candidate(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
@@ -580,6 +619,54 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(untouched, 2);
+    }
+
+    #[tokio::test]
+    async fn return_to_review_clears_selection_but_keeps_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("return-to-review.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/ready.mp3','ready.mp3','selected',0,'now','now','now','ready')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let candidate_id = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,score) VALUES(?,'deezer','Song','Artist',95)")
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
+            .bind(candidate_id)
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let _ = return_to_review(State(state), Path(TrackId(track_id)))
+            .await
+            .unwrap();
+
+        let track: (Option<i64>, String, String, Option<String>) = sqlx::query_as(
+            "SELECT selected_candidate_id,status,stage,stage_message FROM tracks WHERE id=?",
+        )
+        .bind(track_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(track.0, None);
+        assert_eq!(track.1, "needs_review");
+        assert_eq!(track.2, "review");
+        assert_eq!(track.3.as_deref(), Some("Returned to review"));
+        let candidates: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM candidates WHERE track_id=?")
+                .bind(track_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(candidates, 1);
     }
 
     async fn insert_test_track(

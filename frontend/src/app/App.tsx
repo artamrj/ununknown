@@ -272,6 +272,7 @@ function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?:
 
 function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
   const [editing, setEditing] = useState(false);
+  const [undoing, setUndoing] = useState(false);
   const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
   const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
   const setCover = async () => {
@@ -279,6 +280,15 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
     if (!coverUrl) return;
     await api(`/tracks/${track.id}/artwork`, { method: "PUT", body: JSON.stringify({ cover_url: coverUrl }) });
     await onSaved();
+  };
+  const undoIdentification = async () => {
+    setUndoing(true);
+    try {
+      await api(`/tracks/${track.id}/review`, { method: "POST", body: "{}" });
+      await onSaved();
+    } finally {
+      setUndoing(false);
+    }
   };
   return <div className="track">
     <div className="artwork-control"><Artwork candidate={candidate} trackId={track.id} /><button className="link" onClick={setCover}>Set cover</button></div>
@@ -288,7 +298,10 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
       {candidate && <span className="provider-badge">From {candidateSources(candidate)}</span>}
       <small>{[candidate?.album, candidate?.year, genreText(candidate)].filter(Boolean).join(" · ")}</small>
       {track.stage_message?.startsWith("Smart auto-approved") && <small className="selection-reason">{track.stage_message}</small>}
-      <button className="link" onClick={() => setEditing(!editing)}>{editing ? "Close editor" : "Edit metadata"}</button>
+      <div className="track-actions">
+        <button className="link" onClick={() => setEditing(!editing)}>{editing ? "Close editor" : "Edit metadata"}</button>
+        <button className="link undo" disabled={undoing} onClick={undoIdentification}>{undoing ? "Returning…" : "Undo identification"}</button>
+      </div>
     </div>
     {candidate && <GoogleCheck candidate={candidate} compact />}
     {editing && <ManualEditor track={track} candidate={candidate} onSaved={async () => { await onSaved(); setEditing(false); }} />}

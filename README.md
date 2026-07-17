@@ -64,7 +64,8 @@ automatically written unless it passes the existing confidence and ambiguity rul
    candidates in bulk. It combines recording identity, version markers, duration, independent
    source agreement, existing album context, release type, and compilation status instead of
    blindly taking the highest score. Ambiguous, unmatched, damaged, and missing tracks remain in
-   review.
+   review. Any identified track can be returned to review with **Undo identification** without
+   discarding its candidate choices.
 5. Select **Write corrected files**.
 
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,

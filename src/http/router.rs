@@ -17,6 +17,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/tracks/{id}/audio", get(handlers::track_audio))
         .route("/source/resolve", post(handlers::resolve_source))
         .route("/tracks/{id}/choose", post(handlers::select_candidate))
+        .route("/tracks/{id}/review", post(handlers::return_to_review))
         .route(
             "/tracks/{id}/manual",
             axum::routing::put(handlers::manual_candidate),
