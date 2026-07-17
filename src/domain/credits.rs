@@ -4,6 +4,46 @@ pub struct Credits {
     pub title: String,
 }
 
+pub fn prefer_latin_alias(value: &str) -> String {
+    let has_latin = value
+        .chars()
+        .any(|character| character.is_ascii_alphabetic());
+    let has_arabic = value.chars().any(is_arabic_script);
+    if !has_latin || !has_arabic {
+        return value.trim().to_owned();
+    }
+    let without_arabic = value
+        .chars()
+        .map(|character| {
+            if is_arabic_script(character) {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    without_arabic
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|character: char| {
+            character.is_whitespace() || matches!(character, '&' | ',' | ';' | '-' | '–' | '—')
+        })
+        .trim()
+        .to_owned()
+}
+
+fn is_arabic_script(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0600}'..='\u{06ff}'
+            | '\u{0750}'..='\u{077f}'
+            | '\u{08a0}'..='\u{08ff}'
+            | '\u{fb50}'..='\u{fdff}'
+            | '\u{fe70}'..='\u{feff}'
+    )
+}
+
 pub fn normalize_featured(artist: &str, title: &str) -> Credits {
     let Some((start, end, featured)) = feature_clause(title) else {
         return Credits {
@@ -15,7 +55,11 @@ pub fn normalize_featured(artist: &str, title: &str) -> Credits {
     normalized_title.push_str(" (feat. ");
     normalized_title.push_str(featured.trim());
     normalized_title.push(')');
-    normalized_title.push_str(title[end..].trim_end());
+    let suffix = title[end..].trim();
+    if !is_duplicate_feature_suffix(featured, suffix) && !suffix.is_empty() {
+        normalized_title.push(' ');
+        normalized_title.push_str(suffix);
+    }
 
     let featured_names = split_names(featured);
     let artist_parts = split_names(artist);
@@ -45,6 +89,22 @@ pub fn normalize_featured(artist: &str, title: &str) -> Credits {
         },
         title: normalized_title,
     }
+}
+
+fn is_duplicate_feature_suffix(featured: &str, suffix: &str) -> bool {
+    let lower = suffix.to_ascii_lowercase();
+    let Some(offset) = ["feat. ", "feat ", "ft. ", "ft ", "featuring "]
+        .into_iter()
+        .find_map(|marker| lower.starts_with(marker).then_some(marker.len()))
+    else {
+        return false;
+    };
+    let expected = split_names(featured);
+    let trailing = split_names(&suffix[offset..]);
+    expected.len() == trailing.len()
+        && expected
+            .iter()
+            .all(|name| trailing.iter().any(|other| same_name(name, other)))
 }
 
 fn feature_clause(title: &str) -> Option<(usize, usize, &str)> {
@@ -109,6 +169,30 @@ mod tests {
                 artist: "Arta".into(),
                 title: "Mi Amor (feat. Saaren)".into()
             }
+        );
+    }
+
+    #[test]
+    fn bilingual_alias_prefers_the_latin_name() {
+        assert_eq!(prefer_latin_alias("Hayedeh هايده"), "Hayedeh");
+        assert_eq!(prefer_latin_alias("هایده Hayedeh"), "Hayedeh");
+        assert_eq!(prefer_latin_alias("Ali علی & Reza رضا"), "Ali & Reza");
+    }
+
+    #[test]
+    fn persian_only_artist_is_preserved() {
+        assert_eq!(prefer_latin_alias("هایده"), "هایده");
+    }
+
+    #[test]
+    fn removes_a_duplicate_trailing_feature_credit() {
+        assert_eq!(
+            normalize_featured(
+                "Arta",
+                "Hanooz Yadame (feat. Koorosh, Sami Low & Raha) feat. Koorosh,Sami Low,Raha"
+            )
+            .title,
+            "Hanooz Yadame (feat. Koorosh, Sami Low & Raha)"
         );
     }
 }

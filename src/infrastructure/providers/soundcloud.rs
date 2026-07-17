@@ -231,7 +231,8 @@ fn candidate_from_oembed(raw: &Value) -> Option<Candidate> {
     let raw_title = raw["title"].as_str()?.trim();
     let author = raw["author_name"].as_str().unwrap_or("SoundCloud artist");
     let suffix = format!(" by {author}");
-    let cleaned = raw_title.strip_suffix(&suffix).unwrap_or(raw_title).trim();
+    let cleaned =
+        strip_audio_extension(raw_title.strip_suffix(&suffix).unwrap_or(raw_title).trim());
     let (artist, title) =
         split_artist_title(cleaned).unwrap_or_else(|| (author.to_owned(), cleaned.to_owned()));
     let credits = crate::domain::credits::normalize_featured(&artist, &title);
@@ -269,6 +270,15 @@ fn split_artist_title(value: &str) -> Option<(String, String)> {
             (!artist.trim().is_empty() && !title.trim().is_empty())
                 .then(|| (artist.trim().to_owned(), title.trim().to_owned()))
         })
+}
+
+fn strip_audio_extension(value: &str) -> &str {
+    for extension in [".mp3", ".m4a", ".flac", ".wav", ".ogg", ".opus"] {
+        if value.to_ascii_lowercase().strip_suffix(extension).is_some() {
+            return &value[..value.len() - extension.len()];
+        }
+    }
+    value
 }
 
 fn same_credit(left: &str, right: &str) -> bool {
@@ -347,5 +357,17 @@ mod tests {
         .unwrap();
         assert_eq!(candidate.artist, "Arta");
         assert_eq!(candidate.title, "Hanooz Yadame (feat. Koorosh)");
+    }
+
+    #[test]
+    fn removes_an_audio_extension_from_oembed_title() {
+        let candidate = candidate_from_oembed(&serde_json::json!({
+            "title": "Mamehaye Golshifteh.mp3 by Amir Tataloo",
+            "author_name": "Amir Tataloo",
+            "thumbnail_url": "https://i1.sndcdn.com/artworks-id-t500x500.jpg"
+        }))
+        .unwrap();
+        assert_eq!(candidate.title, "Mamehaye Golshifteh");
+        assert_eq!(candidate.artist, "Amir Tataloo");
     }
 }

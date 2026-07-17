@@ -28,6 +28,14 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
     };
     fill_from_filename(path, &mut info);
     clean_search_tags(&mut info);
+    info.artist = info
+        .artist
+        .as_deref()
+        .map(crate::domain::credits::prefer_latin_alias);
+    info.album_artist = info
+        .album_artist
+        .as_deref()
+        .map(crate::domain::credits::prefer_latin_alias);
     if let (Some(artist), Some(title)) = (info.artist.as_deref(), info.title.as_deref()) {
         let credits = crate::domain::credits::normalize_featured(artist, title);
         info.artist = Some(credits.artist);

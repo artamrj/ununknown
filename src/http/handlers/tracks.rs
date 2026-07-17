@@ -52,6 +52,11 @@ pub async fn manual_candidate(
     if value.title.trim().is_empty() || value.artist.trim().is_empty() {
         return Err(ApiError::validation("Title and artist are required"));
     }
+    value.artist = crate::domain::credits::prefer_latin_alias(&value.artist);
+    value.album_artist = value
+        .album_artist
+        .as_deref()
+        .map(crate::domain::credits::prefer_latin_alias);
     let credits = crate::domain::credits::normalize_featured(&value.artist, &value.title);
     value.artist = credits.artist;
     value.title = credits.title;

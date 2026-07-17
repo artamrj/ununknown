@@ -90,8 +90,10 @@ pub struct CandidateRow {
 
 impl CandidateRow {
     fn normalized_credits(&self) -> crate::domain::credits::Credits {
+        let artist =
+            crate::domain::credits::prefer_latin_alias(self.artist.as_deref().unwrap_or_default());
         crate::domain::credits::normalize_featured(
-            self.artist.as_deref().unwrap_or_default(),
+            &artist,
             self.title.as_deref().unwrap_or_default(),
         )
     }
@@ -110,7 +112,10 @@ impl CandidateRow {
             title: credits.title,
             artist: credits.artist,
             album: self.album.clone(),
-            album_artist: self.album_artist.clone(),
+            album_artist: self
+                .album_artist
+                .as_deref()
+                .map(crate::domain::credits::prefer_latin_alias),
             track_number: self.track_number,
             track_total: self.track_total,
             disc_number: self.disc_number,

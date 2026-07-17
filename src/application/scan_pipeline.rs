@@ -1430,6 +1430,11 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
 }
 
 fn normalize_candidate_credits(candidate: &mut providers::Candidate) {
+    candidate.artist = crate::domain::credits::prefer_latin_alias(&candidate.artist);
+    candidate.album_artist = candidate
+        .album_artist
+        .as_deref()
+        .map(crate::domain::credits::prefer_latin_alias);
     let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
     candidate.artist = credits.artist;
     candidate.title = credits.title;
