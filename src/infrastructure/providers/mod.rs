@@ -3,6 +3,7 @@ pub mod audd;
 pub mod cover_art_archive;
 pub mod deezer;
 pub mod discogs;
+pub mod genius;
 pub mod itunes;
 pub mod lastfm;
 pub mod musicbrainz;

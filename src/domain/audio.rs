@@ -185,21 +185,52 @@ fn canonical_ffprobe_format(
 }
 
 fn fill_from_filename(path: &Path, info: &mut AudioInfo) {
-    if info.title.as_deref().is_none_or(str::is_empty) {
-        let stem = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Unknown track")
-            .replace('_', " ");
-        if let Some((artist, title)) = stem.split_once(" - ") {
-            if info.artist.as_deref().is_none_or(str::is_empty) {
-                info.artist = Some(artist.trim().to_owned());
-            }
-            info.title = Some(title.trim().to_owned());
-        } else {
-            info.title = Some(stem.trim().to_owned());
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Unknown track")
+        .replace('_', " ");
+    if let Some((artist, title)) = filename_artist_title(&stem) {
+        // A clear "Artist – Title" filename is better search evidence than
+        // placeholder tags commonly written by downloaders and converters.
+        if is_placeholder_tag(info.artist.as_deref()) || is_placeholder_tag(info.title.as_deref()) {
+            info.artist = Some(artist.to_owned());
+            info.title = Some(title.to_owned());
         }
+    } else if is_placeholder_tag(info.title.as_deref()) {
+        info.title = Some(stem.trim().to_owned());
     }
+
+    if is_placeholder_tag(info.album.as_deref()) {
+        info.album = None;
+    }
+    if is_placeholder_tag(info.album_artist.as_deref()) {
+        info.album_artist = None;
+    }
+}
+
+fn filename_artist_title(stem: &str) -> Option<(&str, &str)> {
+    [" - ", " – ", " — ", " − ", " ‐ "]
+        .into_iter()
+        .find_map(|separator| stem.split_once(separator))
+        .and_then(|(artist, title)| {
+            let artist = artist.trim();
+            let title = title.trim();
+            (!artist.is_empty() && !title.is_empty()).then_some((artist, title))
+        })
+}
+
+fn is_placeholder_tag(value: Option<&str>) -> bool {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let normalized = value.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "unknown" | "unknown artist" | "unknown album" | "unknown title" | "untitled"
+    ) || normalized
+        .strip_prefix("track ")
+        .is_some_and(|number| !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn clean_search_tags(info: &mut AudioInfo) {
@@ -326,5 +357,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(info.format, "m4a");
+    }
+
+    #[test]
+    fn unicode_dash_filename_replaces_placeholder_tags() {
+        let mut info = AudioInfo {
+            title: Some("Track 11".into()),
+            artist: Some("Unknown Artist".into()),
+            album: Some("Unknown Album".into()),
+            ..Default::default()
+        };
+        fill_from_filename(
+            Path::new("System Of A Down – Such A Lonely Day.mp3"),
+            &mut info,
+        );
+        assert_eq!(info.title.as_deref(), Some("Such A Lonely Day"));
+        assert_eq!(info.artist.as_deref(), Some("System Of A Down"));
+        assert_eq!(info.album, None);
     }
 }

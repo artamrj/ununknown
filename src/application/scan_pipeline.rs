@@ -717,6 +717,7 @@ async fn identify(
     }
     out.extend(query_deezer(state, limits, current, filename).await);
     out.extend(query_radiojavan(state, limits, current, filename).await);
+    out.extend(query_genius(state, cfg, limits, current, filename).await);
     let has_strong_free_candidate = out.iter().any(|candidate| candidate.score >= 90.0);
     if !acoustid_matched
         && !has_strong_free_candidate
@@ -749,6 +750,7 @@ async fn identify(
             }
             out.extend(query_deezer(state, limits, &recognized_info, filename).await);
             out.extend(query_radiojavan(state, limits, &recognized_info, filename).await);
+            out.extend(query_genius(state, cfg, limits, &recognized_info, filename).await);
         }
         out.extend(audd_candidates);
     }
@@ -826,7 +828,7 @@ fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
         3
     } else if matches!(
         candidate.provider.as_str(),
-        "musicbrainz" | "itunes" | "deezer" | "spotify" | "radiojavan"
+        "musicbrainz" | "itunes" | "deezer" | "spotify" | "radiojavan" | "genius"
     ) {
         2
     } else if candidate_source_count(candidate) >= 2 {
@@ -1141,6 +1143,51 @@ async fn query_radiojavan(
     }
 }
 
+async fn query_genius(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "genius").await {
+        return Vec::new();
+    }
+    let access_token = cfg.genius_access_token.trim();
+    if access_token.is_empty() {
+        return Vec::new();
+    }
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let started = Instant::now();
+    match providers::genius::search(
+        &state.pool,
+        &state.client,
+        access_token,
+        title,
+        current.artist.as_deref(),
+    )
+    .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "genius_catalog_search");
+            }
+            log_provider_count(state, filename, "genius", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "genius", error).await;
+            Vec::new()
+        }
+    }
+}
+
 async fn query_musicbrainz_acoustid(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
@@ -1414,6 +1461,7 @@ fn score_text_candidate(
     let provider_cap = match candidate.provider.as_str() {
         "itunes" => 94.0,
         "radiojavan" => 92.0,
+        "genius" => 90.0,
         "deezer" => 90.0,
         "musicbrainz" => 82.0,
         _ => 78.0,
@@ -1605,7 +1653,7 @@ fn artwork_agrees(left: &providers::Candidate, right: &providers::Candidate) -> 
 fn artwork_provider_priority(provider: &str) -> u8 {
     match provider {
         "itunes" | "spotify" => 8,
-        "musicbrainz" | "radiojavan" => 7,
+        "musicbrainz" | "radiojavan" | "genius" => 7,
         "soundcloud" => 6,
         "deezer" => 5,
         "discogs" => 4,
@@ -1708,7 +1756,7 @@ fn unique_exact_catalog_match(
 ) -> bool {
     if !matches!(
         best.provider.as_str(),
-        "itunes" | "musicbrainz" | "deezer" | "spotify" | "radiojavan"
+        "itunes" | "musicbrainz" | "deezer" | "spotify" | "radiojavan" | "genius"
     ) || best.duration_delta.is_none_or(|delta| delta > 5.0)
     {
         return false;
@@ -1761,13 +1809,16 @@ fn title_similarity(left: &str, right: &str) -> f64 {
     let right_key = normalize_match_key(right);
     let left_words = normalized_words(left);
     let right_words = normalized_words(right);
+    let left_meaningful = meaningful_title_words(&left_words);
+    let right_meaningful = meaningful_title_words(&right_words);
     let (shorter_words, longer_words) = if left_words.len() <= right_words.len() {
         (&left_words, &right_words)
     } else {
         (&right_words, &left_words)
     };
-    if (left_key.len().min(right_key.len()) >= 4
-        && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key)))
+    if (!left_meaningful.is_empty() && left_meaningful == right_meaningful)
+        || (left_key.len().min(right_key.len()) >= 4
+            && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key)))
         || (shorter_words.len() >= 3
             && shorter_words.iter().all(|word| longer_words.contains(word)))
     {
@@ -1775,6 +1826,14 @@ fn title_similarity(left: &str, right: &str) -> f64 {
     } else {
         text_similarity(left, right)
     }
+}
+
+fn meaningful_title_words(words: &[String]) -> Vec<&str> {
+    words
+        .iter()
+        .map(String::as_str)
+        .filter(|word| !matches!(*word, "a" | "an" | "the" | "such"))
+        .collect()
 }
 
 fn artist_similarity(left: &str, right: &str) -> f64 {
@@ -2134,6 +2193,7 @@ fn provider_display_name(provider: &str) -> &str {
         "audd" => "AudD",
         "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
+        "genius" => "Genius",
         "radiojavan" => "Radio Javan",
         "soundcloud" => "SoundCloud",
         "spotify" => "Spotify",
@@ -2150,6 +2210,7 @@ fn provider_reason(provider: &str) -> &str {
         "deezer" => "International track, album, ISRC, duration, and cover metadata",
         "audd" => "Audio recognition with ISRC and linked catalog metadata",
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
+        "genius" => "Song identity, credited artist, album, release date, and song artwork",
         "radiojavan" => "Persian track title, artist, duration, release date, and original artwork",
         "soundcloud" => "Creator-uploaded title, artist, genre, date, duration, and artwork",
         "spotify" => "ISRC, release, track position, duration, and cover metadata",
@@ -2788,5 +2849,33 @@ mod tests {
         assert_eq!(candidate.track_number, Some(11));
         assert_eq!(candidate.track_total, None);
         assert_eq!(candidate.release_id, None);
+    }
+
+    #[test]
+    fn ignores_filename_filler_words_when_matching_title() {
+        assert!(title_similarity("Such A Lonely Day", "Lonely Day") >= 0.94);
+    }
+
+    #[test]
+    fn reported_lonely_day_catalog_match_scores_as_reliable() {
+        let info = audio::AudioInfo {
+            title: Some("Such A Lonely Day".into()),
+            artist: Some("System Of A Down".into()),
+            duration: 167.993,
+            ..Default::default()
+        };
+        let mut candidate = providers::Candidate {
+            provider: "itunes".into(),
+            title: "Lonely Day".into(),
+            artist: "System Of A Down".into(),
+            album: Some("Hypnotize".into()),
+            duration_delta: Some(167.907),
+            ..Default::default()
+        };
+
+        score_text_candidate(&mut candidate, &info, "itunes_catalog_search").unwrap();
+
+        assert!(candidate.score >= 90.0);
+        assert!(candidate.duration_delta.is_some_and(|delta| delta < 1.0));
     }
 }

@@ -61,6 +61,7 @@ export function App() {
           youtube_api_key: keys.youtube || undefined,
           discogs_token: keys.discogs || undefined,
           lastfm_key: keys.lastfm || undefined,
+          genius_access_token: keys.genius || undefined,
           theaudiodb_key: keys.theaudiodb || undefined,
         }),
       });
@@ -166,12 +167,13 @@ export function App() {
           <span>Remove input after successful output<small>Off by default. Originals are deleted only after their corrected file is safely written.</small></span>
         </label>
         <div className="source-status">
-          <span>Active catalogs: Apple Music, Deezer, MusicBrainz, Radio Javan, Wikidata{setup.sources.spotify ? ", Spotify" : ""}{setup.sources.soundcloud_search ? ", SoundCloud" : ""}</span>
+          <span>Active catalogs: Apple Music, Deezer, MusicBrainz, Radio Javan, Wikidata{setup.sources.genius ? ", Genius" : ""}{setup.sources.spotify ? ", Spotify" : ""}{setup.sources.soundcloud_search ? ", SoundCloud" : ""}</span>
           {(!setup.sources.fpcalc || !setup.sources.acoustid) && <small>For hard-to-name tracks, install Chromaprint (`fpcalc`) and <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">add a free AcoustID application key</a>.</small>}
           {setup.sources.audd && <small className="recognition-active">AudD fallback recognition is active for fingerprints AcoustID cannot identify.</small>}
           {setup.sources.youtube && <small className="recognition-active">Exact YouTube video-ID recovery is active for downloaded filenames.</small>}
           {setup.sources.soundcloud && <small className="recognition-active">SoundCloud track-link metadata and cover lookup is active without a key.</small>}
           {setup.sources.radiojavan && <small className="recognition-active">Radio Javan metadata search, song-link lookup, and original cover art are active without a key.</small>}
+          {setup.sources.genius && <small className="recognition-active">Genius metadata search, song-link lookup, and song artwork are active.</small>}
           {setup.sources.ffmpeg
             ? <small className="replaygain-active">ReplayGain is active. Track loudness and peak are added when corrected files are written.</small>
             : <small>Install FFmpeg to add ReplayGain loudness metadata. Other corrections still work.</small>}
@@ -182,7 +184,7 @@ export function App() {
         <details>
           <summary>Optional source keys</summary>
           <p>Apple Music, Deezer, MusicBrainz, Radio Javan, Cover Art Archive, and Wikidata work without keys. Recognition services are called only when useful.</p>
-          <p className="provider-links">Create credentials: <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">AcoustID</a> · <a href="https://dashboard.audd.io/" target="_blank" rel="noreferrer">AudD</a> · <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify</a> · <a href="https://developers.soundcloud.com/docs/api/register-app" target="_blank" rel="noreferrer">SoundCloud</a> · <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube</a></p>
+          <p className="provider-links">Create credentials: <a href="https://acoustid.org/new-application" target="_blank" rel="noreferrer">AcoustID</a> · <a href="https://dashboard.audd.io/" target="_blank" rel="noreferrer">AudD</a> · <a href="https://genius.com/api-clients" target="_blank" rel="noreferrer">Genius</a> · <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify</a> · <a href="https://developers.soundcloud.com/docs/api/register-app" target="_blank" rel="noreferrer">SoundCloud</a> · <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube</a></p>
           <div className="key-grid">
             <Secret label="AcoustID (fingerprints)" active={setup.sources.acoustid} value={keys.acoustid} onChange={(value) => setKeys({ ...keys, acoustid: value })} />
             <Secret label="AudD token (fallback recognition)" active={setup.sources.audd} value={keys.audd} onChange={(value) => setKeys({ ...keys, audd: value })} />
@@ -193,6 +195,7 @@ export function App() {
             <Secret label="YouTube Data API key" active={setup.sources.youtube} value={keys.youtube} onChange={(value) => setKeys({ ...keys, youtube: value })} />
             <Secret label="Discogs" active={setup.sources.discogs} value={keys.discogs} onChange={(value) => setKeys({ ...keys, discogs: value })} />
             <Secret label="Last.fm" active={setup.sources.lastfm} value={keys.lastfm} onChange={(value) => setKeys({ ...keys, lastfm: value })} />
+            <Secret label="Genius client access token" active={setup.sources.genius} value={keys.genius} onChange={(value) => setKeys({ ...keys, genius: value })} />
             <Secret label="TheAudioDB" active={setup.sources.theaudiodb} value={keys.theaudiodb} onChange={(value) => setKeys({ ...keys, theaudiodb: value })} />
           </div>
         </details>
@@ -278,7 +281,7 @@ function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?:
     await api(`/tracks/${track.id}/manual`, { method: "PUT", body: JSON.stringify({ ...form, track_number: form.track_number ? Number(form.track_number) : null }) });
     await onSaved();
   };
-  return <div className="manual"><label className="source-url">Spotify, SoundCloud, Radio Javan, or YouTube source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://play.radiojavan.com/song/…" /></label><button className="secondary" disabled={!sourceUrl.trim()} onClick={resolveSource}>Use source metadata and cover</button>{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
+  return <div className="manual"><label className="source-url">Spotify, SoundCloud, Radio Javan, Genius, or YouTube source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://genius.com/Artist-song-lyrics" /></label><button className="secondary" disabled={!sourceUrl.trim()} onClick={resolveSource}>Use source metadata and cover</button>{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
 }
 
 function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
@@ -287,7 +290,7 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
   const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
   const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
   const setCover = async () => {
-    const coverUrl = prompt("Paste a direct HTTPS image URL or a Spotify, SoundCloud, or Radio Javan track URL", candidate?.cover_url || "");
+    const coverUrl = prompt("Paste a direct HTTPS image URL or a Spotify, SoundCloud, Radio Javan, or Genius track URL", candidate?.cover_url || "");
     if (!coverUrl) return;
     await api(`/tracks/${track.id}/artwork`, { method: "PUT", body: JSON.stringify({ cover_url: coverUrl }) });
     await onSaved();
@@ -388,6 +391,7 @@ function candidateSources(candidate: Candidate) {
     discogs: "Discogs",
     itunes: "Apple Music",
     lastfm: "Last.fm",
+    genius: "Genius",
     musicbrainz: "MusicBrainz",
     radiojavan: "Radio Javan",
     soundcloud: "SoundCloud",

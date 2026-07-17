@@ -250,7 +250,7 @@ fn is_supported(candidate: &Evaluated<'_>) -> bool {
         && candidate.artist_similarity >= 0.82;
     let credible_catalog = matches!(
         candidate.candidate.provider.as_str(),
-        "itunes" | "deezer" | "musicbrainz" | "spotify" | "radiojavan"
+        "itunes" | "deezer" | "musicbrainz" | "spotify" | "radiojavan" | "genius"
     );
     let corroborated = candidate.sources >= 2
         && (!candidate.title_available || candidate.title_similarity >= 0.82)
@@ -358,7 +358,7 @@ fn meaningful_album(album: Option<&str>) -> Option<&str> {
 
 fn provider_trust(provider: &str) -> f64 {
     match provider {
-        "spotify" | "itunes" | "deezer" | "musicbrainz" | "radiojavan" => 5.0,
+        "spotify" | "itunes" | "deezer" | "musicbrainz" | "radiojavan" | "genius" => 5.0,
         "audd" | "acoustid" => 4.0,
         "discogs" | "theaudiodb" | "soundcloud" => 2.0,
         "lastfm" | "wikidata" | "youtube" => 1.0,
@@ -396,8 +396,17 @@ fn title_similarity(left: &str, right: &str) -> f64 {
     let direct = strsim::normalized_levenshtein(&left_normalized, &right_normalized);
     let left_key = left_normalized.replace(' ', "");
     let right_key = right_normalized.replace(' ', "");
-    if left_key.len().min(right_key.len()) >= 4
-        && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key))
+    let meaningful = |value: &str| {
+        value
+            .split_whitespace()
+            .filter(|word| !matches!(*word, "a" | "an" | "the" | "such"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if (!meaningful(&left_normalized).is_empty()
+        && meaningful(&left_normalized) == meaningful(&right_normalized))
+        || (left_key.len().min(right_key.len()) >= 4
+            && (left_key.starts_with(&right_key) || right_key.starts_with(&left_key)))
     {
         direct.max(0.94)
     } else {
@@ -659,5 +668,10 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn ignores_filename_filler_words_when_ranking_title() {
+        assert!(title_similarity("Such A Lonely Day", "Lonely Day") >= 0.94);
     }
 }

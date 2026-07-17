@@ -464,7 +464,7 @@ pub async fn update_artwork(
     let supplied = value.cover_url.trim();
     let parsed = reqwest::Url::parse(supplied).map_err(|_| {
         ApiError::validation(
-            "Enter a valid HTTPS image, Spotify, SoundCloud, or Radio Javan song URL",
+            "Enter a valid HTTPS image, Spotify, SoundCloud, Radio Javan, or Genius song URL",
         )
     })?;
     if parsed.scheme() != "https" {
@@ -488,6 +488,18 @@ pub async fn update_artwork(
             .map_err(|error| ApiError::validation(format!("Radio Javan link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Radio Javan did not return cover artwork"))?
+    } else if is_genius_host(parsed.host_str()) {
+        let access_token = s.config.read().await.genius_access_token.clone();
+        crate::infrastructure::providers::genius::lookup_url(
+            &s.pool,
+            &s.client,
+            &access_token,
+            supplied,
+        )
+        .await
+        .map_err(|error| ApiError::validation(format!("Genius link failed: {error:#}")))?
+        .cover_url
+        .ok_or_else(|| ApiError::validation("Genius did not return cover artwork"))?
     } else {
         supplied.to_owned()
     };
@@ -622,7 +634,9 @@ pub async fn resolve_source(
 ) -> ApiResult<Json<Candidate>> {
     let url = value.url.trim();
     let parsed = reqwest::Url::parse(url).map_err(|_| {
-        ApiError::validation("Enter a valid Spotify, SoundCloud, Radio Javan, or YouTube URL")
+        ApiError::validation(
+            "Enter a valid Spotify, SoundCloud, Radio Javan, Genius, or YouTube URL",
+        )
     })?;
     let candidate = if parsed.host_str() == Some("open.spotify.com") {
         crate::infrastructure::providers::spotify::lookup_url(&s.client, url).await
@@ -630,6 +644,10 @@ pub async fn resolve_source(
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
     } else if is_radiojavan_host(parsed.host_str()) {
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
+    } else if is_genius_host(parsed.host_str()) {
+        let access_token = s.config.read().await.genius_access_token.clone();
+        crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, &access_token, url)
+            .await
     } else {
         crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
     }
@@ -646,6 +664,10 @@ fn is_radiojavan_host(host: Option<&str>) -> bool {
         host,
         Some("play.radiojavan.com" | "www.play.radiojavan.com")
     )
+}
+
+fn is_genius_host(host: Option<&str>) -> bool {
+    matches!(host, Some("genius.com" | "www.genius.com"))
 }
 
 #[cfg(test)]
