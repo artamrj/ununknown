@@ -5,8 +5,12 @@ import { Icon, type IconName } from "./Icons";
 
 const emptySetup: Setup = { input_dir: "", output_dir: "", delete_source_after_write: false, sources: {} };
 const busyPhases = new Set(["scan", "fetch", "apply"]);
-type QueueFilter = "all" | "review" | "problems" | "completed";
+type QueueFilter = "all" | "review" | "problems" | "ready";
+type QueueOrder = "queue" | "title" | "artist" | "status";
 type Theme = "dark" | "light";
+
+const queueOrderLabels: Record<QueueOrder, string> = { queue: "Queue", title: "Title", artist: "Artist", status: "Status" };
+const queueOrderSequence: QueueOrder[] = ["queue", "title", "artist", "status"];
 
 export function App() {
   const [setup, setSetup] = useState<Setup>(emptySetup);
@@ -15,6 +19,7 @@ export function App() {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [selectedId, setSelectedId] = useState<number>();
   const [filter, setFilter] = useState<QueueFilter>("all");
+  const [queueOrder, setQueueOrder] = useState<QueueOrder>("queue");
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -36,7 +41,7 @@ export function App() {
     setTracks(page.items);
     setSelectedId((current) => {
       if (current && page.items.some((track) => track.id === current)) return current;
-      return page.items[0]?.id;
+      return preferredTrack(page.items)?.id;
     });
   }, []);
 
@@ -52,7 +57,7 @@ export function App() {
       setSetup(nextSetup);
       setWorkflow(status);
       setTracks(page.items);
-      setSelectedId((current) => current ?? page.items[0]?.id);
+      setSelectedId((current) => current ?? preferredTrack(page.items)?.id);
       setConnected(true);
     } catch (reason) {
       setConnected(false);
@@ -89,6 +94,12 @@ export function App() {
   }, [workflow, refresh]);
 
   useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(""), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setSettingsOpen(false);
@@ -122,7 +133,6 @@ export function App() {
       });
       setKeys({});
       setSetup(await api<Setup>("/setup"));
-      setNotice("Studio settings saved.");
       setConnected(true);
     } finally {
       setSaving(false);
@@ -197,24 +207,47 @@ export function App() {
     }
   };
 
+  const stop = async () => {
+    setError("");
+    try {
+      await api("/stop", { method: "POST", body: "{}" });
+      setNotice("Stopping safely after the current operation.");
+      await refresh();
+    } catch (reason) {
+      setError((reason as Error).message);
+    }
+  };
+
   const visibleTracks = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    return tracks.filter((track) => {
+    const filteredTracks = tracks.filter((track) => {
       const inFilter = filter === "all" || (filter === "review" && isReview(track)) ||
-        (filter === "problems" && isProblem(track)) || (filter === "completed" && isCompleted(track));
+        (filter === "problems" && isProblem(track)) || (filter === "ready" && isReady(track));
       if (!inFilter) return false;
       if (!normalized) return true;
       const candidate = selectedCandidate(track) ?? track.candidates[0];
       return [track.filename, track.current_title, track.current_artist, track.current_album, candidate?.title, candidate?.artist, candidate?.album]
         .some((value) => value?.toLocaleLowerCase().includes(normalized));
     });
-  }, [filter, query, tracks]);
+    if (queueOrder === "queue") return filteredTracks;
+    return [...filteredTracks].sort((first, second) => compareTracks(first, second, queueOrder));
+  }, [filter, query, queueOrder, tracks]);
+
+  const cycleQueueOrder = () => {
+    const currentIndex = queueOrderSequence.indexOf(queueOrder);
+    setQueueOrder(queueOrderSequence[(currentIndex + 1) % queueOrderSequence.length]);
+  };
 
   const selected = tracks.find((track) => track.id === selectedId);
 
+  useEffect(() => {
+    if (visibleTracks.some((track) => track.id === selectedId)) return;
+    setSelectedId(visibleTracks[0]?.id);
+  }, [selectedId, visibleTracks]);
+
   const changeFilter = (next: QueueFilter) => {
     setFilter(next);
-    const nextTrack = tracks.find((track) => next === "all" || (next === "review" && isReview(track)) || (next === "problems" && isProblem(track)) || (next === "completed" && isCompleted(track)));
+    const nextTrack = next === "all" ? preferredTrack(tracks) : tracks.find((track) => (next === "review" && isReview(track)) || (next === "problems" && isProblem(track)) || (next === "ready" && isReady(track)));
     setSelectedId(nextTrack?.id);
   };
 
@@ -226,54 +259,51 @@ export function App() {
   return (
     <div className="studio-app">
       <header className="topbar">
-        <a className="brand" href="#workspace" aria-label="Ununknown studio home">
-          <span className="brand-mark"><Icon name="waveform" size={20} /></span>
-          <span>Ununknown</span>
-          <small>metadata studio</small>
-        </a>
-        <nav className="workspace-nav" aria-label="Workspace views">
-          <NavButton active={filter === "all"} onClick={() => changeFilter("all")} label="Studio" />
-          <NavButton active={filter === "review"} onClick={() => changeFilter("review")} label="Review" count={counts.review} />
-          <NavButton active={filter === "problems"} onClick={() => changeFilter("problems")} label="Problems" count={counts.problems} />
-          <NavButton active={filter === "completed"} onClick={() => changeFilter("completed")} label="Completed" count={counts.completed} />
-        </nav>
-        <div className="topbar-actions">
-          <span className={`connection-state ${connected ? "online" : "offline"}`}><i />{connected ? "Local" : "Offline"}</span>
-          <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`} title="Change theme">
-            <Icon name={theme === "dark" ? "sun" : "moon"} />
-          </button>
-          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings" title="Settings"><Icon name="settings" /></button>
+        <div className="topbar-main">
+          <div className="topbar-leading">
+            <a className="brand" href="#workspace" aria-label="Ununknown studio home">
+              <span className="brand-mark"><Icon name="waveform" size={18} /></span>
+              <span>Ununknown</span>
+            </a>
+            <button className="topbar-source-summary" onClick={() => setSettingsOpen(true)} aria-label="Change music source" title={setup.input_dir || "Choose a music folder"}>
+              <span className="source-icon"><Icon name="folder" size={16} /></span>
+              <span className="source-copy">
+                <b>{folderName(setup.input_dir)}</b>
+                <small>{tracks.length} {tracks.length === 1 ? "file" : "files"}</small>
+              </span>
+            </button>
+          </div>
+          <nav className="workspace-nav" aria-label="Workspace views">
+            <NavButton className="all-tracks-tab" active={filter === "all"} onClick={() => changeFilter("all")} label="All tracks" count={tracks.length} />
+            <div className="status-tabs" role="group" aria-label="Filter tracks by status">
+              <NavButton active={filter === "review"} onClick={() => changeFilter("review")} label="Review" count={counts.review} />
+              <NavButton active={filter === "problems"} onClick={() => changeFilter("problems")} label="Issues" count={counts.problems} />
+              <NavButton active={filter === "ready"} onClick={() => changeFilter("ready")} label="Ready" count={counts.ready} />
+            </div>
+          </nav>
+          <div className="topbar-controls">
+            <button className={`topbar-scan-action ${tracks.length ? "" : "prominent"}`.trim()} disabled={busy || saving || !setup.input_dir.trim() || !setup.output_dir.trim()} onClick={identify} title={busy ? workflow?.phase === "apply" ? "Writing corrected files" : "Identifying music" : tracks.length ? "Rescan music folder" : "Start cleaning"}>
+              {busy ? <span className="spinner" /> : <Icon name={tracks.length ? "refresh" : "sparkles"} />}
+              {busy ? workflow?.phase === "apply" ? "Writing…" : "Identifying…" : tracks.length ? "Rescan" : "Scan folder"}
+            </button>
+            <div className="topbar-actions">
+              {!connected && <span className="connection-state offline"><i />Offline</span>}
+              <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`} title="Change theme">
+                <Icon name={theme === "dark" ? "sun" : "moon"} />
+              </button>
+              <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Open settings" title="Settings"><Icon name="settings" /></button>
+            </div>
+          </div>
         </div>
       </header>
 
-      <section className="source-bar" aria-labelledby="source-title">
-        <div className="source-heading">
-          <span className="source-icon"><Icon name="folder" /></span>
-          <div><p className="eyebrow" id="source-title">Music source</p><p>{tracks.length ? `${tracks.length} audio ${tracks.length === 1 ? "file" : "files"} in queue` : "Select a folder to begin"}</p></div>
-        </div>
-        <label className="path-field">
-          <span>Music folder</span>
-          <input value={setup.input_dir} onChange={(event) => setSetup({ ...setup, input_dir: event.target.value })} placeholder="/Users/me/Music/to-clean" autoComplete="off" />
-        </label>
-        <div className="output-summary" title={setup.output_dir}>
-          <span>Corrected copies</span>
-          <b>{setup.output_dir || "Choose an output folder in settings"}</b>
-        </div>
-        <div className={`safety-state ${setup.delete_source_after_write ? "destructive" : "safe"}`}>
-          <Icon name={setup.delete_source_after_write ? "trash" : "shield"} size={16} />
-          <span><b>{setup.delete_source_after_write ? "Remove after success" : "Originals preserved"}</b><small>{setup.delete_source_after_write ? "Output is verified first" : "Safe default"}</small></span>
-        </div>
-        <button className="primary-action" disabled={busy || saving || !setup.input_dir.trim() || !setup.output_dir.trim()} onClick={identify}>
-          {busy && workflow?.phase !== "apply" ? <span className="spinner" /> : <Icon name={tracks.length ? "refresh" : "sparkles"} />}
-          {busy && workflow?.phase !== "apply" ? "Identifying…" : tracks.length ? "Rescan folder" : "Start cleaning"}
-        </button>
-      </section>
-
       <nav className="mobile-nav" aria-label="Workspace views">
-        <NavButton active={filter === "all"} onClick={() => changeFilter("all")} label="Studio" />
-        <NavButton active={filter === "review"} onClick={() => changeFilter("review")} label="Review" count={counts.review} />
-        <NavButton active={filter === "problems"} onClick={() => changeFilter("problems")} label="Problems" count={counts.problems} />
-        <NavButton active={filter === "completed"} onClick={() => changeFilter("completed")} label="Completed" count={counts.completed} />
+        <NavButton className="all-tracks-tab" active={filter === "all"} onClick={() => changeFilter("all")} label="All tracks" count={tracks.length} />
+        <div className="status-tabs" role="group" aria-label="Filter tracks by status">
+          <NavButton active={filter === "review"} onClick={() => changeFilter("review")} label="Review" count={counts.review} />
+          <NavButton active={filter === "problems"} onClick={() => changeFilter("problems")} label="Issues" count={counts.problems} />
+          <NavButton active={filter === "ready"} onClick={() => changeFilter("ready")} label="Ready" count={counts.ready} />
+        </div>
       </nav>
 
       <div className="announcement-region" aria-live="polite" aria-atomic="true">
@@ -283,23 +313,18 @@ export function App() {
 
       <main className="workspace" id="workspace">
         <section className="queue-panel" aria-labelledby="queue-title">
-          <header className="panel-header">
-            <div><p className="eyebrow">Library</p><h1 id="queue-title">{filterTitle(filter)}</h1></div>
-            <span className="queue-count">{visibleTracks.length}</span>
-          </header>
-
-          <div className="queue-toolbar">
+          <header className="queue-header">
+            <div className="queue-heading"><h1 id="queue-title">{filterTitle(filter)}</h1><span className="queue-count">{visibleTracks.length}</span></div>
             <label className="search-field"><Icon name="search" size={16} /><span className="sr-only">Search queue</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search title, artist, album…" /></label>
+            <button className="queue-order-button compact-button" onClick={cycleQueueOrder} aria-label={`Order tracks by ${queueOrderLabels[queueOrder]}`} title={`Current order: ${queueOrderLabels[queueOrder]}. Click to change.`}><Icon name="menu" size={14} /><span>{queueOrderLabels[queueOrder]}</span></button>
             {autoApprovable > 0 && filter === "review" && <button className="compact-button accent" disabled={autoApproving} onClick={autoApprove}><Icon name="sparkles" size={15} />{autoApproving ? "Checking…" : `Auto-select ${autoApprovable}`}</button>}
-          </div>
-
-          <div className="queue-columns" aria-hidden="true"><span>Track</span><span>Match</span><span>Status</span></div>
+          </header>
 
           <div className="track-list" role="list" aria-label="Music queue">
             {loading ? <QueueSkeleton /> : !connected && tracks.length === 0 ? <EmptyState icon="alert" title="The studio is offline" description="Start the local Rust backend, then reconnect to load your workspace." action="Reconnect" onAction={loadApp} />
-              : tracks.length === 0 ? <EmptyState icon="music" title={busy ? "Listening to your library" : "Your queue is ready"} description={busy ? "Audio files will appear here as they are discovered and identified." : "Enter a music folder above, choose where corrected copies should go, then start cleaning."} />
-              : visibleTracks.length === 0 ? <EmptyState icon={filter === "review" ? "check" : "search"} title={filter === "review" ? "Nothing needs review" : "No tracks found"} description={filter === "review" ? "All current matches are resolved. Your library is ready for the next step." : "Try another search or switch workspace views."} />
-              : visibleTracks.map((track, index) => <TrackRow key={track.id} track={track} active={track.id === selectedId} index={index + 1} onClick={() => selectTrack(track)} />)}
+              : tracks.length === 0 ? <EmptyState icon={workflow?.phase === "finish" ? "check" : "music"} title={busy ? "Listening to your library" : workflow?.phase === "finish" ? "Cleaning complete" : "Your queue is ready"} description={busy ? "Audio files will appear here as they are discovered and identified." : workflow?.phase === "finish" ? `Corrected files are available in ${setup.output_dir || "your output folder"}.` : "Enter a music folder above, choose where corrected copies should go, then start cleaning."} />
+              : visibleTracks.length === 0 ? <EmptyState icon={filter === "review" || filter === "ready" ? "check" : "search"} title={filter === "review" ? "Nothing needs review" : filter === "ready" ? "No tracks are ready yet" : "No tracks found"} description={filter === "review" ? "All current matches are resolved. Your library is ready for the next step." : filter === "ready" ? "Accept a match or enter metadata manually to prepare a track for writing." : "Try another search or switch workspace views."} />
+              : visibleTracks.map((track) => <TrackRow key={track.id} track={track} active={track.id === selectedId} onClick={() => selectTrack(track)} />)}
           </div>
         </section>
 
@@ -309,25 +334,24 @@ export function App() {
         </aside>
       </main>
 
-      <ProcessingDock workflow={workflow} counts={counts} busy={busy} deleteSources={setup.delete_source_after_write} onStop={() => void api("/stop", { method: "POST", body: "{}" })} onWrite={() => void write()} />
+      <ProcessingDock workflow={workflow} counts={counts} busy={busy} deleteSources={setup.delete_source_after_write} onStop={() => void stop()} onWrite={() => void write()} />
 
-      {settingsOpen && <SettingsDrawer setup={setup} setSetup={setSetup} keys={keys} setKeys={setKeys} saving={saving} onSave={async () => { try { await saveSetup(); setSettingsOpen(false); } catch (reason) { setError((reason as Error).message); } }} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsDrawer setup={setup} setSetup={setSetup} keys={keys} setKeys={setKeys} saving={saving} onSave={async () => { try { await saveSetup(); setNotice("Studio settings saved."); setSettingsOpen(false); } catch (reason) { setError((reason as Error).message); } }} onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }
 
-function NavButton({ active, label, count, onClick }: { active: boolean; label: string; count?: number; onClick: () => void }) {
-  return <button className={active ? "active" : ""} onClick={onClick}>{label}{Boolean(count) && <span>{count}</span>}</button>;
+function NavButton({ active, label, count, className = "", onClick }: { active: boolean; label: string; count?: number; className?: string; onClick: () => void }) {
+  return <button className={`${className}${active ? " active" : ""}`.trim()} aria-current={active ? "page" : undefined} onClick={onClick}>{label}{Boolean(count) && <span>{count}</span>}</button>;
 }
 
-function TrackRow({ track, active, index, onClick }: { track: Track; active: boolean; index: number; onClick: () => void }) {
+function TrackRow({ track, active, onClick }: { track: Track; active: boolean; onClick: () => void }) {
   const candidate = selectedCandidate(track) ?? track.candidates[0];
   const displayTitle = candidate?.title || track.current_title || fileStem(track.filename);
   const artist = candidate?.artist || track.current_artist || "Unknown artist";
   const score = candidate?.score;
   return (
     <button className={`track-row ${active ? "selected" : ""}`} onClick={onClick} role="listitem" aria-current={active ? "true" : undefined}>
-      <span className="row-number">{String(index).padStart(2, "0")}</span>
       <Artwork candidate={candidate} trackId={track.selected_candidate_id ? track.id : undefined} size="small" />
       <span className="row-identity"><b>{displayTitle}</b><small>{artist}<i>·</i>{candidate?.album || track.current_album || track.filename}</small></span>
       <span className="confidence-cell">{typeof score === "number" ? <><b>{Math.round(score)}%</b><small>match</small></> : <small>—</small>}</span>
@@ -341,16 +365,25 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   const [editing, setEditing] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [undoing, setUndoing] = useState(false);
+  const [choosingId, setChoosingId] = useState<number>();
+  const [actionError, setActionError] = useState("");
   const candidate = selectedCandidate(track);
   const reviewCandidate = track.candidates[0];
   const heroCandidate = candidate ?? reviewCandidate;
   const corrupt = track.status === "corrupt";
   const undoIdentification = async () => {
-    setUndoing(true);
+    setUndoing(true); setActionError("");
     try {
       await api(`/tracks/${track.id}/review`, { method: "POST", body: "{}" });
       await onSaved();
-    } finally { setUndoing(false); }
+    } catch (reason) { setActionError((reason as Error).message); }
+    finally { setUndoing(false); }
+  };
+  const acceptCandidate = async (candidateId: number) => {
+    setChoosingId(candidateId); setActionError("");
+    try { await onChoose(track.id, candidateId); }
+    catch (reason) { setActionError((reason as Error).message); }
+    finally { setChoosingId(undefined); }
   };
 
   return (
@@ -369,15 +402,17 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
 
       {(isReview(track) || isProblem(track)) && <section className={`decision-note ${isProblem(track) ? "problem" : "review"}`}>
         <Icon name={isProblem(track) ? "alert" : "info"} />
-        <div><b>{isProblem(track) ? problemTitle(track) : "Your review is needed"}</b><p>{track.stage_message || track.error || "The available matches are too close to choose safely."}</p>{track.error && track.stage_message && <small>{track.error}</small>}</div>
+        <div><b>{isProblem(track) ? problemTitle(track) : "Your review is needed"}</b><p>{track.stage_message || friendlyTrackError(track) || "The available matches are too close to choose safely."}</p>{track.error && track.stage_message && <details className="technical-error"><summary>Technical details</summary><code>{track.error}</code></details>}</div>
       </section>}
 
       {isReview(track) && track.candidates.length > 0 && <section className="inspector-section candidate-section">
         <div className="section-heading"><div><p className="eyebrow">Candidate matches</p><h3>Choose the right recording</h3></div><span>{track.candidates.length} found</span></div>
         <div className="candidate-list">
-          {track.candidates.slice(0, 5).map((item, index) => <CandidateRow key={item.id} candidate={item} rank={index + 1} onChoose={() => void onChoose(track.id, item.id)} />)}
+          {track.candidates.slice(0, 5).map((item, index) => <CandidateRow key={item.id} candidate={item} rank={index + 1} choosing={choosingId === item.id} disabled={choosingId !== undefined} onChoose={() => void acceptCandidate(item.id)} />)}
         </div>
       </section>}
+
+      {actionError && <p className="inline-feedback error" role="alert">{actionError}</p>}
 
       {candidate && <>
         <section className="inspector-section">
@@ -414,14 +449,14 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   );
 }
 
-function CandidateRow({ candidate, rank, onChoose }: { candidate: Candidate; rank: number; onChoose: () => void }) {
+function CandidateRow({ candidate, rank, choosing, disabled, onChoose }: { candidate: Candidate; rank: number; choosing: boolean; disabled: boolean; onChoose: () => void }) {
   const audit = metadataAudit(candidate);
   return <article className="candidate-row">
     <span className="candidate-rank">{rank}</span>
     <Artwork candidate={candidate} size="medium" />
     <div className="candidate-identity"><b>{candidate.title || "Untitled"}</b><span>{candidate.artist || "Unknown artist"}</span><small>{[candidate.album, candidate.year || candidate.release_date?.slice(0, 4), candidate.track_number ? `Track ${candidate.track_number}` : ""].filter(Boolean).join(" · ")}</small><em>{candidateSources(candidate)}</em></div>
     <div className="candidate-score"><strong>{Math.round(candidate.score)}%</strong><progress className="score-track" max="100" value={Math.max(0, Math.min(100, candidate.score))} aria-label={`${Math.round(candidate.score)} percent match`} /><small>{audit.coreComplete ? "Complete metadata" : `${audit.score}% complete`}</small></div>
-    <button className="accept-button" onClick={onChoose}><Icon name="check" size={15} />Accept match</button>
+    <button className="accept-button" disabled={disabled} onClick={onChoose}>{choosing ? <span className="spinner" /> : <Icon name="check" size={15} />}{choosing ? "Accepting…" : "Accept match"}</button>
   </article>;
 }
 
@@ -498,11 +533,14 @@ function ProviderStatus({ sources }: { sources: Record<string, boolean> }) {
 }
 
 function ProcessingDock({ workflow, counts, busy, deleteSources, onStop, onWrite }: { workflow?: Workflow; counts: { review: number; ready: number; problems: number; completed: number }; busy: boolean; deleteSources: boolean; onStop: () => void; onWrite: () => void }) {
-  const percent = workflow?.total ? Math.min(100, Math.round((workflow.processed / workflow.total) * 100)) : 0;
+  const completedOperations = workflow?.phase === "apply" || workflow?.phase === "finish"
+    ? workflow.current
+    : Math.max(workflow?.processed || 0, workflow?.current || 0);
+  const percent = workflow?.total ? Math.min(100, Math.round((completedOperations / workflow.total) * 100)) : 0;
   return <footer className={`processing-dock ${busy ? "working" : ""}`}>
-    <div className="dock-operation"><span className="operation-icon">{busy ? <span className="equalizer"><i/><i/><i/></span> : <Icon name={workflow?.phase === "failed" ? "alert" : "disc"} />}</span><span><b>{busy ? workflow?.message || "Processing" : workflow?.phase === "failed" ? "Processing stopped" : counts.completed ? "Library cleaned" : "Studio ready"}</b><small>{busy ? workflow?.current_file || "Preparing your music…" : counts.ready ? `${counts.ready} ${counts.ready === 1 ? "track" : "tracks"} ready to write` : counts.review ? `${counts.review} waiting for review` : "Select a folder or inspect the queue"}</small></span></div>
-    <div className="dock-progress"><progress max="100" value={percent} aria-label={`${percent}% complete`} /><small>{busy ? `${workflow?.processed || 0} of ${workflow?.total || 0}` : `${counts.completed} cleaned · ${counts.review} review · ${counts.problems} problems`}</small></div>
-    <div className="dock-actions">{busy ? <button className="compact-button" onClick={onStop}><Icon name="pause" size={15} />Stop</button> : <button className="primary-action" disabled={!counts.ready} onClick={onWrite}><Icon name="sparkles" />Write {counts.ready} corrected {counts.ready === 1 ? "file" : "files"}</button>}<span className={deleteSources ? "delete-note" : "safe-note"}><Icon name={deleteSources ? "trash" : "shield"} size={14} />{deleteSources ? "Originals removed after success" : "Originals stay untouched"}</span></div>
+    <div className="dock-operation"><span className="operation-icon">{busy ? <span className="equalizer"><i/><i/><i/></span> : <Icon name={workflow?.phase === "failed" ? "alert" : "disc"} />}</span><span><b>{busy ? workflow?.message || "Processing" : workflow?.phase === "failed" ? "Processing stopped" : workflow?.phase === "finish" ? "Writing complete" : "Studio ready"}</b><small>{busy ? workflow?.current_file || "Preparing your music…" : workflow?.phase === "finish" ? `${workflow.current || workflow.total} corrected files written` : counts.ready ? `${counts.ready} ${counts.ready === 1 ? "track" : "tracks"} ready to write` : counts.review ? `${counts.review} waiting for review` : "Select a folder or inspect the queue"}</small></span></div>
+    <div className="dock-progress"><progress max="100" value={percent} aria-label={`${percent}% complete`} /><small>{busy ? `${completedOperations} of ${workflow?.total || 0} · ${percent}%` : `${counts.ready} ready · ${counts.review} review · ${counts.problems} problems`}</small></div>
+    <div className="dock-actions">{busy ? <button className="compact-button" onClick={onStop}><Icon name="pause" size={15} />Stop</button> : <button className="primary-action" disabled={!counts.ready} onClick={onWrite}><Icon name="sparkles" />Write {counts.ready} {counts.ready === 1 ? "file" : "files"}</button>}<span className={deleteSources ? "delete-note" : "safe-note"}><Icon name={deleteSources ? "trash" : "shield"} size={14} />{deleteSources ? "Originals removed after success" : "Originals stay untouched"}</span></div>
   </footer>;
 }
 
@@ -526,8 +564,9 @@ function Secret({ label, active, value, onChange }: { label: string; active?: bo
 }
 
 function Artwork({ candidate, trackId, size = "small" }: { candidate?: Candidate; trackId?: number; size?: "small" | "medium" | "large" }) {
-  const urls = trackId ? [`/api/tracks/${trackId}/artwork/preview?v=${encodeURIComponent(candidate?.cover_url || candidate?.id || "embedded")}`]
-    : candidate?.id ? [`/api/candidates/${candidate.id}/artwork/preview?v=${encodeURIComponent(candidate.cover_url || candidate.id)}`, ...artworkUrls(candidate)] : artworkUrls(candidate);
+  const catalogUrls = artworkUrls(candidate);
+  const urls = trackId ? [`/api/tracks/${trackId}/artwork/preview?v=${encodeURIComponent(candidate?.cover_url || candidate?.id || "embedded")}`, ...catalogUrls]
+    : candidate?.id && catalogUrls.length ? [`/api/candidates/${candidate.id}/artwork/preview?v=${encodeURIComponent(candidate.cover_url || candidate.id)}`, ...catalogUrls] : catalogUrls;
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [candidate?.id, candidate?.cover_url]);
   return urls[index] ? <img className={`artwork artwork-${size}`} src={urls[index]} alt={`Cover for ${candidate?.album || candidate?.title || "track"}`} loading="lazy" onError={() => setIndex((current) => current + 1)} />
@@ -543,7 +582,7 @@ function MetadataHealth({ candidate }: { candidate: Candidate }) {
   return <span className={`metadata-health ${audit.coreComplete ? "complete" : "incomplete"}`}><Icon name={audit.coreComplete ? "check" : "alert"} size={14} />{audit.score}% metadata {audit.coreComplete ? "complete" : `· missing ${audit.missing.slice(0, 3).join(", ")}`}</span>;
 }
 
-function isReview(track: Track) { return track.stage === "review" && !isCompleted(track); }
+function isReview(track: Track) { return track.stage === "review" && !isCompleted(track) && !isProblem(track); }
 function isReady(track: Track) { return track.stage === "ready" && Boolean(track.selected_candidate_id) && !isCompleted(track); }
 function isCompleted(track: Track) { return track.status === "applied"; }
 function isProblem(track: Track) { return track.status === "corrupt" || track.is_missing || track.stage === "failed" || track.status === "failed" || track.status === "provider_error"; }
@@ -566,7 +605,37 @@ function problemTitle(track: Track) {
   return "Could not process this track";
 }
 
-function filterTitle(filter: QueueFilter) { return ({ all: "Music queue", review: "Needs review", problems: "Problems", completed: "Completed" })[filter]; }
+function friendlyTrackError(track: Track) {
+  if (!track.error) return "";
+  if (track.status === "corrupt") return "The audio stream could not be decoded safely. This file will not be written.";
+  if (track.is_missing) return "The source file is no longer available at its original location.";
+  return "Ununknown could not finish this track. Open technical details if you need the diagnostic message.";
+}
+
+function queuePriority(track: Track) {
+  if (isReview(track)) return 0;
+  if (isProblem(track)) return 1;
+  if (isReady(track)) return 2;
+  if (isCompleted(track)) return 3;
+  return 4;
+}
+
+function compareTracks(first: Track, second: Track, order: QueueOrder) {
+  if (order === "status") return queuePriority(first) - queuePriority(second) || compareText(trackTitle(first), trackTitle(second));
+  if (order === "artist") return compareText(trackArtist(first), trackArtist(second)) || compareText(trackTitle(first), trackTitle(second));
+  return compareText(trackTitle(first), trackTitle(second));
+}
+
+function trackTitle(track: Track) { const candidate = selectedCandidate(track) ?? track.candidates[0]; return candidate?.title || track.current_title || fileStem(track.filename); }
+function trackArtist(track: Track) { const candidate = selectedCandidate(track) ?? track.candidates[0]; return candidate?.artist || track.current_artist || "Unknown artist"; }
+function compareText(first: string, second: string) { return first.localeCompare(second, undefined, { numeric: true, sensitivity: "base" }); }
+
+function preferredTrack(tracks: Track[]) {
+  return [...tracks].sort((first, second) => queuePriority(first) - queuePriority(second) || first.filename.localeCompare(second.filename))[0];
+}
+
+function filterTitle(filter: QueueFilter) { return ({ all: "Music queue", review: "Needs review", problems: "Problems", ready: "Ready to write" })[filter]; }
+function folderName(path: string) { const parts = path.split(/[\\/]/).filter(Boolean); return parts[parts.length - 1] || "Choose folder"; }
 function fileStem(filename: string) { return filename.replace(/\.[^/.]+$/, ""); }
 function outputFilename(track: Track, candidate: Candidate) { const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : ""; return `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}`; }
 function safeName(value: string) { return value.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").replace(/^[ .]+|[ .]+$/g, ""); }
