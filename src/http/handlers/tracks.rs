@@ -1,162 +1,126 @@
 use super::*;
 
-pub async fn list_tracks(
-    State(s): State<Arc<AppState>>,
-    Query(q): Query<TrackQuery>,
-) -> ApiResult<Json<TrackPage>> {
-    let page = q.page.unwrap_or(1).max(1);
-    let size = q.page_size.unwrap_or(100).clamp(20, 200);
-    let status = q.status.unwrap_or_default();
-    let view_filter = match q.view.as_deref().unwrap_or_default() {
-        "" => "",
-        "failed" => " AND stage='failed'",
-        "review" => " AND stage='review' AND selected_candidate_id IS NULL",
-        "unmatched" => {
-            " AND stage IN ('ready','review') AND selected_candidate_id IS NULL AND NOT EXISTS (SELECT 1 FROM candidates WHERE candidates.track_id=tracks.id)"
-        }
-        view => return Err(ApiError::validation(format!("unknown track view: {view}"))),
-    };
-    let search = format!("%{}%", q.search.unwrap_or_default());
-    let total_query = format!(
-        "SELECT count(*) FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?){view_filter}"
-    );
-    let total: i64 = sqlx::query_scalar(&total_query)
-        .bind(&status)
-        .bind(&status)
-        .bind(&search)
-        .bind(&search)
-        .bind(&search)
-        .bind(&search)
-        .fetch_one(&s.pool)
-        .await?;
-    let tracks_query = format!(
-        "SELECT {} FROM tracks WHERE (?='' OR stage=?) AND (?='%%' OR filename LIKE ? OR current_title LIKE ? OR current_artist LIKE ?){view_filter} ORDER BY path LIMIT ? OFFSET ?",
+pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<TrackPage>> {
+    let tracks: Vec<Track> = sqlx::query_as(&format!(
+        "SELECT {} FROM tracks ORDER BY path LIMIT 10000",
         queries::TRACK_FIELDS
-    );
-    let tracks: Vec<Track> = sqlx::query_as(&tracks_query)
-        .bind(&status)
-        .bind(&status)
-        .bind(&search)
-        .bind(&search)
-        .bind(&search)
-        .bind(&search)
-        .bind(size)
-        .bind((page - 1) * size)
-        .fetch_all(&s.pool)
-        .await?;
-    let mut result = Vec::with_capacity(tracks.len());
+    ))
+    .fetch_all(&s.pool)
+    .await?;
+    let total = tracks.len() as i64;
+    let mut items = Vec::with_capacity(tracks.len());
     for track in tracks {
         let candidates = queries::candidates(&s.pool, track.id).await?;
-        result.push(WorkspaceTrack { track, candidates });
+        items.push(WorkspaceTrack { track, candidates });
     }
-    let rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT stage,count(*) FROM tracks GROUP BY stage")
-            .fetch_all(&s.pool)
-            .await?;
-    Ok(Json(TrackPage {
-        items: result,
-        total,
-        counts: rows.into_iter().collect(),
-    }))
-}
-pub async fn get_track(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<TrackId>,
-) -> ApiResult<Json<Track>> {
-    Ok(Json(queries::track(&s.pool, id).await?))
+    Ok(Json(TrackPage { items, total }))
 }
 
-pub async fn candidates(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<TrackId>,
-) -> ApiResult<Json<Vec<CandidateRow>>> {
-    Ok(Json(queries::candidates(&s.pool, id).await?))
-}
 pub async fn select_candidate(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
     Json(body): Json<SelectRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=CASE WHEN ? IS NULL THEN 'needs_review' ELSE 'selected' END,stage=CASE WHEN ? IS NULL THEN 'review' ELSE 'ready' END,stage_message=NULL WHERE id=?")
-        .bind(body.candidate_id.map(|v| v.0))
-        .bind(body.candidate_id.map(|v| v.0))
-        .bind(body.candidate_id.map(|v| v.0))
+    let candidate_id = body
+        .candidate_id
+        .ok_or_else(|| ApiError::validation("candidate is required"))?;
+    let belongs: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM candidates WHERE id=? AND track_id=?)")
+            .bind(candidate_id.0)
+            .bind(id.0)
+            .fetch_one(&s.pool)
+            .await?;
+    if !belongs {
+        return Err(ApiError::not_found("candidate not found for this track"));
+    }
+    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message=NULL WHERE id=?")
+        .bind(candidate_id.0)
         .bind(id.0)
         .execute(&s.pool)
         .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("track not found"));
-    }
-    previews::invalidate(&s.pool).await?;
-    Ok(Json(serde_json::json!({"selected":true})))
-}
-pub async fn edit_candidate(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<CandidateId>,
-    Json(v): Json<CandidateEdit>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let result = sqlx::query("UPDATE candidates SET title=?,artist=?,album=?,album_artist=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,genre=?,composer=?,label=?,isrc=?,provider='manual' WHERE id=?")
-        .bind(v.title).bind(v.artist).bind(v.album).bind(v.album_artist).bind(v.track_number).bind(v.track_total).bind(v.disc_number).bind(v.disc_total).bind(v.year).bind(v.genre).bind(v.composer).bind(v.label).bind(v.isrc).bind(id.0).execute(&s.pool).await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("candidate not found"));
-    }
-    previews::invalidate(&s.pool).await?;
-    Ok(Json(serde_json::json!({"saved":true})))
-}
-pub async fn retry_track(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<TrackId>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let result = sqlx::query(
-        "UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE id=?",
-    )
-    .bind(id.0)
-    .execute(&s.pool)
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("track not found"));
-    }
-    start_scan(State(s)).await
-}
-pub async fn skip_track(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<TrackId>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let result = sqlx::query(
-        "UPDATE tracks SET selected_candidate_id=NULL,status='skipped',stage='skipped',stage_message='Skipped during review' WHERE id=?",
-    )
-    .bind(id.0)
-    .execute(&s.pool)
-    .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("track not found"));
-    }
-    previews::invalidate(&s.pool).await?;
-    Ok(Json(serde_json::json!({"skipped":true})))
+    Ok(Json(serde_json::json!({"selected": true})))
 }
 
-pub async fn keep_current_track(
+pub async fn manual_candidate(
     State(s): State<Arc<AppState>>,
     Path(id): Path<TrackId>,
+    Json(value): Json<CandidateEdit>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let result = sqlx::query(
-        "UPDATE tracks SET selected_candidate_id=NULL,status='kept_current',stage='skipped',stage_message='Keeping current tags' WHERE id=?",
-    )
-    .bind(id.0)
-    .execute(&s.pool)
-    .await?;
-    if result.rows_affected() == 0 {
+    if value.title.trim().is_empty() || value.artist.trim().is_empty() {
+        return Err(ApiError::validation("Title and artist are required"));
+    }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?)")
+        .bind(id.0)
+        .fetch_one(&s.pool)
+        .await?;
+    if !exists {
         return Err(ApiError::not_found("track not found"));
     }
-    previews::invalidate(&s.pool).await?;
-    Ok(Json(serde_json::json!({"kept_current":true})))
+    let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(id.0).bind("manual").bind(value.title.trim()).bind(value.artist.trim())
+        .bind(value.album).bind(value.album_artist).bind(value.track_number).bind(value.track_total)
+        .bind(value.disc_number).bind(value.disc_total).bind(value.year).bind(value.genre)
+        .bind(value.composer).bind(value.label).bind(value.isrc).bind(100.0).bind("{}")
+        .execute(&s.pool).await?;
+    let candidate_id = result.last_insert_rowid();
+    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message='Entered manually' WHERE id=?")
+        .bind(candidate_id).bind(id.0).execute(&s.pool).await?;
+    Ok(Json(
+        serde_json::json!({"selected": true, "candidate_id": candidate_id}),
+    ))
 }
 
-pub async fn retry_failed(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    sqlx::query("UPDATE tracks SET file_mtime=-1,stage='discovered',status='new',error=NULL WHERE stage='failed'").execute(&s.pool).await?;
-    start_scan(State(s)).await
-}
-pub async fn skip_review(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    sqlx::query("UPDATE tracks SET selected_candidate_id=NULL,status='skipped',stage='skipped' WHERE stage='review'").execute(&s.pool).await?;
-    Ok(Json(serde_json::json!({"skipped":true})))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, infrastructure::db};
+
+    #[tokio::test]
+    async fn manual_metadata_resolves_a_completely_unmatched_track() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("manual.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/unknown.mp3','unknown.mp3','needs_review',0,'now','now','now','review')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+
+        let _ = manual_candidate(
+            State(state),
+            Path(TrackId(track_id)),
+            Json(CandidateEdit {
+                title: "Correct title".into(),
+                artist: "Correct artist".into(),
+                album: Some("Correct album".into()),
+                album_artist: None,
+                track_number: Some(1),
+                track_total: None,
+                disc_number: None,
+                disc_total: None,
+                year: Some("2026".into()),
+                genre: None,
+                composer: None,
+                label: None,
+                isrc: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let row: (String, String, String) = sqlx::query_as("SELECT tracks.stage,candidates.title,candidates.artist FROM tracks JOIN candidates ON candidates.id=tracks.selected_candidate_id WHERE tracks.id=?")
+            .bind(track_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "ready".into(),
+                "Correct title".into(),
+                "Correct artist".into()
+            )
+        );
+    }
 }

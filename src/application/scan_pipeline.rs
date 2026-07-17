@@ -2,7 +2,7 @@ use crate::{
     app::{ActivityLogEntry, AppState},
     domain::audio,
     infrastructure::{fingerprint_cache, media::fingerprint, providers},
-    types::{AutomationMode, MatchingStrategy, ProviderMode, WorkflowPhase},
+    types::WorkflowPhase,
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
@@ -102,18 +102,14 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
         .await;
 
     let limits = Arc::new(PipelineLimits {
-        metadata: Arc::new(Semaphore::new(cfg.metadata_read_concurrency)),
-        fingerprint: Arc::new(Semaphore::new(cfg.fingerprint_concurrency)),
-        acoustid: Arc::new(Semaphore::new(cfg.acoustid_concurrency)),
+        metadata: Arc::new(Semaphore::new(cfg.scan_workers)),
+        fingerprint: Arc::new(Semaphore::new(cfg.fingerprint_workers)),
+        acoustid: Arc::new(Semaphore::new(cfg.lookup_workers)),
         disabled_providers: Arc::new(Mutex::new(HashSet::new())),
     });
-    let (persist_tx, persist_rx) = mpsc::channel(cfg.db_write_batch_size.max(1));
-    let writer = tokio::spawn(db_writer(
-        state.clone(),
-        persist_rx,
-        cfg.db_write_batch_size,
-    ));
-    let scan_workers = cfg.scan_worker_concurrency.max(1).min(total.max(1));
+    let (persist_tx, persist_rx) = mpsc::channel(25);
+    let writer = tokio::spawn(db_writer(state.clone(), persist_rx, 25));
+    let scan_workers = cfg.scan_workers.max(1).min(total.max(1));
     let (file_tx, file_rx) = mpsc::channel::<FileJob>(scan_workers * 2);
     let file_rx = Arc::new(Mutex::new(file_rx));
     let mut tasks = JoinSet::new();
@@ -191,14 +187,14 @@ async fn process_file(
     if state.workflow_cancelled().await {
         return;
     }
-    let cfg = state.config.read().await.clone();
     let filename = job
         .path
         .file_name()
         .and_then(|v| v.to_str())
         .unwrap_or("audio")
         .to_owned();
-    for attempt in 1..=cfg.track_attempts {
+    const ATTEMPTS: usize = 2;
+    for attempt in 1..=ATTEMPTS {
         if state.workflow_cancelled().await {
             return;
         }
@@ -206,10 +202,7 @@ async fn process_file(
             .start_track(
                 total,
                 filename.clone(),
-                format!(
-                    "Matching {filename} · attempt {attempt}/{}",
-                    cfg.track_attempts
-                ),
+                format!("Matching {filename} · attempt {attempt}/{}", ATTEMPTS),
             )
             .await;
         match process(&state, &limits, &persist_tx, &job.path).await {
@@ -235,7 +228,7 @@ async fn process_file(
                     .await;
                 break;
             }
-            Err(error) if attempt < cfg.track_attempts => {
+            Err(error) if attempt < ATTEMPTS => {
                 tracing::warn!(path=%job.path.display(), attempt, "track attempt failed: {error:#}");
                 state
                     .log_entry(
@@ -245,7 +238,7 @@ async fn process_file(
                             .error_text(format!("{error:#}"))
                             .context(serde_json::json!({
                                 "path": job.path.display().to_string(),
-                                "max_attempts": cfg.track_attempts
+                                "max_attempts": ATTEMPTS
                             })),
                     )
                     .await;
@@ -275,7 +268,7 @@ async fn process_file(
                             .error_text(error_text)
                             .context(serde_json::json!({
                                 "path": job.path.display().to_string(),
-                                "max_attempts": cfg.track_attempts
+                                "max_attempts": ATTEMPTS
                             })),
                     )
                     .await;
@@ -357,29 +350,40 @@ async fn process(
                 .await
                 .with_context(|| format!("failed to fingerprint {}", path.display()))
         })
-        .await?
+        .await
     };
-    let (fp, duration) = (fingerprint_result.fingerprint, fingerprint_result.duration);
-    let (message, detail) = match fingerprint_result.source {
-        fingerprint_cache::FingerprintSource::Cache => (
-            "Fingerprint reused from cache",
-            "File size and modified time matched the cached fingerprint",
-        ),
-        fingerprint_cache::FingerprintSource::Generated => (
-            "Fingerprint generated",
-            "Cached fingerprint was missing or stale",
-        ),
+    let (fp, duration) = match fingerprint_result {
+        Ok(result) => {
+            let message = match result.source {
+                fingerprint_cache::FingerprintSource::Cache => "Fingerprint reused from cache",
+                fingerprint_cache::FingerprintSource::Generated => "Fingerprint generated",
+            };
+            state
+                .log_entry(
+                    ActivityLogEntry::new("ok", "fingerprint", message)
+                        .file(filename.to_owned())
+                        .duration_ms(started.elapsed().as_millis() as i64),
+                )
+                .await;
+            (result.fingerprint, result.duration)
+        }
+        Err(error) => {
+            state
+                .log_entry(
+                    ActivityLogEntry::new(
+                        "warn",
+                        "fingerprint",
+                        "Fingerprint unavailable; continuing with text and web sources",
+                    )
+                    .file(filename.to_owned())
+                    .error_text(format!("{error:#}")),
+                )
+                .await;
+            (String::new(), info.duration)
+        }
     };
-    state
-        .log_entry(
-            ActivityLogEntry::new("ok", "fingerprint", message)
-                .file(filename.to_owned())
-                .detail(detail)
-                .duration_ms(started.elapsed().as_millis() as i64),
-        )
-        .await;
     let cfg = state.config.read().await.clone();
-    if cfg.acoustid_key().is_empty() || !cfg.metadata_sources.acoustid.enabled {
+    if cfg.acoustid_key.is_empty() {
         state
             .log(
                 "warn",
@@ -406,13 +410,6 @@ async fn process(
             "MusicBrainz lookups are queued at one request per second",
         )
         .await;
-    if info.duration < 30.0 {
-        state.increment_unmatched().await;
-        let message = "Track is shorter than 30 seconds; skipped automatic identification";
-        persist_unmatched(&state.pool, path, &info, message).await?;
-        state.log("warn", "match", Some(filename), message).await;
-        return Ok(false);
-    }
     let mut candidates = identify(state, &cfg, limits, &fp, duration, &info, filename).await?;
     let raw_candidate_count = candidates.len();
     dedupe_candidates(&mut candidates);
@@ -428,33 +425,17 @@ async fn process(
             ),
         )
         .await;
-    if cfg.automation_mode == AutomationMode::Manual {
-        state.increment_unmatched().await;
-        let message = "Manual mode is enabled; candidates require review";
-        if candidates.is_empty() {
-            persist_unmatched(&state.pool, path, &info, message).await?;
-        } else {
-            persist_review(&state.pool, path, &info, &candidates, message).await?;
-        }
-        state.log("warn", "match", Some(filename), message).await;
-        return Ok(false);
-    }
     let Some(best) = candidates.first() else {
         state.increment_unmatched().await;
         let message = "No provider candidate found; counted as unmatched";
-        persist_unmatched(&state.pool, path, &info, &message).await?;
-        state.log("warn", "match", Some(filename), &message).await;
+        persist_unmatched(&state.pool, path, &info, message).await?;
+        state.log("warn", "match", Some(filename), message).await;
         return Ok(false);
     };
     let second_score = comparable_second_score(&candidates);
     let has_safe_evidence = candidate_has_fingerprint(best) || candidate_source_count(best) >= 2;
     let auto_select = has_safe_evidence
-        && crate::domain::matcher::auto_selectable_for_strategy(
-            cfg.matching_strategy,
-            best.score,
-            second_score,
-            best.duration_delta,
-        );
+        && crate::domain::matcher::auto_selectable(best.score, second_score, best.duration_delta);
     if !auto_select {
         state.increment_unmatched().await;
         let message = if best.score >= 70.0 {
@@ -508,121 +489,31 @@ async fn identify(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
-    let mut out = Vec::new();
-    let primary_modes = [ProviderMode::Primary, ProviderMode::Parallel];
-    let fallback_modes = [ProviderMode::Fallback];
-    let all_modes = [
-        ProviderMode::Primary,
-        ProviderMode::Fallback,
-        ProviderMode::Parallel,
-    ];
-
-    match cfg.matching_strategy {
-        MatchingStrategy::Aggressive => {
-            out.extend(
-                query_candidate_modes(
-                    state,
-                    cfg,
-                    limits,
-                    fingerprint,
-                    duration,
-                    current,
-                    filename,
-                    &all_modes,
-                )
-                .await?,
-            );
+    let mut out = match query_musicbrainz_acoustid(
+        state,
+        cfg,
+        limits,
+        fingerprint,
+        duration,
+        current,
+        filename,
+    )
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "acoustid", error).await;
+            Vec::new()
         }
-        MatchingStrategy::Safe => {
-            out.extend(
-                query_candidate_modes(
-                    state,
-                    cfg,
-                    limits,
-                    fingerprint,
-                    duration,
-                    current,
-                    filename,
-                    &primary_modes,
-                )
-                .await?,
-            );
-            if out.is_empty() {
-                state
-                    .log(
-                        "info",
-                        "providers",
-                        Some(filename),
-                        "Primary sources returned no candidates; querying fallback sources",
-                    )
-                    .await;
-                out.extend(
-                    query_candidate_modes(
-                        state,
-                        cfg,
-                        limits,
-                        fingerprint,
-                        duration,
-                        current,
-                        filename,
-                        &fallback_modes,
-                    )
-                    .await?,
-                );
-            }
-        }
-        MatchingStrategy::Balanced => {
-            out.extend(
-                query_candidate_modes(
-                    state,
-                    cfg,
-                    limits,
-                    fingerprint,
-                    duration,
-                    current,
-                    filename,
-                    &primary_modes,
-                )
-                .await?,
-            );
-            let best = out
-                .iter()
-                .map(|candidate| candidate.score)
-                .fold(0.0, f64::max);
-            let has_strong_fingerprint = out
-                .iter()
-                .any(|candidate| candidate_has_fingerprint(candidate) && candidate.score >= 90.0);
-            if !has_strong_fingerprint && (out.is_empty() || best < 85.0) {
-                state
-                    .log(
-                        "info",
-                        "providers",
-                        Some(filename),
-                        "Primary confidence is medium or empty; querying fallback sources",
-                    )
-                    .await;
-                out.extend(
-                    query_candidate_modes(
-                        state,
-                        cfg,
-                        limits,
-                        fingerprint,
-                        duration,
-                        current,
-                        filename,
-                        &fallback_modes,
-                    )
-                    .await?,
-                );
-            }
-        }
+    };
+    match query_musicbrainz_text(state, cfg, current, filename).await {
+        Ok(candidates) => out.extend(candidates),
+        Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
     }
-    let has_strong_fingerprint = out
-        .iter()
-        .any(|candidate| candidate_has_fingerprint(candidate) && candidate.score >= 90.0);
-    if !has_strong_fingerprint {
-        apply_enrichment_sources(state, cfg, limits, current, filename, &mut out).await;
-    }
+    out.extend(query_discogs(state, cfg, limits, current, filename).await);
+    out.extend(query_lastfm(state, cfg, limits, current, filename).await);
+    out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
+    out.extend(query_wikidata(state, limits, current, filename).await);
     apply_source_agreement(&mut out)?;
     if out.is_empty() {
         state
@@ -667,49 +558,6 @@ fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
     }
 }
 
-async fn query_candidate_modes(
-    state: &Arc<AppState>,
-    cfg: &crate::config::Config,
-    limits: &Arc<PipelineLimits>,
-    fingerprint: &str,
-    duration: f64,
-    current: &audio::AudioInfo,
-    filename: &str,
-    modes: &[ProviderMode],
-) -> Result<Vec<providers::Candidate>> {
-    let mut out = Vec::new();
-    if modes.contains(&cfg.metadata_sources.acoustid.mode) {
-        out.extend(
-            query_musicbrainz_acoustid(
-                state,
-                cfg,
-                limits,
-                fingerprint,
-                duration,
-                current,
-                filename,
-            )
-            .await?,
-        );
-    }
-    if modes.contains(&cfg.metadata_sources.musicbrainz.mode) {
-        out.extend(query_musicbrainz_text(state, cfg, current, filename).await?);
-    }
-    if modes.contains(&cfg.metadata_sources.discogs.mode) {
-        out.extend(query_discogs(state, cfg, limits, current, filename).await);
-    }
-    if modes.contains(&cfg.metadata_sources.lastfm.mode) {
-        out.extend(query_lastfm(state, cfg, limits, current, filename).await);
-    }
-    if modes.contains(&cfg.metadata_sources.theaudiodb.mode) {
-        out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
-    }
-    if modes.contains(&cfg.metadata_sources.wikidata.mode) {
-        out.extend(query_wikidata(state, cfg, limits, current, filename).await);
-    }
-    Ok(out)
-}
-
 async fn query_musicbrainz_acoustid(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
@@ -720,10 +568,7 @@ async fn query_musicbrainz_acoustid(
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
     let mut out = Vec::new();
-    if !cfg.metadata_sources.acoustid.enabled || !cfg.metadata_sources.musicbrainz.enabled {
-        return Ok(out);
-    }
-    if cfg.acoustid_key().is_empty() {
+    if cfg.acoustid_key.is_empty() || fingerprint.is_empty() {
         log_provider_skip(state, filename, "acoustid", "AcoustID API key is missing").await;
         return Ok(out);
     }
@@ -733,7 +578,7 @@ async fn query_musicbrainz_acoustid(
         providers::acoustid::lookup(
             &state.pool,
             &state.client,
-            cfg.acoustid_key(),
+            &cfg.acoustid_key,
             fingerprint,
             duration,
         )
@@ -755,7 +600,7 @@ async fn query_musicbrainz_acoustid(
         let mut candidate = providers::musicbrainz::recording(
             &state.pool,
             &state.client,
-            cfg.musicbrainz_user_agent(),
+            &cfg.musicbrainz_user_agent,
             &hit.recording_id,
         )
         .await?;
@@ -777,7 +622,6 @@ async fn query_musicbrainz_acoustid(
             album: candidate.album.as_deref(),
             candidate_duration,
             is_compilation: candidate.is_compilation,
-            compilation_preference: cfg.compilation_preference,
         });
         candidate.score = breakdown.final_score;
         candidate.duration_delta = duration_delta;
@@ -794,9 +638,6 @@ async fn query_musicbrainz_text(
     filename: &str,
 ) -> Result<Vec<providers::Candidate>> {
     let mut out = Vec::new();
-    if !cfg.metadata_sources.musicbrainz.enabled {
-        return Ok(out);
-    }
     let Some(title) = current
         .title
         .as_deref()
@@ -808,7 +649,7 @@ async fn query_musicbrainz_text(
     for mut candidate in providers::musicbrainz::search(
         &state.pool,
         &state.client,
-        cfg.musicbrainz_user_agent(),
+        &cfg.musicbrainz_user_agent,
         title,
         current.artist.as_deref(),
     )
@@ -839,21 +680,10 @@ async fn query_discogs(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
-    if !cfg.metadata_sources.discogs.enabled {
-        return Vec::new();
-    }
     if provider_disabled(limits, "discogs").await {
         return Vec::new();
     }
-    let token = cfg
-        .metadata_sources
-        .discogs
-        .token
-        .as_str()
-        .trim()
-        .is_empty()
-        .then_some(cfg.metadata_sources.discogs.api_key.as_str())
-        .unwrap_or(cfg.metadata_sources.discogs.token.as_str());
+    let token = cfg.discogs_token.trim();
     if token.trim().is_empty() {
         log_provider_skip(
             state,
@@ -887,13 +717,10 @@ async fn query_lastfm(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
-    if !cfg.metadata_sources.lastfm.enabled {
-        return Vec::new();
-    }
     if provider_disabled(limits, "lastfm").await {
         return Vec::new();
     }
-    let api_key = cfg.metadata_sources.lastfm.api_key.trim();
+    let api_key = cfg.lastfm_key.trim();
     if api_key.is_empty() {
         log_provider_skip(state, filename, "lastfm", "Last.fm API key is missing").await;
         return Vec::new();
@@ -921,13 +748,10 @@ async fn query_theaudiodb(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
-    if !cfg.metadata_sources.theaudiodb.enabled {
-        return Vec::new();
-    }
     if provider_disabled(limits, "theaudiodb").await {
         return Vec::new();
     }
-    let api_key = cfg.metadata_sources.theaudiodb.api_key.trim();
+    let api_key = cfg.theaudiodb_key.trim();
     if api_key.is_empty() {
         log_provider_skip(
             state,
@@ -956,14 +780,10 @@ async fn query_theaudiodb(
 
 async fn query_wikidata(
     state: &Arc<AppState>,
-    cfg: &crate::config::Config,
     limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<providers::Candidate> {
-    if !cfg.metadata_sources.wikidata.enabled {
-        return Vec::new();
-    }
     if provider_disabled(limits, "wikidata").await {
         return Vec::new();
     }
@@ -980,51 +800,6 @@ async fn query_wikidata(
             handle_provider_error(state, limits, filename, "wikidata", error).await;
             Vec::new()
         }
-    }
-}
-
-async fn apply_enrichment_sources(
-    state: &Arc<AppState>,
-    cfg: &crate::config::Config,
-    limits: &Arc<PipelineLimits>,
-    current: &audio::AudioInfo,
-    filename: &str,
-    candidates: &mut [providers::Candidate],
-) {
-    if candidates.is_empty() {
-        return;
-    }
-    let mut enrichment = Vec::new();
-    if cfg.metadata_sources.discogs.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_discogs(state, cfg, limits, current, filename).await);
-    }
-    if cfg.metadata_sources.lastfm.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_lastfm(state, cfg, limits, current, filename).await);
-    }
-    if cfg.metadata_sources.theaudiodb.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
-    }
-    if cfg.metadata_sources.wikidata.mode == ProviderMode::EnrichmentOnly {
-        enrichment.extend(query_wikidata(state, cfg, limits, current, filename).await);
-    }
-    if enrichment.is_empty() {
-        return;
-    }
-    for candidate in candidates {
-        let mut sources = candidate_source_list(candidate);
-        for evidence in &enrichment {
-            if candidate_agrees(candidate, evidence) {
-                sources.push(provider_display_name(&evidence.provider).to_owned());
-                candidate.score = (candidate.score + 2.0).min(99.0);
-                if candidate.genre.is_none() {
-                    candidate.genre = evidence.genre.clone();
-                }
-                if candidate.cover_url.is_none() {
-                    candidate.cover_url = evidence.cover_url.clone();
-                }
-            }
-        }
-        set_score_sources(candidate, sources).ok();
     }
 }
 
@@ -1810,8 +1585,7 @@ mod tests {
 
         assert!(!candidate_has_fingerprint(&candidate));
         assert_eq!(candidate_source_count(&candidate), 1);
-        assert!(crate::domain::matcher::auto_selectable_for_strategy(
-            crate::types::MatchingStrategy::Aggressive,
+        assert!(!crate::domain::matcher::auto_selectable(
             candidate.score,
             None,
             candidate.duration_delta
@@ -1856,8 +1630,7 @@ mod tests {
         assert_eq!(candidates[0].provider, "musicbrainz");
         assert_eq!(comparable_second_score(&candidates), None);
         assert!(candidate_has_fingerprint(&candidates[0]));
-        assert!(crate::domain::matcher::auto_selectable_for_strategy(
-            crate::types::MatchingStrategy::Balanced,
+        assert!(crate::domain::matcher::auto_selectable(
             candidates[0].score,
             comparable_second_score(&candidates),
             candidates[0].duration_delta

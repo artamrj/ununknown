@@ -135,33 +135,3 @@ mod tests {
         assert_eq!(hits[0].recording_id, "recording-1");
     }
 }
-
-#[allow(dead_code)]
-pub async fn test_key(client: &Client, key: &str, fingerprint: &str, duration: f64) -> Result<()> {
-    if key.trim().is_empty() {
-        bail!("AcoustID API key is not configured");
-    }
-    let response: Response = client
-        .post("https://api.acoustid.org/v2/lookup")
-        .form(&[
-            ("client", key),
-            ("meta", "recordings releases releasegroups tracks compress"),
-            ("fingerprint", fingerprint),
-            ("duration", &duration.round().to_string()),
-        ])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    if response.status != "ok" {
-        let message = response
-            .error
-            .map(|error| error.message)
-            .unwrap_or_default();
-        if message.to_ascii_lowercase().contains("invalid client") {
-            bail!("AcoustID rejected the configured API key: {message}");
-        }
-    }
-    Ok(())
-}

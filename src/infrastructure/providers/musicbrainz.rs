@@ -180,24 +180,12 @@ fn parse_track_position(value: &str) -> Option<i64> {
     digits.parse().ok()
 }
 
-pub async fn test_connection(client: &Client, user_agent: &str) -> Result<()> {
-    validate_user_agent(user_agent)?;
-    request_json(
-        client
-            .get("https://musicbrainz.org/ws/2/recording")
-            .query(&[
-                ("fmt", "json"),
-                ("limit", "1"),
-                ("query", "recording:music"),
-            ])
-            .header("User-Agent", user_agent),
-    )
-    .await?;
-    Ok(())
-}
-
 fn validate_user_agent(user_agent: &str) -> Result<()> {
-    if !crate::config::Config::valid_musicbrainz_user_agent(user_agent) {
+    if !(user_agent.contains('/')
+        && user_agent.contains('(')
+        && user_agent.contains(')')
+        && (user_agent.contains('@') || user_agent.contains("http")))
+    {
         bail!("MusicBrainz contact must include an email address or website");
     }
     Ok(())

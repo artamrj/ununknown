@@ -23,10 +23,10 @@ pub async fn fetch_cached(
     url: &str,
 ) -> Result<Vec<u8>> {
     let key = release_key(release_id);
-    if let Some(value) = ProviderCache::get(pool, "coverart", &key).await? {
-        if let Some(encoded) = value["data_base64"].as_str() {
-            return Ok(STANDARD.decode(encoded)?);
-        }
+    if let Some(value) = ProviderCache::get(pool, "coverart", &key).await?
+        && let Some(encoded) = value["data_base64"].as_str()
+    {
+        return Ok(STANDARD.decode(encoded)?);
     }
     let data = fetch(client, url).await?;
     ProviderCache::put(

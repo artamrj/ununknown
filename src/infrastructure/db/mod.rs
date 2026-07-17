@@ -21,9 +21,114 @@ pub async fn connect(path: &str) -> Result<SqlitePool> {
         .acquire_timeout(Duration::from_secs(30))
         .connect_with(options)
         .await?;
-    sqlx::migrate!().run(&pool).await?;
+    sqlx::raw_sql(SCHEMA).execute(&pool).await?;
     Ok(pool)
 }
+
+const SCHEMA: &str = r#"
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tracks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  output_path TEXT,
+  filename TEXT NOT NULL,
+  format TEXT,
+  bitrate INTEGER,
+  duration REAL,
+  current_title TEXT,
+  current_artist TEXT,
+  current_album TEXT,
+  current_album_artist TEXT,
+  current_track_number INTEGER,
+  file_mtime INTEGER,
+  file_size INTEGER,
+  content_fingerprint TEXT,
+  selected_candidate_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'new',
+  error TEXT,
+  is_missing INTEGER NOT NULL DEFAULT 0,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  last_scanned_at TEXT NOT NULL,
+  last_applied_at TEXT,
+  last_apply_run_id TEXT,
+  stage TEXT NOT NULL DEFAULT 'discovered',
+  stage_message TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  next_retry_at TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS candidates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  title TEXT,
+  artist TEXT,
+  album TEXT,
+  album_artist TEXT,
+  track_number INTEGER,
+  track_total INTEGER,
+  disc_number INTEGER,
+  disc_total INTEGER,
+  year TEXT,
+  genre TEXT,
+  composer TEXT,
+  label TEXT,
+  isrc TEXT,
+  cover_url TEXT,
+  musicbrainz_recording_id TEXT,
+  musicbrainz_release_id TEXT,
+  musicbrainz_artist_id TEXT,
+  musicbrainz_album_artist_id TEXT,
+  score REAL NOT NULL,
+  raw_json TEXT,
+  release_country TEXT,
+  release_date TEXT,
+  release_type TEXT,
+  release_secondary_types TEXT,
+  is_compilation INTEGER NOT NULL DEFAULT 0,
+  duration_delta REAL,
+  score_breakdown TEXT
+);
+
+CREATE TABLE IF NOT EXISTS candidate_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  confidence REAL,
+  reason_json TEXT,
+  raw_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_cache (
+  provider TEXT NOT NULL,
+  cache_key TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  PRIMARY KEY(provider, cache_key)
+);
+
+CREATE TABLE IF NOT EXISTS fingerprint_cache (
+  path TEXT PRIMARY KEY,
+  file_size INTEGER NOT NULL,
+  file_mtime INTEGER NOT NULL,
+  fingerprint TEXT NOT NULL,
+  duration REAL NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS candidates_track_id ON candidates(track_id);
+CREATE INDEX IF NOT EXISTS tracks_stage ON tracks(stage);
+CREATE INDEX IF NOT EXISTS candidate_sources_candidate_id ON candidate_sources(candidate_id);
+"#;
 
 pub async fn load_settings(pool: &SqlitePool, defaults: Config) -> Result<Config> {
     let db_path = defaults.db_path.clone();
@@ -35,19 +140,6 @@ pub async fn load_settings(pool: &SqlitePool, defaults: Config) -> Result<Config
         None => defaults,
     };
     config.db_path = db_path;
-    if config.metadata_sources.acoustid.api_key.is_empty() {
-        config.metadata_sources.acoustid.api_key = config.acoustid_api_key.clone();
-    }
-    config.acoustid_api_key = config.metadata_sources.acoustid.api_key.clone();
-    if config.metadata_sources.musicbrainz.user_agent.is_empty() {
-        config.metadata_sources.musicbrainz.user_agent = config.musicbrainz_user_agent.clone();
-    }
-    config.musicbrainz_user_agent = config.metadata_sources.musicbrainz.user_agent.clone();
-    if !config.metadata_sources.discogs.api_key.is_empty()
-        || !config.metadata_sources.discogs.token.is_empty()
-    {
-        config.metadata_sources.discogs.enabled = true;
-    }
     save_settings(pool, &config).await?;
     Ok(config)
 }
@@ -62,20 +154,8 @@ pub async fn save_settings(pool: &SqlitePool, config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub async fn cleanup(pool: &SqlitePool, config: &Config) -> Result<()> {
+pub async fn cleanup(pool: &SqlitePool, _config: &Config) -> Result<()> {
     sqlx::query("UPDATE tracks SET stage='failed',status='provider_error',stage_message='Interrupted by restart',error=COALESCE(error,'Interrupted by backend restart') WHERE status='processing'")
-        .execute(pool).await?;
-    sqlx::query(
-        "DELETE FROM tracks WHERE updated_at IS NOT NULL AND julianday(updated_at) < julianday('now', ?)",
-    )
-    .bind(format!("-{} days", config.workspace_retention_days))
-    .execute(pool)
-    .await?;
-    sqlx::query("DELETE FROM jobs WHERE status!='running' AND updated_at < datetime('now', ?)")
-        .bind(format!("-{} days", config.job_retention_days))
-        .execute(pool)
-        .await?;
-    sqlx::query("UPDATE jobs SET status='failed',error='Interrupted by backend restart' WHERE status='running'")
         .execute(pool).await?;
     sqlx::query("DELETE FROM provider_cache WHERE expires_at < datetime('now')")
         .execute(pool)

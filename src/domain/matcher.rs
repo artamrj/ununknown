@@ -1,7 +1,4 @@
-use crate::{
-    domain::audio::AudioInfo,
-    types::{CompilationPreference, MatchingStrategy},
-};
+use crate::domain::audio::AudioInfo;
 use serde::Serialize;
 use strsim::normalized_levenshtein;
 
@@ -25,7 +22,6 @@ pub struct CandidateInput<'a> {
     pub album: Option<&'a str>,
     pub candidate_duration: Option<f64>,
     pub is_compilation: bool,
-    pub compilation_preference: CompilationPreference,
 }
 
 pub fn score(input: CandidateInput<'_>) -> ScoreBreakdown {
@@ -49,12 +45,7 @@ pub fn score(input: CandidateInput<'_>) -> ScoreBreakdown {
         (Some(current), Some(candidate)) => text_similarity(current, candidate),
         _ => 0.0,
     };
-    let compilation_adjustment = match (input.is_compilation, input.compilation_preference) {
-        (true, CompilationPreference::Avoid) => -0.08,
-        (true, CompilationPreference::Prefer) => 0.05,
-        (false, CompilationPreference::Prefer) => -0.03,
-        _ => 0.0,
-    };
+    let compilation_adjustment = if input.is_compilation { -0.08 } else { 0.0 };
     let final_score = ((0.45 * input.acoustid_score.clamp(0.0, 1.0))
         + (0.20 * duration)
         + (0.15 * title)
@@ -82,27 +73,6 @@ pub fn auto_selectable(
     top_score >= 90.0
         && duration_delta.is_some_and(|delta| delta <= 3.0)
         && second_score.is_none_or(|score| top_score - score >= 10.0)
-}
-
-pub fn auto_selectable_for_strategy(
-    strategy: MatchingStrategy,
-    top_score: f64,
-    second_score: Option<f64>,
-    duration_delta: Option<f64>,
-) -> bool {
-    match strategy {
-        MatchingStrategy::Safe => {
-            top_score >= 92.0
-                && duration_delta.is_some_and(|delta| delta <= 3.0)
-                && second_score.is_none_or(|score| top_score - score >= 12.0)
-        }
-        MatchingStrategy::Balanced => auto_selectable(top_score, second_score, duration_delta),
-        MatchingStrategy::Aggressive => {
-            top_score >= 85.0
-                && duration_delta.is_some_and(|delta| delta <= 5.0)
-                && second_score.is_none_or(|score| top_score - score >= 6.0)
-        }
-    }
 }
 
 fn text_similarity(left: &str, right: &str) -> f64 {
@@ -141,7 +111,6 @@ mod tests {
             album: Some("Album"),
             candidate_duration: Some(180.0),
             is_compilation: false,
-            compilation_preference: CompilationPreference::Avoid,
         });
         assert!(score.final_score >= 99.0);
     }
@@ -154,55 +123,5 @@ mod tests {
     #[test]
     fn close_second_result_blocks_auto_select() {
         assert!(!auto_selectable(96.0, Some(91.0), Some(1.0)));
-    }
-
-    #[test]
-    fn matching_strategy_changes_auto_select_thresholds() {
-        assert!(!auto_selectable_for_strategy(
-            MatchingStrategy::Safe,
-            90.0,
-            Some(79.0),
-            Some(2.0)
-        ));
-        assert!(auto_selectable_for_strategy(
-            MatchingStrategy::Aggressive,
-            86.0,
-            Some(79.0),
-            Some(4.0)
-        ));
-    }
-
-    #[test]
-    fn compilation_preference_changes_score() {
-        let info = AudioInfo {
-            title: Some("Song".into()),
-            artist: Some("Artist".into()),
-            duration: 180.0,
-            ..Default::default()
-        };
-        let avoid = score(CandidateInput {
-            acoustid_score: 0.95,
-            current: &info,
-            title: "Song",
-            artist: "Artist",
-            album: None,
-            candidate_duration: Some(180.0),
-            is_compilation: true,
-            compilation_preference: CompilationPreference::Avoid,
-        });
-        let prefer = score(CandidateInput {
-            compilation_preference: CompilationPreference::Prefer,
-            ..CandidateInput {
-                acoustid_score: 0.95,
-                current: &info,
-                title: "Song",
-                artist: "Artist",
-                album: None,
-                candidate_duration: Some(180.0),
-                is_compilation: true,
-                compilation_preference: CompilationPreference::Avoid,
-            }
-        });
-        assert!(prefer.final_score > avoid.final_score);
     }
 }
