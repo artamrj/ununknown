@@ -2289,6 +2289,7 @@ dependencies = [
  "base64",
  "chrono",
  "lofty",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

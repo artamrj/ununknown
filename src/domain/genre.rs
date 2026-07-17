@@ -341,6 +341,7 @@ fn provider_weight(provider: &str) -> f64 {
         "musicbrainz" => 0.78,
         "theaudiodb" => 0.76,
         "lastfm" => 0.72,
+        "radiojavan" => 0.70,
         "soundcloud" => 0.68,
         _ => 0.64,
     }
@@ -353,6 +354,7 @@ fn provider_name(provider: &str) -> &str {
         "discogs" => "Discogs",
         "theaudiodb" => "TheAudioDB",
         "lastfm" => "Last.fm",
+        "radiojavan" => "Radio Javan",
         "soundcloud" => "SoundCloud",
         _ => provider,
     }

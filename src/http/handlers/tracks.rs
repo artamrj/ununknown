@@ -354,7 +354,9 @@ pub async fn update_artwork(
     let (track, selected) = queries::selected(&s.pool, id).await?;
     let supplied = value.cover_url.trim();
     let parsed = reqwest::Url::parse(supplied).map_err(|_| {
-        ApiError::validation("Enter a valid HTTPS image, Spotify, or SoundCloud track URL")
+        ApiError::validation(
+            "Enter a valid HTTPS image, Spotify, SoundCloud, or Radio Javan song URL",
+        )
     })?;
     if parsed.scheme() != "https" {
         return Err(ApiError::validation("Cover URLs must use HTTPS"));
@@ -371,6 +373,12 @@ pub async fn update_artwork(
             .map_err(|error| ApiError::validation(format!("SoundCloud link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("SoundCloud did not return cover artwork"))?
+    } else if is_radiojavan_host(parsed.host_str()) {
+        crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, supplied)
+            .await
+            .map_err(|error| ApiError::validation(format!("Radio Javan link failed: {error:#}")))?
+            .cover_url
+            .ok_or_else(|| ApiError::validation("Radio Javan did not return cover artwork"))?
     } else {
         supplied.to_owned()
     };
@@ -504,12 +512,15 @@ pub async fn resolve_source(
     Json(value): Json<SourceLookupRequest>,
 ) -> ApiResult<Json<Candidate>> {
     let url = value.url.trim();
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|_| ApiError::validation("Enter a valid Spotify, SoundCloud, or YouTube URL"))?;
+    let parsed = reqwest::Url::parse(url).map_err(|_| {
+        ApiError::validation("Enter a valid Spotify, SoundCloud, Radio Javan, or YouTube URL")
+    })?;
     let candidate = if parsed.host_str() == Some("open.spotify.com") {
         crate::infrastructure::providers::spotify::lookup_url(&s.client, url).await
     } else if is_soundcloud_host(parsed.host_str()) {
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
+    } else if is_radiojavan_host(parsed.host_str()) {
+        crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
     } else {
         crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
     }
@@ -519,6 +530,13 @@ pub async fn resolve_source(
 
 fn is_soundcloud_host(host: Option<&str>) -> bool {
     matches!(host, Some("soundcloud.com" | "www.soundcloud.com"))
+}
+
+fn is_radiojavan_host(host: Option<&str>) -> bool {
+    matches!(
+        host,
+        Some("play.radiojavan.com" | "www.play.radiojavan.com")
+    )
 }
 
 #[cfg(test)]

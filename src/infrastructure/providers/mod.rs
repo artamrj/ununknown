@@ -6,6 +6,7 @@ pub mod discogs;
 pub mod itunes;
 pub mod lastfm;
 pub mod musicbrainz;
+pub mod radiojavan;
 pub mod soundcloud;
 pub mod spotify;
 pub mod theaudiodb;

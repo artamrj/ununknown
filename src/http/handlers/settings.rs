@@ -15,6 +15,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "musicbrainz": true,
             "itunes": true,
             "deezer": true,
+            "radiojavan": true,
             "wikidata": true,
             "cover_art_archive": true,
             "fpcalc": fpcalc,
