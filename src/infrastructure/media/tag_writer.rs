@@ -8,7 +8,10 @@ use lofty::{
     probe::Probe,
     tag::{ItemKey, Tag},
 };
-use std::path::Path;
+use std::{
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 pub fn write(
     path: &Path,
@@ -218,6 +221,118 @@ pub fn read_artwork(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(valid_embedded_artwork(&file))
 }
 
+/// Verify the on-disk representation players actually consume. FLAC artwork is
+/// required to be a native PICTURE metadata block; reading it back through the
+/// same generic tag abstraction could otherwise hide a format-specific write bug.
+pub fn verify_embedded_artwork(path: &Path, expected: &[u8]) -> Result<()> {
+    let file = Probe::open(path)?.guess_file_type()?.read()?;
+    if file.file_type() == lofty::file::FileType::Flac {
+        let embedded = native_flac_front_cover(path)?
+            .ok_or_else(|| anyhow::anyhow!("FLAC contains no native front-cover PICTURE block"))?;
+        if embedded != expected {
+            bail!("native FLAC cover does not match the validated preview image");
+        }
+        return Ok(());
+    }
+    let embedded = valid_embedded_artwork(&file)
+        .ok_or_else(|| anyhow::anyhow!("cover verification found no embedded image"))?;
+    if embedded != expected {
+        bail!("embedded cover does not match the validated preview image");
+    }
+    Ok(())
+}
+
+fn native_flac_front_cover(path: &Path) -> Result<Option<Vec<u8>>> {
+    let mut file = std::fs::File::open(path)?;
+    let mut prefix = [0_u8; 10];
+    file.read_exact(&mut prefix)?;
+    if &prefix[..3] == b"ID3" {
+        if prefix[6..10].iter().any(|byte| byte & 0x80 != 0) {
+            bail!("invalid ID3 size before FLAC stream");
+        }
+        let id3_size = prefix[6..10]
+            .iter()
+            .fold(0_u64, |size, byte| (size << 7) | u64::from(*byte));
+        let footer_size = if prefix[5] & 0x10 != 0 { 10 } else { 0 };
+        file.seek(SeekFrom::Start(10 + id3_size + footer_size))?;
+    } else {
+        file.seek(SeekFrom::Start(0))?;
+    }
+    let mut magic = [0_u8; 4];
+    file.read_exact(&mut magic)?;
+    if &magic != b"fLaC" {
+        bail!("file does not contain a FLAC stream");
+    }
+
+    loop {
+        let mut header = [0_u8; 4];
+        file.read_exact(&mut header)?;
+        let is_last = header[0] & 0x80 != 0;
+        let block_type = header[0] & 0x7f;
+        let length =
+            (u32::from(header[1]) << 16) | (u32::from(header[2]) << 8) | u32::from(header[3]);
+        if block_type == 6 {
+            if length > 20 * 1024 * 1024 + 1024 {
+                bail!("FLAC PICTURE block exceeds the artwork safety limit");
+            }
+            let mut block = vec![0_u8; length as usize];
+            file.read_exact(&mut block)?;
+            if let Some((picture_type, data)) = parse_flac_picture_block(&block)?
+                && picture_type == 3
+            {
+                return Ok(Some(data.to_vec()));
+            }
+        } else {
+            file.seek(SeekFrom::Current(i64::from(length)))?;
+        }
+        if is_last {
+            return Ok(None);
+        }
+    }
+}
+
+fn parse_flac_picture_block(block: &[u8]) -> Result<Option<(u32, &[u8])>> {
+    let mut position = 0;
+    let picture_type = take_be_u32(block, &mut position)?;
+    let mime_length = take_be_u32(block, &mut position)? as usize;
+    skip_bytes(block, &mut position, mime_length)?;
+    let description_length = take_be_u32(block, &mut position)? as usize;
+    skip_bytes(block, &mut position, description_length)?;
+    // Width, height, color depth, and indexed-color count.
+    skip_bytes(block, &mut position, 16)?;
+    let data_length = take_be_u32(block, &mut position)? as usize;
+    let end = position
+        .checked_add(data_length)
+        .ok_or_else(|| anyhow::anyhow!("FLAC PICTURE data length overflow"))?;
+    let data = block
+        .get(position..end)
+        .ok_or_else(|| anyhow::anyhow!("truncated FLAC PICTURE data"))?;
+    Ok(Some((picture_type, data)))
+}
+
+fn take_be_u32(data: &[u8], position: &mut usize) -> Result<u32> {
+    let end = position
+        .checked_add(4)
+        .ok_or_else(|| anyhow::anyhow!("FLAC PICTURE field offset overflow"))?;
+    let bytes: [u8; 4] = data
+        .get(*position..end)
+        .ok_or_else(|| anyhow::anyhow!("truncated FLAC PICTURE field"))?
+        .try_into()?;
+    *position = end;
+    Ok(u32::from_be_bytes(bytes))
+}
+
+fn skip_bytes(data: &[u8], position: &mut usize, count: usize) -> Result<()> {
+    let end = position
+        .checked_add(count)
+        .ok_or_else(|| anyhow::anyhow!("FLAC PICTURE field length overflow"))?;
+    if end > data.len() {
+        bail!("truncated FLAC PICTURE field");
+    }
+    *position = end;
+    Ok(())
+}
+
 fn write_replaygain(tag: &mut Tag, replay_gain: ReplayGain) {
     set(tag, ItemKey::ReplayGainTrackGain, &replay_gain.gain_tag());
     set(tag, ItemKey::ReplayGainTrackPeak, &replay_gain.peak_tag());
@@ -297,6 +412,41 @@ mod tests {
 
         let file = Probe::open(&path).unwrap().read().unwrap();
         assert_eq!(file.primary_tag().unwrap().pictures()[0].data(), artwork);
+    }
+
+    #[test]
+    fn flac_cover_is_a_native_picture_block_after_disk_round_trip() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native-cover.flac");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=0.1")
+            .args(["-c:a", "flac"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let candidate = Candidate {
+            title: "FLAC artwork test".into(),
+            artist: "Test artist".into(),
+            ..Default::default()
+        };
+        let artwork = one_pixel_png();
+        write(&path, &candidate, Some(artwork.clone()), None).unwrap();
+
+        assert_eq!(
+            native_flac_front_cover(&path).unwrap().as_deref(),
+            Some(artwork.as_slice())
+        );
+        verify_embedded_artwork(&path, &artwork).unwrap();
     }
 
     #[test]

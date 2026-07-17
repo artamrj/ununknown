@@ -204,12 +204,7 @@ pub async fn apply(
                 let sanitized =
                     tag_writer::write_resilient(&write_target, &candidate, artwork, replay_gain)?;
                 if let Some(expected) = expected_artwork {
-                    let embedded = tag_writer::read_artwork(&write_target)?.ok_or_else(|| {
-                        anyhow::anyhow!("cover verification found no embedded image")
-                    })?;
-                    if embedded != expected {
-                        anyhow::bail!("embedded cover does not match the validated preview image");
-                    }
+                    tag_writer::verify_embedded_artwork(&write_target, &expected)?;
                 }
                 Ok::<_, anyhow::Error>(sanitized)
             }
