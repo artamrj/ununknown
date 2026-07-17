@@ -61,11 +61,12 @@ label i { color: #226b47; font-size: 11px; }
 .candidates button { display: grid; gap: 4px; text-align: left; padding: 12px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 .candidates button:hover { border-color: #226b47; background: #f0f7f3; }
 .candidates span, .candidates small { color: #657068; }
-.candidates .provider-badge { width: fit-content; padding: 3px 6px; border-radius: 999px; background: #e5f1e9; color: #315d45; font-size: 9px; font-weight: 800; line-height: 1.2; }
+.provider-badge { width: fit-content; padding: 3px 6px; border-radius: 999px; background: #e5f1e9; color: #315d45 !important; font-size: 9px; font-weight: 800; line-height: 1.2; }
 .google-check { display: flex; flex-direction: column; justify-content: center; gap: 5px; padding: 9px; border: 1px solid #dfe4df; border-radius: 10px; background: #fff; color: #315d45; text-decoration: none; font-size: 11px; }
 .google-check:hover { border-color: #226b47; background: #f0f7f3; }
 .google-check small { font-size: 9px; line-height: 1.25; }
 .google-check > span { color: #226b47; font-size: 14px; }
+.google-check.compact { min-width: 100px; }
 .artwork { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; background: #e9eeea; }
 .artwork.missing { display: grid; place-items: center; padding: 7px; box-sizing: border-box; color: #84631b; font-size: 10px; font-weight: 800; text-align: center; }
 .genre { color: #226b47; font-size: 11px; font-style: normal; font-weight: 800; }
@@ -74,12 +75,14 @@ label i { color: #226b47; font-size: 11px; }
 .manual .source-url { grid-column: 1 / -1; }
 .manual .primary { align-self: end; }
 .ready-list { margin-top: 20px; padding: 18px 20px; border: 1px solid #dfe4df; border-radius: 14px; background: white; }
-.track { display: grid; grid-template-columns: 48px minmax(180px, 1fr) minmax(180px, 1fr) minmax(100px, .5fr); gap: 12px; align-items: center; padding: 11px 0; border-top: 1px solid #edf0ed; font-size: 13px; }
+.track { display: grid; grid-template-columns: 48px minmax(150px, 1fr) minmax(180px, 1fr) minmax(130px, .65fr) 100px; gap: 12px; align-items: center; padding: 11px 0; border-top: 1px solid #edf0ed; font-size: 13px; }
 .track .artwork { width: 48px; height: 48px; }
 .artwork-control { display: grid; gap: 2px; justify-items: center; }
 .artwork-control .link { font-size: 9px; white-space: nowrap; }
 .track:first-of-type { margin-top: 12px; }
 .track span, .track small { color: #657068; overflow-wrap: anywhere; }
+.track-metadata { display: grid; gap: 5px; align-items: start; }
+.track > .manual { grid-column: 1 / -1; width: 100%; margin-top: 4px; padding: 15px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 @media (max-width: 720px) {
   main { padding-top: 28px; }
   .setup { grid-template-columns: 1fr; }

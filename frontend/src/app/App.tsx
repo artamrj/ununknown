@@ -210,14 +210,23 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
   return <article className="review card">
     <header><div><h3>{track.filename}</h3><p className={corrupt ? "corrupt-message" : undefined}>{track.stage_message || track.error || "No reliable match was found."}</p>{corrupt && track.error && <small className="corrupt-detail">{track.error}</small>}</div><span>{Math.round(track.duration || 0)}s</span></header>
     <audio className="review-player" controls preload="none" src={`/api/tracks/${track.id}/audio`} aria-label={`Play ${track.filename}`} />
-    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <div className="candidate-pair" key={candidate.id}><button onClick={() => onChoose(track.id, candidate.id)}><span className="provider-badge">From {candidateSources(candidate)}</span><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button><a className="google-check" href={googleMetadataUrl(candidate)} target="_blank" rel="noreferrer" aria-label={`Verify the release of ${candidate.artist} ${candidate.title} on Google`}><b>Check on Google</b><small>Album or single?<br />Album name?<br />Original year?</small><span aria-hidden="true">↗</span></a></div>)}</div>}
+    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <div className="candidate-pair" key={candidate.id}><button onClick={() => onChoose(track.id, candidate.id)}><span className="provider-badge">From {candidateSources(candidate)}</span><Artwork candidate={candidate} /><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button><GoogleCheck candidate={candidate} /></div>)}</div>}
     {!corrupt && <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>}
     {!corrupt && manual && <ManualEditor track={track} onSaved={onSaved} />}
   </article>;
 }
 
-function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise<void> }) {
-  const [form, setForm] = useState<Record<string, string | number>>({ title: track.current_title || "", artist: track.current_artist || "", album: track.current_album || "", album_artist: track.current_album_artist || "", track_number: track.current_track_number || "", year: "", genre: "", cover_url: "" });
+function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
+  const [form, setForm] = useState<Record<string, string | number>>({
+    title: candidate?.title || track.current_title || "",
+    artist: candidate?.artist || track.current_artist || "",
+    album: candidate?.album || track.current_album || "",
+    album_artist: candidate?.album_artist || track.current_album_artist || "",
+    track_number: candidate?.track_number || track.current_track_number || "",
+    year: candidate?.year || "",
+    genre: candidate?.genre || "",
+    cover_url: candidate?.cover_url || "",
+  });
   const [sourceUrl, setSourceUrl] = useState("");
   const resolveSource = async () => {
     const found = await api<Candidate>("/source/resolve", { method: "POST", body: JSON.stringify({ url: sourceUrl }) });
@@ -231,6 +240,7 @@ function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise
 }
 
 function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
   const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
   const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
   const setCover = async () => {
@@ -239,7 +249,26 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
     await api(`/tracks/${track.id}/artwork`, { method: "PUT", body: JSON.stringify({ cover_url: coverUrl }) });
     await onSaved();
   };
-  return <div className="track"><div className="artwork-control"><Artwork candidate={candidate} trackId={track.id} /><button className="link" onClick={setCover}>Set cover</button></div><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
+  return <div className="track">
+    <div className="artwork-control"><Artwork candidate={candidate} trackId={track.id} /><button className="link" onClick={setCover}>Set cover</button></div>
+    <span>{track.filename}</span>
+    <b>→ {outputName}</b>
+    <div className="track-metadata">
+      {candidate && <span className="provider-badge">From {candidateSources(candidate)}</span>}
+      <small>{[candidate?.album, candidate?.year, genreText(candidate)].filter(Boolean).join(" · ")}</small>
+      <button className="link" onClick={() => setEditing(!editing)}>{editing ? "Close editor" : "Edit metadata"}</button>
+    </div>
+    {candidate && <GoogleCheck candidate={candidate} compact />}
+    {editing && <ManualEditor track={track} candidate={candidate} onSaved={async () => { await onSaved(); setEditing(false); }} />}
+  </div>;
+}
+
+function GoogleCheck({ candidate, compact = false }: { candidate: Candidate; compact?: boolean }) {
+  return <a className={`google-check${compact ? " compact" : ""}`} href={googleMetadataUrl(candidate)} target="_blank" rel="noreferrer" aria-label={`Verify the release of ${candidate.artist} ${candidate.title} on Google`}>
+    <b>Check on Google</b>
+    <small>Album or single?<br />Album name?<br />Original year?</small>
+    <span aria-hidden="true">↗</span>
+  </a>;
 }
 
 function Artwork({ candidate, trackId }: { candidate?: Candidate; trackId?: number }) {
