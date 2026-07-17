@@ -13,10 +13,12 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "sources": {
             "musicbrainz": true,
             "itunes": true,
+            "deezer": true,
             "wikidata": true,
             "cover_art_archive": true,
             "fpcalc": fpcalc,
             "ffmpeg": ffmpeg,
+            "integrity_check": crate::infrastructure::media::integrity::available(),
             "acoustid": !cfg.acoustid_key.is_empty(),
             "discogs": !cfg.discogs_token.is_empty(),
             "lastfm": !cfg.lastfm_key.is_empty(),

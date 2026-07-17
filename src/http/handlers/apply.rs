@@ -9,7 +9,7 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         return Err(ApiError::conflict("workflow is already running"));
     }
     let tracks: Vec<Track> = sqlx::query_as(&format!(
-        "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0",
+        "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0 AND status!='corrupt'",
         queries::TRACK_FIELDS
     ))
     .fetch_all(&s.pool)

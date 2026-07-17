@@ -37,6 +37,13 @@ struct PersistJob {
     result: oneshot::Sender<Result<()>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessOutcome {
+    Matched,
+    NeedsReview,
+    Corrupt,
+}
+
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
     state
@@ -206,7 +213,7 @@ async fn process_file(
             )
             .await;
         match process(&state, &limits, &persist_tx, &job.path).await {
-            Ok(true) => {
+            Ok(ProcessOutcome::Matched) => {
                 state
                     .log(
                         "ok",
@@ -217,13 +224,24 @@ async fn process_file(
                     .await;
                 break;
             }
-            Ok(false) => {
+            Ok(ProcessOutcome::NeedsReview) => {
                 state
                     .log(
                         "warn",
                         "fetch",
                         Some(&filename),
                         "No selected match; moving to next file",
+                    )
+                    .await;
+                break;
+            }
+            Ok(ProcessOutcome::Corrupt) => {
+                state
+                    .log(
+                        "error",
+                        "integrity",
+                        Some(&filename),
+                        "Damaged audio was blocked from metadata writing",
                     )
                     .await;
                 break;
@@ -293,7 +311,7 @@ async fn process(
     limits: &Arc<PipelineLimits>,
     persist_tx: &mpsc::Sender<PersistJob>,
     path: &Path,
-) -> Result<bool> {
+) -> Result<ProcessOutcome> {
     let filename = path.file_name().and_then(|v| v.to_str()).unwrap_or("audio");
     state
         .log(
@@ -334,6 +352,51 @@ async fn process(
                 .duration_ms(started.elapsed().as_millis() as i64),
         )
         .await;
+    state
+        .log(
+            "info",
+            "integrity",
+            Some(filename),
+            "Decoding audio to check file integrity",
+        )
+        .await;
+    let integrity_started = Instant::now();
+    match crate::infrastructure::media::integrity::check(&state.pool, path).await {
+        Ok(crate::infrastructure::media::integrity::Integrity::Healthy) => {
+            state
+                .log_entry(
+                    ActivityLogEntry::new("ok", "integrity", "Audio integrity check passed")
+                        .file(filename.to_owned())
+                        .duration_ms(integrity_started.elapsed().as_millis() as i64),
+                )
+                .await;
+        }
+        Ok(crate::infrastructure::media::integrity::Integrity::Corrupt(diagnostic)) => {
+            state.increment_failed().await;
+            persist_corrupt(&state.pool, path, &info, &diagnostic).await?;
+            state
+                .log_entry(
+                    ActivityLogEntry::new("error", "integrity", "Audio file is damaged")
+                        .file(filename.to_owned())
+                        .error_text(diagnostic),
+                )
+                .await;
+            return Ok(ProcessOutcome::Corrupt);
+        }
+        Err(error) => {
+            state
+                .log_entry(
+                    ActivityLogEntry::new(
+                        "warn",
+                        "integrity",
+                        "Integrity check unavailable; continuing metadata matching",
+                    )
+                    .file(filename.to_owned())
+                    .error_text(format!("{error:#}")),
+                )
+                .await;
+        }
+    }
     state
         .log(
             "info",
@@ -435,11 +498,11 @@ async fn process(
             ""
         };
         let message = format!(
-            "No catalog match from Apple Music, MusicBrainz, or the enabled optional sources.{fingerprint_note}"
+            "No catalog match from Apple Music, Deezer, MusicBrainz, or the enabled optional sources.{fingerprint_note}"
         );
         persist_unmatched(&state.pool, path, &info, &message).await?;
         state.log("warn", "match", Some(filename), &message).await;
-        return Ok(false);
+        return Ok(ProcessOutcome::NeedsReview);
     };
     let second_score = comparable_second_score(&candidates);
     let has_safe_evidence = candidate_has_fingerprint(best) || candidate_source_count(best) >= 2;
@@ -506,7 +569,7 @@ async fn process(
             persist_unmatched(&state.pool, path, &info, &message).await?;
         }
         state.log("warn", "match", Some(filename), &message).await;
-        return Ok(false);
+        return Ok(ProcessOutcome::NeedsReview);
     }
     let candidate = candidates.remove(0);
     state
@@ -534,7 +597,7 @@ async fn process(
         .await
         .map_err(|_| anyhow!("DB writer stopped"))??;
     state.increment_matched().await;
-    Ok(true)
+    Ok(ProcessOutcome::Matched)
 }
 
 async fn identify(
@@ -571,6 +634,7 @@ async fn identify(
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
     }
+    out.extend(query_deezer(state, limits, current, filename).await);
     out.extend(query_discogs(state, cfg, limits, current, filename).await);
     out.extend(query_lastfm(state, cfg, limits, current, filename).await);
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
@@ -636,7 +700,10 @@ fn comparable_second_score(candidates: &[providers::Candidate]) -> Option<f64> {
 fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
     if candidate_has_fingerprint(candidate) {
         3
-    } else if matches!(candidate.provider.as_str(), "musicbrainz" | "itunes") {
+    } else if matches!(
+        candidate.provider.as_str(),
+        "musicbrainz" | "itunes" | "deezer"
+    ) {
         2
     } else if candidate_source_count(candidate) >= 2 {
         1
@@ -700,6 +767,40 @@ async fn query_itunes(
     }
     log_provider_count(state, filename, "itunes", candidates.len(), started).await;
     Ok(candidates)
+}
+
+async fn query_deezer(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "deezer").await {
+        return Vec::new();
+    }
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let started = Instant::now();
+    match providers::deezer::search(&state.pool, &state.client, title, current.artist.as_deref())
+        .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "deezer_catalog_search");
+            }
+            log_provider_count(state, filename, "deezer", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "deezer", error).await;
+            Vec::new()
+        }
+    }
 }
 
 async fn query_musicbrainz_acoustid(
@@ -973,6 +1074,7 @@ fn score_text_candidate(
     candidate.duration_delta = duration_delta;
     let provider_cap = match candidate.provider.as_str() {
         "itunes" => 94.0,
+        "deezer" => 90.0,
         "musicbrainz" => 82.0,
         _ => 78.0,
     };
@@ -1529,6 +1631,7 @@ fn provider_display_name(provider: &str) -> &str {
     match provider {
         "acoustid" => "AcoustID",
         "discogs" => "Discogs",
+        "deezer" => "Deezer",
         "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
         "theaudiodb" => "TheAudioDB",
@@ -1540,6 +1643,7 @@ fn provider_display_name(provider: &str) -> &str {
 fn provider_reason(provider: &str) -> &str {
     match provider {
         "discogs" => "Release, label, catalog, and physical media metadata",
+        "deezer" => "International track, album, ISRC, duration, and cover metadata",
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
         "theaudiodb" => "Track, album, genre, and image enrichment",
         "wikidata" => "Structured identifier and external-link evidence",
@@ -1631,6 +1735,31 @@ async fn persist_failed(pool: &sqlx::SqlitePool, path: &Path, error: &str) -> Re
         "failed",
         Some("Track failed after retries"),
         Some(error),
+    )
+    .await?;
+    sqlx::query("DELETE FROM candidates WHERE track_id=?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn persist_corrupt(
+    pool: &sqlx::SqlitePool,
+    path: &Path,
+    info: &audio::AudioInfo,
+    diagnostic: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let id = upsert_track_outcome(
+        &mut tx,
+        path,
+        Some(info),
+        "corrupt",
+        "failed",
+        Some("Audio file is damaged and cannot be written safely"),
+        Some(diagnostic),
     )
     .await?;
     sqlx::query("DELETE FROM candidates WHERE track_id=?")
@@ -1780,6 +1909,34 @@ mod tests {
         assert_eq!(row.1, "provider_error");
         assert_eq!(row.2.as_deref(), Some("Track failed after retries"));
         assert_eq!(row.3.as_deref(), Some("fpcalc failed: command not found"));
+        assert_eq!(row.4, None);
+    }
+
+    #[tokio::test]
+    async fn persist_corrupt_blocks_selection_and_keeps_readable_metadata() {
+        let pool = test_pool().await;
+        let path = Path::new("/music/input/damaged.mp3");
+        let info = audio::AudioInfo {
+            title: Some("Readable title".into()),
+            artist: Some("Readable artist".into()),
+            duration: 42.0,
+            format: "mp3".into(),
+            ..Default::default()
+        };
+        persist_corrupt(&pool, path, &info, "Invalid frame header")
+            .await
+            .unwrap();
+
+        let row: (String, String, Option<String>, Option<String>, Option<i64>) =
+            sqlx::query_as("SELECT stage,status,error,current_title,selected_candidate_id FROM tracks WHERE path=?")
+                .bind(path.to_string_lossy().as_ref())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, "corrupt");
+        assert_eq!(row.2.as_deref(), Some("Invalid frame header"));
+        assert_eq!(row.3.as_deref(), Some("Readable title"));
         assert_eq!(row.4, None);
     }
 

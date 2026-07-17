@@ -123,11 +123,14 @@ export function App() {
           <input value={setup.output_dir} onChange={(event) => setSetup({ ...setup, output_dir: event.target.value })} placeholder="/Users/me/Music/fixed" />
         </label>
         <div className="source-status">
-          <span>Active catalogs: Apple Music, MusicBrainz, Wikidata</span>
+          <span>Active catalogs: Apple Music, Deezer, MusicBrainz, Wikidata</span>
           {(!setup.sources.fpcalc || !setup.sources.acoustid) && <small>For hard-to-name tracks, install Chromaprint (`fpcalc`) and add an AcoustID key.</small>}
           {setup.sources.ffmpeg
             ? <small className="replaygain-active">ReplayGain is active. Track loudness and peak are added when corrected files are written.</small>
             : <small>Install FFmpeg to add ReplayGain loudness metadata. Other corrections still work.</small>}
+          {setup.sources.integrity_check
+            ? <small className="integrity-active">Audio integrity checking is active. Damaged files are blocked before writing.</small>
+            : <small>Install FFmpeg to detect corrupt audio during scanning.</small>}
         </div>
         <details>
           <summary>Optional source keys</summary>
@@ -178,11 +181,12 @@ function Secret({ label, active, value, onChange }: { label: string; active?: bo
 
 function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (trackId: number, candidateId: number) => Promise<void>; onSaved: () => Promise<void> }) {
   const [manual, setManual] = useState(false);
+  const corrupt = track.status === "corrupt";
   return <article className="review card">
-    <header><div><h3>{track.filename}</h3><p>{track.stage_message || track.error || "No reliable match was found."}</p></div><span>{Math.round(track.duration || 0)}s</span></header>
+    <header><div><h3>{track.filename}</h3><p className={corrupt ? "corrupt-message" : undefined}>{track.stage_message || track.error || "No reliable match was found."}</p>{corrupt && track.error && <small className="corrupt-detail">{track.error}</small>}</div><span>{Math.round(track.duration || 0)}s</span></header>
     {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button>)}</div>}
-    <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>
-    {manual && <ManualEditor track={track} onSaved={onSaved} />}
+    {!corrupt && <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>}
+    {!corrupt && manual && <ManualEditor track={track} onSaved={onSaved} />}
   </article>;
 }
 

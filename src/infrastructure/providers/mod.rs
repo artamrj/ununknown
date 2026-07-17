@@ -1,5 +1,6 @@
 pub mod acoustid;
 pub mod cover_art_archive;
+pub mod deezer;
 pub mod discogs;
 pub mod itunes;
 pub mod lastfm;

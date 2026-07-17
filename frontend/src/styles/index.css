@@ -25,6 +25,7 @@ input:focus { border-color: #226b47; box-shadow: 0 0 0 3px #dcebe2; }
 .source-status { grid-column: 1 / -1; display: grid; gap: 4px; padding: 10px 12px; border-radius: 9px; background: #f0f7f3; color: #315d45; font-size: 13px; }
 .source-status small { color: #84631b; }
 .source-status .replaygain-active { color: #315d45; }
+.source-status .integrity-active { color: #315d45; }
 summary { cursor: pointer; font-weight: 800; }
 .setup details > p { margin: 8px 0 12px; font-size: 13px; color: #657068; }
 .key-grid, .manual { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
@@ -42,6 +43,8 @@ label i { color: #226b47; font-size: 11px; }
 .review { padding: 20px; margin-bottom: 12px; }
 .review > header { display: flex; justify-content: space-between; gap: 20px; }
 .review h3 { overflow-wrap: anywhere; }
+.review .corrupt-message { color: #a82c19; font-weight: 800; }
+.review .corrupt-detail { display: block; max-width: 720px; margin-top: 6px; color: #8a4a40; overflow-wrap: anywhere; }
 .review header > span { color: #657068; }
 .candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 9px; margin: 16px 0; }
 .candidates button { display: grid; gap: 4px; text-align: left; padding: 12px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }

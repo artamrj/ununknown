@@ -2,17 +2,19 @@
 
 Ununknown has one job: correct metadata for a folder of music.
 
-It first tries every configured automatic source (audio fingerprinting, MusicBrainz,
-Discogs, Last.fm, TheAudioDB, Wikidata, and Cover Art Archive). Reliable matches are
-selected automatically. Uncertain and unmatched files stay in a short review list
-where you can choose a candidate or enter metadata manually. Corrected files are
-written as copies, so source music is never modified.
+It first checks that each audio stream can be decoded, then tries every configured
+automatic source (audio fingerprinting, MusicBrainz, Apple Music, Deezer, Discogs,
+Last.fm, TheAudioDB, Wikidata, and Cover Art Archive). Reliable matches are selected
+automatically. Uncertain and unmatched files stay in a short review list where you
+can choose a candidate or enter metadata manually. Corrected files are written as
+copies with ReplayGain metadata, so source music is never modified. Damaged audio is
+reported and blocked from the write queue.
 
 ## Run locally
 
-Requirements: Rust and Node.js. Chromaprint is recommended for fingerprint matching
-(`brew install chromaprint` on macOS), but tag, filename, and web lookup still work
-without it.
+Requirements: Rust and Node.js. FFmpeg enables integrity checking and ReplayGain;
+Chromaprint is recommended for fingerprint matching (`brew install ffmpeg
+chromaprint` on macOS). Tag, filename, and web lookup still work without them.
 
 ```bash
 ./dev.sh

@@ -49,12 +49,17 @@ pub async fn manual_candidate(
     if value.title.trim().is_empty() || value.artist.trim().is_empty() {
         return Err(ApiError::validation("Title and artist are required"));
     }
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tracks WHERE id=?)")
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM tracks WHERE id=?")
         .bind(id.0)
-        .fetch_one(&s.pool)
+        .fetch_optional(&s.pool)
         .await?;
-    if !exists {
+    let Some(status) = status else {
         return Err(ApiError::not_found("track not found"));
+    };
+    if status == "corrupt" {
+        return Err(ApiError::validation(
+            "Damaged audio cannot be marked ready; repair or replace the source file first",
+        ));
     }
     let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(id.0).bind("manual").bind(value.title.trim()).bind(value.artist.trim())
