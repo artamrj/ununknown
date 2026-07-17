@@ -576,6 +576,32 @@ async fn identify(
     out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
     out.extend(query_wikidata(state, limits, current, filename).await);
     apply_source_agreement(&mut out)?;
+    let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, current) {
+        if let Some(artist) = current.artist.as_deref() {
+            match providers::wikidata::artist_genres(&state.pool, &state.client, artist).await {
+                Ok(genres) => genres,
+                Err(error) => {
+                    state
+                        .log_entry(
+                            ActivityLogEntry::new(
+                                "warn",
+                                "genre",
+                                "Artist genre enrichment failed; using track evidence",
+                            )
+                            .file(filename.to_owned())
+                            .error(error.as_ref()),
+                        )
+                        .await;
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    crate::domain::genre::enrich(&mut out, current, &artist_genres)?;
     if out.is_empty() {
         state
             .log(
@@ -1713,6 +1739,7 @@ mod tests {
             album: Some("Current album".into()),
             album_artist: Some("Current album artist".into()),
             track_number: Some(7),
+            genre: Some("Rock".into()),
             duration: 181.4,
             bitrate: Some(320),
             format: "mp3".into(),

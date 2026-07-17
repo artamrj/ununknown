@@ -174,7 +174,7 @@ function ReviewTrack({ track, onChoose, onSaved }: { track: Track; onChoose: (tr
   const [manual, setManual] = useState(false);
   return <article className="review card">
     <header><div><h3>{track.filename}</h3><p>{track.stage_message || track.error || "No reliable match was found."}</p></div><span>{Math.round(track.duration || 0)}s</span></header>
-    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}%`].filter(Boolean).join(" · ")}</small></button>)}</div>}
+    {track.candidates.length > 0 && <div className="candidates">{track.candidates.slice(0, 5).map((candidate) => <button key={candidate.id} onClick={() => onChoose(track.id, candidate.id)}><b>{candidate.title}</b><span>{candidate.artist}</span><small>{[candidate.album, candidate.year, `${Math.round(candidate.score)}% match`].filter(Boolean).join(" · ")}</small><GenreLabel candidate={candidate} /></button>)}</div>}
     <button className="link" onClick={() => setManual(!manual)}>{manual ? "Close manual editor" : "Enter metadata manually"}</button>
     {manual && <ManualEditor track={track} onSaved={onSaved} />}
   </article>;
@@ -192,9 +192,25 @@ function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise
 function TrackSummary({ track, candidate }: { track: Track; candidate?: Candidate }) {
   const extension = track.filename.includes(".") ? `.${track.filename.split(".").pop()?.toLowerCase()}` : "";
   const outputName = candidate ? `${safeName(candidate.artist || "Unknown Artist")} - ${safeName(candidate.title || "Unknown Title")}${extension}` : "Corrected filename";
-  return <div className="track"><span>{track.filename}</span><b>→ {outputName}</b><small>{candidate?.album}</small></div>;
+  return <div className="track"><span>{track.filename}</span><b>→ {outputName}</b><small>{[candidate?.album, genreText(candidate)].filter(Boolean).join(" · ")}</small></div>;
 }
 
 function safeName(value: string) {
   return value.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").replace(/^[ .]+|[ .]+$/g, "");
+}
+
+function GenreLabel({ candidate }: { candidate: Candidate }) {
+  const text = genreText(candidate);
+  return text ? <em className="genre">{text}</em> : <em className="genre uncertain">Genre needs review</em>;
+}
+
+function genreText(candidate?: Candidate) {
+  if (!candidate?.genre) return "";
+  try {
+    const detail = JSON.parse(candidate.score_breakdown || "{}")?.genre;
+    const confidence = typeof detail?.confidence === "number" ? `${Math.round(detail.confidence * 100)}% genre` : "";
+    return [candidate.genre, detail?.language, confidence].filter(Boolean).join(" · ");
+  } catch {
+    return candidate.genre;
+  }
 }

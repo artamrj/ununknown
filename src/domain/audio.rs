@@ -10,6 +10,7 @@ pub struct AudioInfo {
     pub album: Option<String>,
     pub album_artist: Option<String>,
     pub track_number: Option<u32>,
+    pub genre: Option<String>,
     pub duration: f64,
     pub bitrate: Option<u32>,
     pub format: String,
@@ -28,6 +29,7 @@ pub fn read(path: &Path) -> Result<AudioInfo> {
                 .map(str::to_owned)
         }),
         track_number: tag.and_then(|t| t.track()),
+        genre: tag.and_then(|t| t.genre().map(|v| v.into_owned())),
         duration: props.duration().as_secs_f64(),
         bitrate: props.audio_bitrate(),
         format: path

@@ -45,6 +45,8 @@ label i { color: #226b47; font-size: 11px; }
 .candidates button { display: grid; gap: 4px; text-align: left; padding: 12px; border: 1px solid #dfe4df; border-radius: 10px; background: #f8faf8; }
 .candidates button:hover { border-color: #226b47; background: #f0f7f3; }
 .candidates span, .candidates small { color: #657068; }
+.genre { color: #226b47; font-size: 11px; font-style: normal; font-weight: 800; }
+.genre.uncertain { color: #84631b; }
 .manual { margin-top: 15px; padding-top: 15px; border-top: 1px solid #edf0ed; }
 .manual .primary { align-self: end; }
 .ready-list { margin-top: 20px; padding: 18px 20px; border: 1px solid #dfe4df; border-radius: 14px; background: white; }

@@ -57,7 +57,7 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
 }
 
 fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf {
-    if !base.exists() && reserved.insert(base.clone()) {
+    if reserved.insert(base.clone()) {
         return base;
     }
     let parent = base.parent().unwrap_or_else(|| std::path::Path::new(""));
@@ -72,11 +72,26 @@ fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf
             None => format!("{stem} ({number})"),
         };
         let candidate = parent.join(filename);
-        if !candidate.exists() && reserved.insert(candidate.clone()) {
+        if reserved.insert(candidate.clone()) {
             return candidate;
         }
     }
     unreachable!()
+}
+
+fn temporary_destination(destination: &std::path::Path, track_id: i64) -> PathBuf {
+    let parent = destination
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    let stem = destination
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("corrected-track");
+    let extension = destination
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("audio");
+    parent.join(format!(".{stem}.ununknown-{track_id}.{extension}"))
 }
 
 pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
@@ -147,7 +162,8 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         };
         let src = PathBuf::from(&item.current_path);
         let dest = PathBuf::from(&item.destination_path);
-        let target = {
+        let temporary = temporary_destination(&dest, item.track_id.0);
+        {
             if let Some(parent) = dest.parent()
                 && let Err(error) = tokio::fs::create_dir_all(parent).await
             {
@@ -160,22 +176,21 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
                 .await;
                 return Err(error.into());
             }
-            if let Err(error) = tokio::fs::copy(&src, &dest).await {
+            if let Err(error) = tokio::fs::copy(&src, &temporary).await {
                 s.log_entry(
                     ActivityLogEntry::new("error", "apply", "Failed to copy source file")
                         .file(item.filename.clone())
                         .error(&error)
                         .context(serde_json::json!({
                             "source": src.display().to_string(),
-                            "destination": dest.display().to_string()
+                            "destination": temporary.display().to_string()
                         })),
                 )
                 .await;
                 return Err(error.into());
             }
-            dest
-        };
-        let write_target = target.clone();
+        }
+        let write_target = temporary.clone();
         let write_limiter = s.tag_writes.read().await.clone();
         let write_permit = write_limiter.acquire_owned().await?;
         let result = tokio::task::spawn_blocking({
@@ -186,6 +201,12 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
             }
         })
         .await?;
+        let result = match result {
+            Ok(_) => tokio::fs::rename(&temporary, &dest)
+                .await
+                .map_err(anyhow::Error::from),
+            Err(error) => Err(error),
+        };
         let (status, error) = match result {
             Ok(_) => ("applied", None),
             Err(e) => {
@@ -193,7 +214,10 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
                     ActivityLogEntry::new("error", "apply", "Tag writing failed")
                         .file(item.filename.clone())
                         .error(e.as_ref())
-                        .context(serde_json::json!({"target": target.display().to_string()})),
+                        .context(serde_json::json!({
+                            "temporary": temporary.display().to_string(),
+                            "destination": dest.display().to_string()
+                        })),
                 )
                 .await;
                 ("failed", Some(format!("{e:#}")))
@@ -201,9 +225,9 @@ pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
         };
         if status == "failed" {
             s.increment_failed().await;
-            let _ = tokio::fs::remove_file(&target).await;
+            let _ = tokio::fs::remove_file(&temporary).await;
         }
-        let final_path = &target;
+        let final_path = &dest;
         sqlx::query(
             "UPDATE tracks SET output_path=?,status=?,error=?,last_applied_at=? WHERE id=?",
         )
@@ -251,6 +275,14 @@ mod tests {
         assert_eq!(
             unique_destination(base, &mut reserved),
             PathBuf::from("/output/Artist - Song (2).mp3")
+        );
+    }
+
+    #[test]
+    fn temporary_destination_keeps_audio_extension() {
+        assert_eq!(
+            temporary_destination(std::path::Path::new("/output/Artist - Song.mp3"), 42),
+            PathBuf::from("/output/.Artist - Song.ununknown-42.mp3")
         );
     }
 }

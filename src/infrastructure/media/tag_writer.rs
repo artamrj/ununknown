@@ -30,6 +30,14 @@ pub fn write(path: &Path, candidate: &Candidate, artwork: Option<Vec<u8>>) -> Re
     optional(tag, ItemKey::AlbumArtist, &candidate.album_artist);
     optional(tag, ItemKey::Isrc, &candidate.isrc);
     optional(tag, ItemKey::Genre, &candidate.genre);
+    if let Some(language_code) = candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value["genre"]["language_code"].as_str().map(str::to_owned))
+    {
+        set(tag, ItemKey::Language, &language_code);
+    }
     optional(tag, ItemKey::Composer, &candidate.composer);
     optional(tag, ItemKey::Label, &candidate.label);
     optional(tag, ItemKey::RecordingDate, &candidate.year);
