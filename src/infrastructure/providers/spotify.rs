@@ -1,5 +1,5 @@
 use super::Candidate;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::Client;
 use serde_json::Value;
@@ -62,6 +62,55 @@ pub async fn search(
             .is_none_or(|id| seen.insert(id))
     });
     Ok(candidates)
+}
+
+pub async fn lookup_url(client: &Client, url: &str) -> Result<Candidate> {
+    let parsed = reqwest::Url::parse(url)?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("open.spotify.com")
+        || !parsed.path().starts_with("/track/")
+    {
+        bail!("only HTTPS Spotify track links are supported");
+    }
+    let mut endpoint = reqwest::Url::parse("https://open.spotify.com/oembed")?;
+    endpoint.query_pairs_mut().append_pair("url", url);
+    let raw = crate::infrastructure::resilient_http::get(client, endpoint.as_str())
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    let title = raw["title"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Spotify returned no track title"))?;
+    let cover_url = raw["thumbnail_url"]
+        .as_str()
+        .map(upgrade_artwork_url)
+        .ok_or_else(|| anyhow::anyhow!("Spotify returned no cover artwork"))?;
+    Ok(Candidate {
+        provider: "spotify".into(),
+        title: title.to_owned(),
+        // Spotify oEmbed deliberately omits performers. The manual editor keeps
+        // its existing artist when this field is empty.
+        artist: String::new(),
+        cover_url: Some(cover_url),
+        score: 94.0,
+        score_breakdown: Some(
+            serde_json::json!({
+                "source": "spotify_user_source_url",
+                "sources": ["Spotify"],
+                "user_verified_source": true,
+                "artwork_only_artist_preserved": true
+            })
+            .to_string(),
+        ),
+        raw_json: raw.to_string(),
+        ..Default::default()
+    })
+}
+
+pub fn upgrade_artwork_url(url: &str) -> String {
+    url.replace("ab67616d00001e02", "ab67616d0000b273")
+        .replace("ab67616d00004851", "ab67616d0000b273")
 }
 
 async fn access_token(
@@ -165,6 +214,14 @@ mod tests {
     fn rejects_non_track_items() {
         assert!(
             parse_results(&serde_json::json!({"tracks":{"items":[{"type":"episode"}]}})).is_empty()
+        );
+    }
+
+    #[test]
+    fn upgrades_spotify_thumbnail_to_large_cover() {
+        assert_eq!(
+            upgrade_artwork_url("https://i.scdn.co/image/ab67616d00001e02abc"),
+            "https://i.scdn.co/image/ab67616d0000b273abc"
         );
     }
 }

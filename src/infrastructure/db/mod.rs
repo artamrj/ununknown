@@ -134,6 +134,14 @@ CREATE TABLE IF NOT EXISTS replaygain_cache (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS artwork_overrides (
+  path TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  artist TEXT NOT NULL,
+  cover_url TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS integrity_cache (
   path TEXT PRIMARY KEY,
   file_size INTEGER NOT NULL,

@@ -27,6 +27,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "/tracks/{id}/artwork/preview",
             get(handlers::artwork_preview),
         )
+        .route(
+            "/candidates/{id}/artwork/preview",
+            get(handlers::candidate_artwork_preview),
+        )
         .route("/write", post(handlers::start_apply))
         .fallback(api_not_found)
 }

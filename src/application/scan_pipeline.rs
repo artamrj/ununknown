@@ -712,6 +712,7 @@ async fn identify(
     }
     apply_source_agreement(&mut out)?;
     enrich_artwork_fallbacks(&mut out)?;
+    apply_artwork_override(&state.pool, path, &mut out).await?;
     let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, current) {
         if let Some(artist) = current.artist.as_deref() {
             match providers::wikidata::artist_genres(&state.pool, &state.client, artist).await {
@@ -1517,6 +1518,53 @@ fn artwork_provider_priority(provider: &str) -> u8 {
         "youtube" => 1,
         _ => 0,
     }
+}
+
+async fn apply_artwork_override(
+    pool: &sqlx::SqlitePool,
+    path: &Path,
+    candidates: &mut [providers::Candidate],
+) -> Result<()> {
+    let override_row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT title,artist,cover_url FROM artwork_overrides WHERE path=?")
+            .bind(path.to_string_lossy().as_ref())
+            .fetch_optional(pool)
+            .await?;
+    let Some((title, artist, cover_url)) = override_row else {
+        return Ok(());
+    };
+    let reference = providers::Candidate {
+        title,
+        artist,
+        ..Default::default()
+    };
+    for candidate in candidates
+        .iter_mut()
+        .filter(|candidate| candidate_agrees(candidate, &reference))
+    {
+        candidate.cover_url = Some(cover_url.clone());
+        let mut breakdown = candidate
+            .score_breakdown
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let artwork = breakdown["artwork_candidates"]
+            .as_array_mut()
+            .map(|items| items as &mut Vec<serde_json::Value>);
+        if let Some(items) = artwork {
+            items.insert(
+                0,
+                serde_json::json!({"provider":"User verified","url":cover_url.clone()}),
+            );
+        } else {
+            breakdown["artwork_candidates"] = serde_json::json!([
+                {"provider":"User verified","url":cover_url.clone()}
+            ]);
+        }
+        breakdown["artwork_override"] = serde_json::json!(true);
+        candidate.score_breakdown = Some(breakdown.to_string());
+    }
+    Ok(())
 }
 
 fn dedupe_candidates(candidates: &mut Vec<providers::Candidate>) {

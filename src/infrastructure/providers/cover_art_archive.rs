@@ -6,7 +6,9 @@ use reqwest::Client;
 use sqlx::SqlitePool;
 
 pub async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
-    let response = client.get(url).send().await?.error_for_status()?;
+    let response = crate::infrastructure::resilient_http::get(client, url)
+        .await?
+        .error_for_status()?;
     if response
         .content_length()
         .is_some_and(|length| length > 20 * 1024 * 1024)

@@ -226,7 +226,7 @@ function ManualEditor({ track, onSaved }: { track: Track; onSaved: () => Promise
     await api(`/tracks/${track.id}/manual`, { method: "PUT", body: JSON.stringify({ ...form, track_number: form.track_number ? Number(form.track_number) : null }) });
     await onSaved();
   };
-  return <div className="manual"><label className="source-url">YouTube or SoundCloud source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://soundcloud.com/artist/track" /></label><button className="secondary" disabled={!sourceUrl.trim()} onClick={resolveSource}>Use source metadata and cover</button>{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
+  return <div className="manual"><label className="source-url">Spotify, SoundCloud, or YouTube source URL<input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://open.spotify.com/track/…" /></label><button className="secondary" disabled={!sourceUrl.trim()} onClick={resolveSource}>Use source metadata and cover</button>{Object.entries(form).map(([name, value]) => <label key={name}>{name.replace("_", " ")}<input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}<button className="primary" onClick={save}>Use this metadata</button></div>;
 }
 
 function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?: Candidate; onSaved: () => Promise<void> }) {
@@ -244,7 +244,9 @@ function TrackSummary({ track, candidate, onSaved }: { track: Track; candidate?:
 function Artwork({ candidate, trackId }: { candidate?: Candidate; trackId?: number }) {
   const urls = trackId
     ? [`/api/tracks/${trackId}/artwork/preview?v=${encodeURIComponent(candidate?.cover_url || candidate?.id || "embedded")}`]
-    : artworkUrls(candidate);
+    : candidate?.id
+      ? [`/api/candidates/${candidate.id}/artwork/preview?v=${encodeURIComponent(candidate.cover_url || candidate.id)}`, ...artworkUrls(candidate)]
+      : artworkUrls(candidate);
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [candidate?.id, candidate?.cover_url]);
   return urls[index]

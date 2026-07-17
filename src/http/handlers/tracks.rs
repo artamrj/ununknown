@@ -55,11 +55,12 @@ pub async fn manual_candidate(
     let credits = crate::domain::credits::normalize_featured(&value.artist, &value.title);
     value.artist = credits.artist;
     value.title = credits.title;
-    let status: Option<String> = sqlx::query_scalar("SELECT status FROM tracks WHERE id=?")
-        .bind(id.0)
-        .fetch_optional(&s.pool)
-        .await?;
-    let Some(status) = status else {
+    let track: Option<(String, String)> =
+        sqlx::query_as("SELECT status,path FROM tracks WHERE id=?")
+            .bind(id.0)
+            .fetch_optional(&s.pool)
+            .await?;
+    let Some((status, track_path)) = track else {
         return Err(ApiError::not_found("track not found"));
     };
     if status == "corrupt" {
@@ -67,14 +68,30 @@ pub async fn manual_candidate(
             "Damaged audio cannot be marked ready; repair or replace the source file first",
         ));
     }
+    let cover_url = value
+        .cover_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned);
     let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(id.0).bind("manual").bind(value.title.trim()).bind(value.artist.trim())
         .bind(value.album).bind(value.album_artist).bind(value.track_number).bind(value.track_total)
         .bind(value.disc_number).bind(value.disc_total).bind(value.year).bind(value.genre)
         .bind(value.composer).bind(value.label).bind(value.isrc)
-        .bind(value.cover_url.filter(|url| !url.trim().is_empty()))
+        .bind(&cover_url)
         .bind(100.0).bind("{}")
         .execute(&s.pool).await?;
+    if let Some(cover_url) = cover_url {
+        persist_artwork_override(
+            &s.pool,
+            &track_path,
+            value.title.trim(),
+            value.artist.trim(),
+            &cover_url,
+        )
+        .await?;
+    }
     let candidate_id = result.last_insert_rowid();
     sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message='Entered manually' WHERE id=?")
         .bind(candidate_id).bind(id.0).execute(&s.pool).await?;
@@ -88,6 +105,7 @@ pub async fn update_artwork(
     Path(id): Path<TrackId>,
     Json(value): Json<ArtworkEdit>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let (track, selected) = queries::selected(&s.pool, id).await?;
     let supplied = value.cover_url.trim();
     let parsed = reqwest::Url::parse(supplied).map_err(|_| {
         ApiError::validation("Enter a valid HTTPS image, Spotify, or SoundCloud track URL")
@@ -96,20 +114,10 @@ pub async fn update_artwork(
         return Err(ApiError::validation("Cover URLs must use HTTPS"));
     }
     let cover_url = if parsed.host_str() == Some("open.spotify.com") {
-        let value = s
-            .client
-            .get("https://open.spotify.com/oembed")
-            .query(&[("url", supplied)])
-            .send()
+        crate::infrastructure::providers::spotify::lookup_url(&s.client, supplied)
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .map_err(|error| ApiError::validation(format!("Spotify link failed: {error}")))?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|error| ApiError::validation(format!("Spotify response failed: {error}")))?;
-        value["thumbnail_url"]
-            .as_str()
-            .map(upgrade_spotify_image)
+            .map_err(|error| ApiError::validation(format!("Spotify link failed: {error:#}")))?
+            .cover_url
             .ok_or_else(|| ApiError::validation("Spotify did not return cover artwork"))?
     } else if is_soundcloud_host(parsed.host_str()) {
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, supplied)
@@ -139,7 +147,33 @@ pub async fn update_artwork(
             "Select metadata for this track before setting its cover",
         ));
     }
+    persist_artwork_override(
+        &s.pool,
+        &track.path,
+        &selected.title,
+        &selected.artist,
+        &cover_url,
+    )
+    .await?;
     Ok(Json(serde_json::json!({"cover_url": cover_url})))
+}
+
+async fn persist_artwork_override(
+    pool: &sqlx::SqlitePool,
+    path: &str,
+    title: &str,
+    artist: &str,
+    cover_url: &str,
+) -> Result<()> {
+    sqlx::query("INSERT INTO artwork_overrides(path,title,artist,cover_url,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,artist=excluded.artist,cover_url=excluded.cover_url,updated_at=excluded.updated_at")
+        .bind(path)
+        .bind(title)
+        .bind(artist)
+        .bind(cover_url)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn artwork_preview(
@@ -156,6 +190,49 @@ pub async fn artwork_preview(
         .map_err(anyhow::Error::from)??,
     }
     .ok_or_else(|| ApiError::not_found("No valid artwork is available for this track"))?;
+    artwork_response(artwork)
+}
+
+pub async fn candidate_artwork_preview(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<CandidateId>,
+) -> ApiResult<axum::response::Response> {
+    let row: CandidateRow = sqlx::query_as("SELECT * FROM candidates WHERE id=?")
+        .bind(id.0)
+        .fetch_optional(&s.pool)
+        .await?
+        .ok_or_else(|| ApiError::not_found("candidate not found"))?;
+    let candidate = row.value();
+    let mut urls = candidate.cover_url.into_iter().collect::<Vec<_>>();
+    if let Some(value) = candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+    {
+        for item in value["artwork_candidates"].as_array().into_iter().flatten() {
+            if let Some(url) = item["url"].as_str()
+                && !urls.iter().any(|existing| existing == url)
+            {
+                urls.push(url.to_owned());
+            }
+        }
+    }
+    for url in urls {
+        if let Ok(bytes) = crate::infrastructure::providers::cover_art_archive::fetch_url_cached(
+            &s.pool, &s.client, &url,
+        )
+        .await
+            && tag_writer::validate_artwork(&bytes).is_ok()
+        {
+            return artwork_response(bytes);
+        }
+    }
+    Err(ApiError::not_found(
+        "No valid catalog artwork is available for this candidate",
+    ))
+}
+
+fn artwork_response(artwork: Vec<u8>) -> ApiResult<axum::response::Response> {
     let mime = artwork_mime(&artwork);
     Ok(axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, mime)
@@ -182,8 +259,10 @@ pub async fn resolve_source(
 ) -> ApiResult<Json<Candidate>> {
     let url = value.url.trim();
     let parsed = reqwest::Url::parse(url)
-        .map_err(|_| ApiError::validation("Enter a valid YouTube or SoundCloud URL"))?;
-    let candidate = if is_soundcloud_host(parsed.host_str()) {
+        .map_err(|_| ApiError::validation("Enter a valid Spotify, SoundCloud, or YouTube URL"))?;
+    let candidate = if parsed.host_str() == Some("open.spotify.com") {
+        crate::infrastructure::providers::spotify::lookup_url(&s.client, url).await
+    } else if is_soundcloud_host(parsed.host_str()) {
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
     } else {
         crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
@@ -194,11 +273,6 @@ pub async fn resolve_source(
 
 fn is_soundcloud_host(host: Option<&str>) -> bool {
     matches!(host, Some("soundcloud.com" | "www.soundcloud.com"))
-}
-
-fn upgrade_spotify_image(url: &str) -> String {
-    url.replace("ab67616d00001e02", "ab67616d0000b273")
-        .replace("ab67616d00004851", "ab67616d0000b273")
 }
 
 #[cfg(test)]
@@ -253,14 +327,6 @@ mod tests {
                 "Correct title".into(),
                 "Correct artist".into()
             )
-        );
-    }
-
-    #[test]
-    fn spotify_thumbnail_is_upgraded_to_large_cover() {
-        assert_eq!(
-            upgrade_spotify_image("https://i.scdn.co/image/ab67616d00001e02abc"),
-            "https://i.scdn.co/image/ab67616d0000b273abc"
         );
     }
 }

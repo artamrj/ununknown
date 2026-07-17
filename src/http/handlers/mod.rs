@@ -26,8 +26,8 @@ pub use apply::start_apply;
 pub use scan::{start_scan, stop_scan};
 pub use settings::{setup, update_setup};
 pub use tracks::{
-    artwork_preview, list_tracks, manual_candidate, resolve_source, select_candidate,
-    update_artwork,
+    artwork_preview, candidate_artwork_preview, list_tracks, manual_candidate, resolve_source,
+    select_candidate, update_artwork,
 };
 pub use workspace::workspace;
 
