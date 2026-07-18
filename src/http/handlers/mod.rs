@@ -172,6 +172,7 @@ pub struct CandidateEdit {
     composer: Option<String>,
     label: Option<String>,
     isrc: Option<String>,
+    release_date: Option<String>,
     cover_url: Option<String>,
 }
 

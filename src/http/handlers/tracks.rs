@@ -429,11 +429,11 @@ pub async fn manual_candidate(
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .map(str::to_owned);
-    let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,cover_url,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,release_date,cover_url,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(id.0).bind("manual").bind(value.title.trim()).bind(value.artist.trim())
         .bind(value.album).bind(value.album_artist).bind(value.track_number).bind(value.track_total)
         .bind(value.disc_number).bind(value.disc_total).bind(value.year).bind(value.genre)
-        .bind(value.composer).bind(value.label).bind(value.isrc)
+        .bind(value.composer).bind(value.label).bind(value.isrc).bind(value.release_date)
         .bind(&cover_url)
         .bind(100.0).bind("{}")
         .execute(&s.pool).await?;
@@ -464,7 +464,7 @@ pub async fn update_artwork(
     let supplied = value.cover_url.trim();
     let parsed = reqwest::Url::parse(supplied).map_err(|_| {
         ApiError::validation(
-            "Enter a valid HTTPS image, Spotify, SoundCloud, Radio Javan, or Genius song URL",
+            "Enter a valid HTTPS image, Spotify, SoundCloud, Audiomack, Radio Javan, or Genius song URL",
         )
     })?;
     if parsed.scheme() != "https" {
@@ -482,6 +482,12 @@ pub async fn update_artwork(
             .map_err(|error| ApiError::validation(format!("SoundCloud link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("SoundCloud did not return cover artwork"))?
+    } else if is_audiomack_host(parsed.host_str()) {
+        crate::infrastructure::providers::audiomack::lookup_url(&s.pool, &s.client, supplied)
+            .await
+            .map_err(|error| ApiError::validation(format!("Audiomack link failed: {error:#}")))?
+            .cover_url
+            .ok_or_else(|| ApiError::validation("Audiomack did not return cover artwork"))?
     } else if is_radiojavan_host(parsed.host_str()) {
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, supplied)
             .await
@@ -643,13 +649,15 @@ pub async fn resolve_source(
     let url = value.url.trim();
     let parsed = reqwest::Url::parse(url).map_err(|_| {
         ApiError::validation(
-            "Enter a valid Spotify, SoundCloud, Radio Javan, Genius, or YouTube URL",
+            "Enter a valid Spotify, SoundCloud, Audiomack, Radio Javan, Genius, or YouTube URL",
         )
     })?;
     let candidate = if parsed.host_str() == Some("open.spotify.com") {
         crate::infrastructure::providers::spotify::lookup_url(&s.client, url).await
     } else if is_soundcloud_host(parsed.host_str()) {
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
+    } else if is_audiomack_host(parsed.host_str()) {
+        crate::infrastructure::providers::audiomack::lookup_url(&s.pool, &s.client, url).await
     } else if is_radiojavan_host(parsed.host_str()) {
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
     } else if is_genius_host(parsed.host_str()) {
@@ -663,6 +671,10 @@ pub async fn resolve_source(
 
 fn is_soundcloud_host(host: Option<&str>) -> bool {
     matches!(host, Some("soundcloud.com" | "www.soundcloud.com"))
+}
+
+fn is_audiomack_host(host: Option<&str>) -> bool {
+    matches!(host, Some("audiomack.com" | "www.audiomack.com"))
 }
 
 fn is_radiojavan_host(host: Option<&str>) -> bool {
@@ -710,6 +722,7 @@ mod tests {
                 composer: None,
                 label: None,
                 isrc: None,
+                release_date: None,
                 cover_url: Some("https://example.test/cover.jpg".into()),
             }),
         )

@@ -551,7 +551,11 @@ function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?:
     album_artist: candidate?.album_artist || track.current_album_artist || "",
     track_number: candidate?.track_number || track.current_track_number || "",
     year: candidate?.year || "",
+    release_date: candidate?.release_date || "",
     genre: candidate?.genre || "",
+    composer: candidate?.composer || "",
+    label: candidate?.label || "",
+    isrc: candidate?.isrc || "",
     cover_url: candidate?.cover_url || "",
   });
   const [sourceUrl, setSourceUrl] = useState("");
@@ -562,7 +566,7 @@ function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?:
     setResolving(true); setFeedback(undefined);
     try {
       const found = await api<Candidate>("/source/resolve", { method: "POST", body: JSON.stringify({ url: sourceUrl }) });
-      setForm((current) => ({ ...current, title: found.title || current.title, artist: found.artist || current.artist, album: found.album || current.album, album_artist: found.album_artist || current.album_artist, track_number: found.track_number || current.track_number, year: found.year || current.year, genre: found.genre || current.genre, cover_url: found.cover_url || current.cover_url }));
+      setForm((current) => ({ ...current, title: found.title || current.title, artist: found.artist || current.artist, album: found.album || current.album, album_artist: found.album_artist || current.album_artist, track_number: found.track_number || current.track_number, year: found.year || current.year, release_date: found.release_date || current.release_date, genre: found.genre || current.genre, composer: found.composer || current.composer, label: found.label || current.label, isrc: found.isrc || current.isrc, cover_url: found.cover_url || current.cover_url }));
       setFeedback({ text: `Loaded metadata and artwork for ${found.artist || "this track"}.` });
     } catch (reason) { setFeedback({ error: true, text: (reason as Error).message }); }
     finally { setResolving(false); }
@@ -575,10 +579,10 @@ function ManualEditor({ track, candidate, onSaved }: { track: Track; candidate?:
     } catch (reason) { setFeedback({ error: true, text: (reason as Error).message }); }
     finally { setSaving(false); }
   };
-  const labels: Record<string, string> = { title: "Title", artist: "Artist", album: "Album", album_artist: "Album artist", track_number: "Track number", year: "Release year", genre: "Genre", cover_url: "Cover artwork URL" };
+  const labels: Record<string, string> = { title: "Title", artist: "Artist", album: "Album", album_artist: "Album artist", track_number: "Track number", year: "Release year", release_date: "Release date", genre: "Genre", composer: "Composer", label: "Label", isrc: "ISRC", cover_url: "Cover artwork URL" };
   return <section className="manual-editor" aria-labelledby="manual-title">
     <div className="section-heading"><div><p className="eyebrow">Manual correction</p><h3 id="manual-title">Edit proposed metadata</h3></div></div>
-    <div className="source-resolver"><label><span>Use a track link</span><input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="Spotify, SoundCloud, Genius, Radio Javan, or YouTube URL" /></label><button className="compact-button" disabled={!sourceUrl.trim() || resolving} onClick={() => void resolveSource()}>{resolving ? "Loading…" : "Import"}</button></div>
+    <div className="source-resolver"><label><span>Use a track link</span><input value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="Spotify, SoundCloud, Audiomack, Genius, Radio Javan, or YouTube URL" /></label><button className="compact-button" disabled={!sourceUrl.trim() || resolving} onClick={() => void resolveSource()}>{resolving ? "Loading…" : "Import"}</button></div>
     {feedback && <p className={`inline-feedback ${feedback.error ? "error" : "success"}`} role={feedback.error ? "alert" : "status"}>{feedback.text}</p>}
     <div className="editor-grid">{Object.entries(form).map(([name, value]) => <label className={name === "cover_url" ? "wide" : ""} key={name}><span>{labels[name]}</span><input value={value} onChange={(event) => setForm({ ...form, [name]: event.target.value })} /></label>)}</div>
     <button className="primary-action editor-save" disabled={saving || !String(form.title).trim() || !String(form.artist).trim()} onClick={() => void save()}>{saving ? <span className="spinner" /> : <Icon name="check" />}Use this metadata</button>
@@ -603,7 +607,7 @@ function SettingsDrawer({ setup, setSetup, keys, setKeys, saving, onSave, onClos
 
 function ProviderStatus({ sources }: { sources: Record<string, boolean> }) {
   const available = Object.values(sources).filter(Boolean).length;
-  return <section className="provider-settings"><div className="section-heading"><div><h3>Recognition tools</h3><p>{available} sources and local tools available</p></div><span className="health-dot">Ready</span></div><div className="provider-pills">{["musicbrainz", "deezer", "itunes", "radiojavan", "genius", "spotify", "acoustid", "ffmpeg"].map((source) => <span className={sources[source] ? "active" : "inactive"} key={source}><i />{providerName(source)}</span>)}</div>{!sources.ffmpeg && <p className="tool-warning"><Icon name="alert" size={15} />Install FFmpeg for audio integrity checks and ReplayGain. Metadata cleaning still works.</p>}</section>;
+  return <section className="provider-settings"><div className="section-heading"><div><h3>Recognition tools</h3><p>{available} sources and local tools available</p></div><span className="health-dot">Ready</span></div><div className="provider-pills">{["musicbrainz", "deezer", "itunes", "radiojavan", "audiomack", "genius", "spotify", "acoustid", "ffmpeg"].map((source) => <span className={sources[source] ? "active" : "inactive"} key={source}><i />{providerName(source)}</span>)}</div>{!sources.ffmpeg && <p className="tool-warning"><Icon name="alert" size={15} />Install FFmpeg for audio integrity checks and ReplayGain. Metadata cleaning still works.</p>}</section>;
 }
 
 function ProcessingDock({ workflow, counts, busy, deleteSources, onStop, onWrite }: { workflow?: Workflow; counts: { review: number; ready: number; problems: number; completed: number }; busy: boolean; deleteSources: boolean; onStop: () => void; onWrite: () => void }) {
@@ -781,7 +785,7 @@ function candidateSources(candidate: Candidate) {
   return providerName(candidate.provider || "catalog");
 }
 
-function providerName(source: string) { const names: Record<string, string> = { acoustid: "AcoustID", audd: "AudD", deezer: "Deezer", discogs: "Discogs", itunes: "Apple Music", lastfm: "Last.fm", genius: "Genius", musicbrainz: "MusicBrainz", radiojavan: "Radio Javan", soundcloud: "SoundCloud", spotify: "Spotify", theaudiodb: "TheAudioDB", wikidata: "Wikidata", youtube: "YouTube", ffmpeg: "FFmpeg", manual: "Manual entry", catalog: "Catalog" }; return names[source] || source; }
+function providerName(source: string) { const names: Record<string, string> = { acoustid: "AcoustID", audiomack: "Audiomack", audd: "AudD", deezer: "Deezer", discogs: "Discogs", itunes: "Apple Music", lastfm: "Last.fm", genius: "Genius", musicbrainz: "MusicBrainz", radiojavan: "Radio Javan", soundcloud: "SoundCloud", spotify: "Spotify", theaudiodb: "TheAudioDB", wikidata: "Wikidata", youtube: "YouTube", ffmpeg: "FFmpeg", manual: "Manual entry", catalog: "Catalog" }; return names[source] || source; }
 
 function metadataAudit(candidate: Candidate) {
   try { const stored = JSON.parse(candidate.score_breakdown || "{}")?.metadata_completion; if (stored && typeof stored.score === "number" && Array.isArray(stored.missing_fields)) return { score: stored.score, coreComplete: stored.core_complete === true, missing: stored.missing_fields as string[] }; } catch { /* Derive a display audit. */ }

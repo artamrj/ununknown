@@ -1,5 +1,6 @@
 pub mod acoustid;
 pub mod audd;
+pub mod audiomack;
 pub mod cover_art_archive;
 pub mod deezer;
 pub mod discogs;
