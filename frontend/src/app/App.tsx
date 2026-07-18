@@ -372,15 +372,13 @@ function NavButton({ active, label, count, className = "", onClick }: { active: 
 }
 
 function TrackRow({ track, active, onClick }: { track: Track; active: boolean; onClick: () => void }) {
-  const candidate = selectedCandidate(track) ?? track.candidates[0];
-  const displayTitle = candidate?.title || track.current_title || fileStem(track.filename);
-  const artist = candidate?.artist || track.current_artist || "Unknown artist";
-  const score = candidate?.score;
+  const displayTitle = track.current_title || fileStem(track.filename);
+  const artist = track.current_artist || "Unknown artist";
   return (
     <button className={`track-row ${active ? "selected" : ""}`} onClick={onClick} role="listitem" aria-current={active ? "true" : undefined}>
-      <Artwork candidate={candidate} trackId={track.selected_candidate_id ? track.id : undefined} size="small" />
-      <span className="row-identity"><b>{displayTitle}</b><small>{artist}<i>·</i>{candidate?.album || track.current_album || track.filename}</small></span>
-      <span className="confidence-cell">{typeof score === "number" ? <><b>{Math.round(score)}%</b><small>match</small></> : <small>—</small>}</span>
+      <OriginalArtwork track={track} size="small" />
+      <span className="row-identity"><b>{displayTitle}</b><small>{artist}<i>·</i>{track.current_album || "Album not set"}</small></span>
+      <span className="row-file"><small>Original file</small><b title={track.filename}>{track.filename}</b></span>
       <TrackStatus track={track} />
       <Icon name="chevron" size={16} className="row-chevron" />
     </button>
@@ -394,9 +392,13 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   const [choosingId, setChoosingId] = useState<number>();
   const [actionError, setActionError] = useState("");
   const candidate = selectedCandidate(track);
-  const reviewCandidate = track.candidates[0];
-  const heroCandidate = candidate ?? reviewCandidate;
   const corrupt = track.status === "corrupt";
+  useEffect(() => {
+    setEditing(false);
+    setAdvanced(false);
+    setActionError("");
+    setChoosingId(undefined);
+  }, [track.id]);
   const undoIdentification = async () => {
     setUndoing(true); setActionError("");
     try {
@@ -414,13 +416,18 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
 
   return (
     <div className="inspector-content">
-      <header className="inspector-hero">
-        <Artwork candidate={heroCandidate} trackId={candidate ? track.id : undefined} size="large" />
-        <div className="inspector-title">
-          <TrackStatus track={track} />
-          <h2>{heroCandidate?.title || track.current_title || fileStem(track.filename)}</h2>
-          <p>{heroCandidate?.artist || track.current_artist || "Unknown artist"}</p>
-          <small title={track.filename}>{track.filename}</small>
+      <header className="original-overview">
+        <OriginalArtwork track={track} size="large" />
+        <div className="original-overview-main">
+          <div className="overview-label"><span>Original file</span><TrackStatus track={track} /></div>
+          <h2>{track.current_title || fileStem(track.filename)}</h2>
+          <p>{track.current_artist || "Unknown artist"}<i>·</i>{track.current_album || "Album not set"}</p>
+          <div className="original-filename"><Icon name="music" size={15} /><span><small>Filename</small><b title={track.filename}>{track.filename}</b></span></div>
+          <div className="original-audio-facts">
+            <span><small>Album artist</small><b>{track.current_album_artist || "Not set"}</b></span>
+            <span><small>Track</small><b>{track.current_track_number || "Not set"}</b></span>
+            <span><small>Audio</small><b>{[track.format?.toUpperCase(), formatDuration(track.duration)].filter(Boolean).join(" · ") || "Unknown"}</b></span>
+          </div>
         </div>
       </header>
 
@@ -432,15 +439,8 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
       </section>}
 
       {isReview(track) && track.candidates.length > 0 && <section className="inspector-section candidate-section">
-        <div className="section-heading"><div><p className="eyebrow">Review matches</p><h3>Compare with the original file</h3></div><span>{track.candidates.length} found</span></div>
-        <p className="candidate-help">Scores can be close even when the recordings are different. Compare the title, artist, album, and audio evidence before choosing.</p>
-        <div className="candidate-reference">
-          <div className="reference-file"><Icon name="music" size={15} /><span><small>Original file</small><b title={track.filename}>{track.filename}</b></span></div>
-          <ReferenceField label="Title" value={track.current_title} />
-          <ReferenceField label="Artist" value={track.current_artist} />
-          <ReferenceField label="Album" value={track.current_album} />
-          <ReferenceField label="Track" value={track.current_track_number?.toString()} />
-        </div>
+        <div className="section-heading"><div><p className="eyebrow">Ununknown suggestions</p><h3>Choose the recording that matches this file</h3></div><span>{track.candidates.length} options</span></div>
+        <p className="candidate-help">Each option shows the exact differences from the original tags. Green evidence agrees; amber or red evidence needs your attention.</p>
         <div className="candidate-list">
           {track.candidates.slice(0, 5).map((item, index) => <CandidateRow key={item.id} track={track} candidate={item} rank={index + 1} topScore={track.candidates[0]?.score || item.score} nextScore={index === 0 ? track.candidates[1]?.score : undefined} choosing={choosingId === item.id} disabled={choosingId !== undefined} onChoose={() => void acceptCandidate(item.id)} />)}
         </div>
@@ -449,8 +449,13 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
       {actionError && <p className="inline-feedback error" role="alert">{actionError}</p>}
 
       {candidate && <>
-        <section className="inspector-section">
-          <div className="section-heading"><div><p className="eyebrow">Metadata comparison</p><h3>Original <Icon name="arrow" size={15} /> Proposed</h3></div><button className="text-button" onClick={() => setEditing(!editing)}><Icon name="edit" size={14} />{editing ? "Close editor" : "Edit"}</button></div>
+        <section className="inspector-section selected-proposal">
+          <div className="section-heading"><div><p className="eyebrow">Ununknown suggestion</p><h3>Review exactly what will change</h3></div><button className="text-button" onClick={() => setEditing(!editing)}><Icon name="edit" size={14} />{editing ? "Close editor" : "Edit suggestion"}</button></div>
+          <div className="proposal-summary">
+            <div className="proposal-side current"><OriginalArtwork track={track} size="medium" /><span><small>Current file</small><b>{track.current_title || fileStem(track.filename)}</b><em>{track.current_artist || "Unknown artist"}</em></span></div>
+            <Icon name="arrow" size={17} />
+            <div className="proposal-side proposed"><Artwork candidate={candidate} trackId={track.id} size="medium" /><span><small>Will be written</small><b>{candidate.title || "Untitled"}</b><em>{candidate.artist || "Unknown artist"}</em></span><ConfidenceBadge score={candidate.score} /></div>
+          </div>
           <div className="metadata-comparison">
             <CompareRow label="Title" before={track.current_title} after={candidate.title} />
             <CompareRow label="Artist" before={track.current_artist} after={candidate.artist} />
@@ -460,7 +465,7 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
             <CompareRow label="Year" after={candidate.year || candidate.release_date?.slice(0, 4)} />
             <CompareRow label="Genre" after={candidate.genre} />
           </div>
-          <div className="output-filename"><Icon name="music" size={15} /><span><small>Clean filename</small><b>{outputFilename(track, candidate)}</b></span></div>
+          <div className="filename-comparison"><span><small>Current filename</small><b title={track.filename}>{track.filename}</b></span><Icon name="arrow" size={15} /><span><small>New filename</small><b>{outputFilename(track, candidate)}</b></span></div>
         </section>
         <section className="quality-strip">
           <QualityItem icon="layers" label="Sources" value={candidateSources(candidate)} />
@@ -483,32 +488,45 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   );
 }
 
-function ReferenceField({ label, value }: { label: string; value?: string }) {
-  return <span className="reference-field"><small>{label}</small><b title={value}>{value || "Not set"}</b></span>;
-}
-
 function CandidateRow({ track, candidate, rank, topScore, nextScore, choosing, disabled, onChoose }: { track: Track; candidate: Candidate; rank: number; topScore: number; nextScore?: number; choosing: boolean; disabled: boolean; onChoose: () => void }) {
   const audit = metadataAudit(candidate);
   const confidence = candidateConfidence(candidate.score);
   const signals = candidateSignals(track, candidate);
   const gap = rank === 1 && typeof nextScore === "number" ? Math.max(0, candidate.score - nextScore) : Math.max(0, topScore - candidate.score);
-  return <article className="candidate-row">
-    <div className="candidate-main">
-      <span className="candidate-rank" aria-label={`Result ${rank}`}>{rank}</span>
+  const recommended = rank === 1 && candidate.score >= 85 && (typeof nextScore !== "number" || gap >= 8);
+  const verdict = candidateVerdict(candidate.score, signals);
+  return <article className={`candidate-row ${recommended ? "recommended" : ""}`}>
+    <header className="candidate-main">
+      <span className="candidate-rank" aria-label={`Option ${rank}`}>{rank}</span>
       <Artwork candidate={candidate} size="medium" />
-      <div className="candidate-identity"><b>{candidate.title || "Untitled"}</b><span>{candidate.artist || "Unknown artist"}</span><small>{[candidate.album || "Album unknown", candidate.year || candidate.release_date?.slice(0, 4), candidate.track_number ? `Track ${candidate.track_number}${candidate.track_total ? ` of ${candidate.track_total}` : ""}` : ""].filter(Boolean).join(" · ")}</small><em>{candidateSources(candidate)} · {audit.coreComplete ? "Complete metadata" : `${audit.score}% metadata`}</em></div>
+      <div className="candidate-identity"><span className="candidate-kicker">{recommended ? "Recommended" : `Option ${rank}`}</span><b>{candidate.title || "Untitled"}</b><span>{candidate.artist || "Unknown artist"}</span><small>{[candidate.album || "Album unknown", candidate.year || candidate.release_date?.slice(0, 4), candidate.track_number ? `Track ${candidate.track_number}${candidate.track_total ? ` of ${candidate.track_total}` : ""}` : ""].filter(Boolean).join(" · ")}</small></div>
       <div className={`candidate-score ${confidence.tone}`}><span>{confidence.label}</span><strong>{Math.round(candidate.score)}%</strong><small>{rank === 1 ? typeof nextScore === "number" ? `${Math.round(gap)} points above #2` : "Only result" : `${Math.round(gap)} points below #1`}</small></div>
-      <button className="accept-button" disabled={disabled} onClick={onChoose}>{choosing ? <span className="spinner" /> : <Icon name="check" size={15} />}{choosing ? "Choosing…" : "Use this match"}</button>
+      <button className="accept-button" disabled={disabled} onClick={onChoose}>{choosing ? <span className="spinner" /> : <Icon name="check" size={15} />}{choosing ? "Choosing…" : "Choose"}</button>
+    </header>
+    <div className={`candidate-verdict ${verdict.tone}`}><Icon name={verdict.tone === "good" ? "check" : "alert"} size={14} /><b>{verdict.title}</b><span>{verdict.detail}</span></div>
+    <div className="candidate-comparison" aria-label={`Compare option ${rank} with original file`}>
+      <div className="comparison-head"><span>Field</span><span>In your file</span><span>This suggestion</span><span>Evidence</span></div>
+      <CandidateCompareRow label="Title" original={track.current_title} proposed={candidate.title} signal={signals[0]} />
+      <CandidateCompareRow label="Artist" original={track.current_artist} proposed={candidate.artist} signal={signals[1]} />
+      <CandidateCompareRow label="Album" original={track.current_album} proposed={candidate.album} signal={signals[2]} />
+      <CandidateCompareRow label="Audio length" original={formatDuration(track.duration)} proposed={signals[3].value} signal={signals[3]} />
     </div>
-    <div className="candidate-evidence" aria-label="Comparison with original file">
-      {signals.map((signal) => <span className={signal.tone} key={signal.label}><small>{signal.label}</small><b>{signal.value}</b></span>)}
-    </div>
+    <footer className="candidate-meta"><span>{candidateSources(candidate)}</span><i>·</i><span>{audit.coreComplete ? "Complete metadata" : `${audit.score}% metadata`}</span><i>·</i><span>{candidate.cover_url ? "Catalog cover" : "No catalog cover"}</span>{candidate.isrc && <><i>·</i><span>ISRC {candidate.isrc}</span></>}</footer>
   </article>;
+}
+
+function CandidateCompareRow({ label, original, proposed, signal }: { label: string; original?: string; proposed?: string; signal: { value: string; tone: string } }) {
+  return <div className="candidate-compare-row"><small>{label}</small><b className={!original ? "empty" : ""} title={original}>{original || "Not set"}</b><b className={!proposed ? "empty" : ""} title={proposed}>{proposed || "Not found"}</b><span className={signal.tone}>{signal.value}</span></div>;
+}
+
+function ConfidenceBadge({ score }: { score: number }) {
+  const confidence = candidateConfidence(score);
+  return <span className={`confidence-badge ${confidence.tone}`}><b>{Math.round(score)}%</b>{confidence.label}</span>;
 }
 
 function CompareRow({ label, before, after }: { label: string; before?: string; after?: string }) {
   const changed = Boolean(after && after !== before);
-  return <div className="compare-row"><span>{label}</span><p className={!before ? "empty" : ""}>{before || "Not set"}</p><Icon name="arrow" size={14} /><p className={`${!after ? "empty" : ""} ${changed ? "changed" : ""}`}>{after || before || "Not found"}</p></div>;
+  return <div className="compare-row"><span>{label}</span><p className={!before ? "empty" : ""} title={before}>{before || "Not set"}</p><Icon name="arrow" size={14} /><p className={`${!after ? "empty" : ""} ${changed ? "changed" : ""}`} title={after}>{after || before || "Not found"}</p><em className={changed ? "changed" : "same"}>{changed ? "Change" : "Keep"}</em></div>;
 }
 
 function QualityItem({ icon, label, value }: { icon: IconName; label: string; value: string }) {
@@ -619,6 +637,14 @@ function Artwork({ candidate, trackId, size = "small" }: { candidate?: Candidate
     : <span className={`artwork artwork-${size} artwork-missing`}><Icon name="music" size={size === "large" ? 28 : 18} /></span>;
 }
 
+function OriginalArtwork({ track, size = "small" }: { track: Track; size?: "small" | "medium" | "large" }) {
+  const [missing, setMissing] = useState(false);
+  useEffect(() => setMissing(false), [track.id]);
+  return missing
+    ? <span className={`artwork artwork-${size} artwork-missing`}><Icon name="music" size={size === "large" ? 28 : 18} /></span>
+    : <img className={`artwork artwork-${size}`} src={`/api/tracks/${track.id}/artwork/original?v=${encodeURIComponent(track.filename)}`} alt={`Embedded cover from ${track.filename}`} loading="lazy" onError={() => setMissing(true)} />;
+}
+
 function GoogleCheck({ candidate }: { candidate: Candidate }) {
   return <a className="google-check" href={googleMetadataUrl(candidate)} target="_blank" rel="noreferrer"><span>Verify release details on Google</span><Icon name="arrow" size={15} /></a>;
 }
@@ -646,6 +672,13 @@ function candidateSignals(track: Track, candidate: Candidate) {
   ];
 }
 
+function candidateVerdict(score: number, signals: Array<{ tone: string }>) {
+  const warnings = signals.filter((signal) => signal.tone === "warning").length;
+  if (score >= 85 && warnings === 0) return { tone: "good", title: "Good choice", detail: "The identity and audio evidence agree with your file." };
+  if (score >= 70 && warnings <= 1) return { tone: "caution", title: "Likely match", detail: "Most evidence agrees; check the highlighted difference before choosing." };
+  return { tone: "risk", title: "Needs caution", detail: warnings ? `${warnings} important ${warnings === 1 ? "difference" : "differences"} detected. Choose only if you recognize this release.` : "The available evidence is too weak to recommend this automatically." };
+}
+
 function comparisonSignal(label: string, original?: string, proposed?: string, rawSimilarity?: unknown) {
   if (!original?.trim()) return { label, value: "No original", tone: "muted" };
   if (!proposed?.trim()) return { label, value: "Missing", tone: "warning" };
@@ -664,6 +697,7 @@ function durationSignal(rawSimilarity?: unknown) {
 }
 
 function normalizeText(value: string) { return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "").trim(); }
+function formatDuration(seconds?: number) { if (!seconds || !Number.isFinite(seconds)) return undefined; const minutes = Math.floor(seconds / 60); return `${minutes}:${Math.round(seconds % 60).toString().padStart(2, "0")}`; }
 
 function isReview(track: Track) { return track.stage === "review" && !isCompleted(track) && !isProblem(track); }
 function isReady(track: Track) { return track.stage === "ready" && Boolean(track.selected_candidate_id) && !isCompleted(track); }

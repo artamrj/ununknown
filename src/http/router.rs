@@ -32,6 +32,10 @@ pub fn router() -> Router<Arc<AppState>> {
             get(handlers::artwork_preview),
         )
         .route(
+            "/tracks/{id}/artwork/original",
+            get(handlers::original_artwork_preview),
+        )
+        .route(
             "/candidates/{id}/artwork/preview",
             get(handlers::candidate_artwork_preview),
         )

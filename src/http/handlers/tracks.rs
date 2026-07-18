@@ -562,6 +562,20 @@ pub async fn artwork_preview(
     artwork_response(artwork)
 }
 
+pub async fn original_artwork_preview(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<axum::response::Response> {
+    let track = queries::track(&s.pool, id).await?;
+    let artwork = tokio::task::spawn_blocking(move || {
+        tag_writer::read_artwork(std::path::Path::new(&track.path))
+    })
+    .await
+    .map_err(anyhow::Error::from)??
+    .ok_or_else(|| ApiError::not_found("No embedded artwork is available for this track"))?;
+    artwork_response(artwork)
+}
+
 pub async fn candidate_artwork_preview(
     State(s): State<Arc<AppState>>,
     Path(id): Path<CandidateId>,
