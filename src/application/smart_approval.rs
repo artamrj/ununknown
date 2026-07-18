@@ -257,6 +257,7 @@ fn is_supported(candidate: &Evaluated<'_>) -> bool {
             | "radiojavan"
             | "audiomack"
             | "navahang"
+            | "shazam"
             | "genius"
     );
     let corroborated = candidate.sources >= 2
@@ -366,7 +367,7 @@ fn meaningful_album(album: Option<&str>) -> Option<&str> {
 fn provider_trust(provider: &str) -> f64 {
     match provider {
         "spotify" | "itunes" | "deezer" | "musicbrainz" | "radiojavan" | "audiomack"
-        | "navahang" | "genius" => 5.0,
+        | "navahang" | "shazam" | "genius" => 5.0,
         "audd" | "acoustid" | "songrec" => 4.0,
         "discogs" | "theaudiodb" | "soundcloud" => 2.0,
         "lastfm" | "wikidata" | "youtube" => 1.0,

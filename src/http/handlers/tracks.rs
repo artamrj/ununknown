@@ -464,18 +464,24 @@ pub async fn update_artwork(
     let supplied = value.cover_url.trim();
     let parsed = reqwest::Url::parse(supplied).map_err(|_| {
         ApiError::validation(
-            "Enter a valid HTTPS image, Spotify, SoundCloud, Audiomack, Navahang, Radio Javan, or Genius song URL",
+            "Enter a valid HTTPS image, Shazam, Spotify, SoundCloud, Audiomack, Navahang, Radio Javan, or Genius song URL",
         )
     })?;
     if parsed.scheme() != "https" {
         return Err(ApiError::validation("Cover URLs must use HTTPS"));
     }
     let cover_url = if parsed.host_str() == Some("open.spotify.com") {
-        crate::infrastructure::providers::spotify::lookup_url(&s.client, supplied)
+        lookup_spotify_source(&s, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("Spotify link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Spotify did not return cover artwork"))?
+    } else if is_shazam_host(parsed.host_str()) {
+        crate::infrastructure::providers::shazam::lookup_url(&s.pool, &s.client, supplied)
+            .await
+            .map_err(|error| ApiError::validation(format!("Shazam link failed: {error:#}")))?
+            .cover_url
+            .ok_or_else(|| ApiError::validation("Shazam did not return cover artwork"))?
     } else if is_soundcloud_host(parsed.host_str()) {
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, supplied)
             .await
@@ -655,11 +661,13 @@ pub async fn resolve_source(
     let url = value.url.trim();
     let parsed = reqwest::Url::parse(url).map_err(|_| {
         ApiError::validation(
-            "Enter a valid Spotify, SoundCloud, Audiomack, Navahang, Radio Javan, Genius, or YouTube URL",
+            "Enter a valid Shazam, Spotify, SoundCloud, Audiomack, Navahang, Radio Javan, Genius, or YouTube URL",
         )
     })?;
-    let candidate = if parsed.host_str() == Some("open.spotify.com") {
-        crate::infrastructure::providers::spotify::lookup_url(&s.client, url).await
+    let mut candidate = if parsed.host_str() == Some("open.spotify.com") {
+        lookup_spotify_source(&s, url).await
+    } else if is_shazam_host(parsed.host_str()) {
+        crate::infrastructure::providers::shazam::lookup_url(&s.pool, &s.client, url).await
     } else if is_soundcloud_host(parsed.host_str()) {
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
     } else if is_audiomack_host(parsed.host_str()) {
@@ -670,15 +678,104 @@ pub async fn resolve_source(
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
     } else if is_genius_host(parsed.host_str()) {
         crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, url).await
-    } else {
+    } else if is_youtube_host(parsed.host_str()) {
         crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
+    } else {
+        Err(anyhow::anyhow!("this site is not a supported music source"))
     }
     .map_err(|error| ApiError::validation(format!("Source lookup failed: {error:#}")))?;
+    if candidate.provider == "shazam" {
+        enrich_shazam_with_spotify(&s, &mut candidate).await;
+    }
     Ok(Json(candidate))
+}
+
+async fn lookup_spotify_source(s: &AppState, url: &str) -> Result<Candidate> {
+    let cfg = s.config.read().await.clone();
+    crate::infrastructure::providers::spotify::lookup_url(
+        &s.client,
+        &s.spotify_auth,
+        &cfg.spotify_client_id,
+        &cfg.spotify_client_secret,
+        url,
+    )
+    .await
+}
+
+async fn enrich_shazam_with_spotify(s: &AppState, candidate: &mut Candidate) {
+    let cfg = s.config.read().await.clone();
+    if cfg.spotify_client_id.trim().is_empty() || cfg.spotify_client_secret.trim().is_empty() {
+        return;
+    }
+    let isrcs = candidate.isrc.clone().into_iter().collect::<Vec<_>>();
+    let Ok(results) = crate::infrastructure::providers::spotify::search(
+        &s.client,
+        &s.spotify_auth,
+        &cfg.spotify_client_id,
+        &cfg.spotify_client_secret,
+        &candidate.title,
+        Some(&candidate.artist),
+        &isrcs,
+    )
+    .await
+    else {
+        return;
+    };
+    let spotify = results.iter().find(|result| {
+        candidate
+            .isrc
+            .as_deref()
+            .zip(result.isrc.as_deref())
+            .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+    });
+    let Some(spotify) = spotify.or_else(|| results.first()) else {
+        return;
+    };
+    fill_missing_source_fields(candidate, spotify);
+    candidate.score_breakdown = Some(
+        serde_json::json!({
+            "source": "shazam_user_source_url",
+            "sources": ["Shazam", "Spotify"],
+            "user_verified_source": true,
+            "spotify_catalog_enriched": true,
+            "final_score": candidate.score
+        })
+        .to_string(),
+    );
+}
+
+fn fill_missing_source_fields(candidate: &mut Candidate, source: &Candidate) {
+    macro_rules! fill {
+        ($field:ident) => {
+            if candidate.$field.is_none() {
+                candidate.$field = source.$field.clone();
+            }
+        };
+    }
+    fill!(album);
+    fill!(album_artist);
+    fill!(track_number);
+    fill!(track_total);
+    fill!(disc_number);
+    fill!(disc_total);
+    fill!(year);
+    fill!(genre);
+    fill!(composer);
+    fill!(label);
+    fill!(isrc);
+    fill!(cover_url);
+    fill!(release_date);
+    fill!(release_type);
+    fill!(duration_delta);
+    candidate.is_compilation |= source.is_compilation;
 }
 
 fn is_soundcloud_host(host: Option<&str>) -> bool {
     matches!(host, Some("soundcloud.com" | "www.soundcloud.com"))
+}
+
+fn is_shazam_host(host: Option<&str>) -> bool {
+    matches!(host, Some("shazam.com" | "www.shazam.com"))
 }
 
 fn is_audiomack_host(host: Option<&str>) -> bool {
@@ -698,6 +795,13 @@ fn is_radiojavan_host(host: Option<&str>) -> bool {
 
 fn is_genius_host(host: Option<&str>) -> bool {
     matches!(host, Some("genius.com" | "www.genius.com"))
+}
+
+fn is_youtube_host(host: Option<&str>) -> bool {
+    matches!(
+        host,
+        Some("youtube.com" | "www.youtube.com" | "music.youtube.com" | "youtu.be")
+    )
 }
 
 #[cfg(test)]

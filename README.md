@@ -71,6 +71,11 @@ identity, duration, release date, credits, label, and original-resolution artwor
 Audiomack search and pasted song links also work without user credentials and contribute
 track identity, album, duration, genre, release date, credits, label, ISRC when present, and
 original-resolution artwork.
+Pasted Shazam song links require no key and import the recognized title, artist, ISRC, album,
+release date, track position, duration, genre, composer, label, and high-resolution artwork.
+Pasted Spotify track links use the full Spotify catalog metadata when client credentials are
+configured, including ISRC, album, release date, track position, duration, and cover; without
+credentials they continue to provide title and cover through Spotify oEmbed.
 
 ## Product flow
 

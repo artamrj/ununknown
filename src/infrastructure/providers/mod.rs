@@ -10,6 +10,7 @@ pub mod lastfm;
 pub mod musicbrainz;
 pub mod navahang;
 pub mod radiojavan;
+pub mod shazam;
 pub mod songrec;
 pub mod soundcloud;
 pub mod spotify;

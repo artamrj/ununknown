@@ -24,6 +24,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "fpcalc": fpcalc,
             "ffmpeg": ffmpeg,
             "songrec": songrec,
+            "shazam": true,
             "integrity_check": crate::infrastructure::media::integrity::available(),
             "acoustid": !cfg.acoustid_key.is_empty(),
             "audd": !cfg.audd_token.is_empty(),

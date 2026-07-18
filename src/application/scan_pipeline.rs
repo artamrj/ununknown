@@ -2394,6 +2394,7 @@ fn provider_display_name(provider: &str) -> &str {
         "audd" => "AudD",
         "audiomack" => "Audiomack",
         "navahang" => "Navahang",
+        "shazam" => "Shazam",
         "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
         "genius" => "Genius",
@@ -2418,6 +2419,9 @@ fn provider_reason(provider: &str) -> &str {
         }
         "navahang" => {
             "Persian song identity, duration, release date, credits, label, and original artwork"
+        }
+        "shazam" => {
+            "Verified song identity, ISRC, album, release, credits, duration, and high-resolution artwork"
         }
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
         "genius" => "Song identity, credited artist, album, release date, and song artwork",

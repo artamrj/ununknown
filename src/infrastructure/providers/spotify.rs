@@ -64,7 +64,13 @@ pub async fn search(
     Ok(candidates)
 }
 
-pub async fn lookup_url(client: &Client, url: &str) -> Result<Candidate> {
+pub async fn lookup_url(
+    client: &Client,
+    auth: &SpotifyAuth,
+    client_id: &str,
+    client_secret: &str,
+    url: &str,
+) -> Result<Candidate> {
     let parsed = reqwest::Url::parse(url)?;
     if parsed.scheme() != "https"
         || parsed.host_str() != Some("open.spotify.com")
@@ -72,6 +78,64 @@ pub async fn lookup_url(client: &Client, url: &str) -> Result<Candidate> {
     {
         bail!("only HTTPS Spotify track links are supported");
     }
+    let track_id = parsed
+        .path_segments()
+        .and_then(|mut segments| {
+            (segments.next() == Some("track"))
+                .then(|| segments.next())
+                .flatten()
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Spotify track link has no track ID"))?;
+    if !client_id.trim().is_empty()
+        && !client_secret.trim().is_empty()
+        && let Ok(candidate) = lookup_api_track(
+            client,
+            auth,
+            client_id.trim(),
+            client_secret.trim(),
+            track_id,
+        )
+        .await
+    {
+        return Ok(candidate);
+    }
+    lookup_oembed(client, url).await
+}
+
+async fn lookup_api_track(
+    client: &Client,
+    auth: &SpotifyAuth,
+    client_id: &str,
+    client_secret: &str,
+    track_id: &str,
+) -> Result<Candidate> {
+    let token = access_token(client, auth, client_id, client_secret).await?;
+    let raw = client
+        .get(format!("https://api.spotify.com/v1/tracks/{track_id}"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+    let mut candidate = candidate_from_track(&raw)
+        .ok_or_else(|| anyhow::anyhow!("Spotify returned incomplete track metadata"))?;
+    candidate.score = 97.0;
+    candidate.score_breakdown = Some(
+        serde_json::json!({
+            "source": "spotify_user_source_url",
+            "sources": ["Spotify"],
+            "user_verified_source": true,
+            "full_catalog_metadata": true,
+            "final_score": 97.0
+        })
+        .to_string(),
+    );
+    Ok(candidate)
+}
+
+async fn lookup_oembed(client: &Client, url: &str) -> Result<Candidate> {
     let mut endpoint = reqwest::Url::parse("https://open.spotify.com/oembed")?;
     endpoint.query_pairs_mut().append_pair("url", url);
     let raw = crate::infrastructure::resilient_http::get(client, endpoint.as_str())
@@ -152,42 +216,44 @@ fn parse_results(raw: &Value) -> Vec<Candidate> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|track| {
-            if track["type"].as_str().is_some_and(|value| value != "track") {
-                return None;
-            }
-            let release_date = track["album"]["release_date"].as_str().map(str::to_owned);
-            let album_type = track["album"]["album_type"].as_str().map(str::to_owned);
-            Some(Candidate {
-                provider: "spotify".into(),
-                title: track["name"].as_str()?.to_owned(),
-                artist: track["artists"][0]["name"].as_str()?.to_owned(),
-                album: track["album"]["name"].as_str().map(str::to_owned),
-                album_artist: track["album"]["artists"][0]["name"]
-                    .as_str()
-                    .map(str::to_owned),
-                track_number: track["track_number"].as_i64(),
-                track_total: track["album"]["total_tracks"].as_i64(),
-                disc_number: track["disc_number"].as_i64(),
-                year: release_date
-                    .as_deref()
-                    .and_then(|date| date.get(..4))
-                    .map(str::to_owned),
-                release_date,
-                release_type: album_type.clone(),
-                is_compilation: album_type.as_deref() == Some("compilation"),
-                isrc: track["external_ids"]["isrc"].as_str().map(str::to_owned),
-                cover_url: track["album"]["images"]
-                    .as_array()
-                    .and_then(|images| images.first())
-                    .and_then(|image| image["url"].as_str())
-                    .map(str::to_owned),
-                duration_delta: track["duration_ms"].as_f64().map(|value| value / 1000.0),
-                raw_json: track.to_string(),
-                ..Default::default()
-            })
-        })
+        .filter_map(candidate_from_track)
         .collect()
+}
+
+fn candidate_from_track(track: &Value) -> Option<Candidate> {
+    if track["type"].as_str().is_some_and(|value| value != "track") {
+        return None;
+    }
+    let release_date = track["album"]["release_date"].as_str().map(str::to_owned);
+    let album_type = track["album"]["album_type"].as_str().map(str::to_owned);
+    Some(Candidate {
+        provider: "spotify".into(),
+        title: track["name"].as_str()?.to_owned(),
+        artist: track["artists"][0]["name"].as_str()?.to_owned(),
+        album: track["album"]["name"].as_str().map(str::to_owned),
+        album_artist: track["album"]["artists"][0]["name"]
+            .as_str()
+            .map(str::to_owned),
+        track_number: track["track_number"].as_i64(),
+        track_total: track["album"]["total_tracks"].as_i64(),
+        disc_number: track["disc_number"].as_i64(),
+        year: release_date
+            .as_deref()
+            .and_then(|date| date.get(..4))
+            .map(str::to_owned),
+        release_date,
+        release_type: album_type.clone(),
+        is_compilation: album_type.as_deref() == Some("compilation"),
+        isrc: track["external_ids"]["isrc"].as_str().map(str::to_owned),
+        cover_url: track["album"]["images"]
+            .as_array()
+            .and_then(|images| images.first())
+            .and_then(|image| image["url"].as_str())
+            .map(str::to_owned),
+        duration_delta: track["duration_ms"].as_f64().map(|value| value / 1000.0),
+        raw_json: track.to_string(),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

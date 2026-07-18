@@ -362,6 +362,7 @@ fn provider_name(provider: &str) -> &str {
         "songrec" => "SongRec / Shazam",
         "audiomack" => "Audiomack",
         "navahang" => "Navahang",
+        "shazam" => "Shazam",
         "genius" => "Genius",
         "soundcloud" => "SoundCloud",
         _ => provider,
