@@ -1,8 +1,20 @@
 use super::*;
 use crate::app::ActivityLogEntry;
+use crate::infrastructure::fingerprint_cache;
 use crate::infrastructure::media::replaygain;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use tokio::io::AsyncReadExt;
+
+#[derive(Clone, Debug)]
+struct DuplicateSignature {
+    isrc: Option<String>,
+    title_artist: String,
+    duration: Option<f64>,
+    fingerprint: Option<String>,
+    file_hash: Option<String>,
+}
 
 pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     if s.workflow_running().await {
@@ -21,9 +33,23 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
             "No identified tracks are ready to write",
         ));
     }
-    let mut items = Vec::new();
+    let selected_count = selected.len();
+    let mut items: Vec<PreviewItem> = Vec::new();
+    let mut signatures = Vec::new();
     let mut reserved_destinations = HashSet::new();
     for (track, candidate) in selected {
+        let signature = duplicate_signature(&s.pool, &track, &candidate).await?;
+        if let Some(index) = signatures
+            .iter()
+            .position(|existing| recordings_are_duplicates(existing, &signature))
+        {
+            items[index].duplicates.push(DuplicateSource {
+                track_id: track.id,
+                filename: track.filename,
+                current_path: track.path,
+            });
+            continue;
+        }
         let dest = unique_destination(
             PathBuf::from(destination(&cfg, &track, &candidate)?),
             &mut reserved_destinations,
@@ -33,9 +59,12 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
             filename: track.filename.clone(),
             current_path: track.path.clone(),
             destination_path: dest.to_string_lossy().into_owned(),
+            duplicates: Vec::new(),
         });
+        signatures.push(signature);
     }
-    let count = items.len();
+    let outputs = items.len();
+    let duplicates_skipped = selected_count.saturating_sub(outputs);
     let delete_source_after_write = cfg.delete_source_after_write;
     s.start_apply_workflow().await;
     let state = s.clone();
@@ -55,7 +84,104 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
                 .await;
         }
     });
-    Ok(Json(serde_json::json!({"started": true, "count": count})))
+    Ok(Json(serde_json::json!({
+        "started": true,
+        "count": selected_count,
+        "outputs": outputs,
+        "duplicates_skipped": duplicates_skipped
+    })))
+}
+
+async fn duplicate_signature(
+    pool: &sqlx::SqlitePool,
+    track: &Track,
+    candidate: &Candidate,
+) -> Result<DuplicateSignature> {
+    let path = std::path::Path::new(&track.path);
+    let fingerprint = fingerprint_cache::cached(pool, path)
+        .await?
+        .map(|value| value.fingerprint);
+    let file_hash = if fingerprint.is_none() {
+        Some(file_sha256(path).await?)
+    } else {
+        None
+    };
+    Ok(DuplicateSignature {
+        isrc: candidate
+            .isrc
+            .as_deref()
+            .map(normalize_isrc)
+            .filter(|value| !value.is_empty()),
+        title_artist: format!(
+            "{}:{}",
+            normalize_identity(&candidate.artist),
+            normalize_identity(&candidate.title)
+        ),
+        duration: track.duration,
+        fingerprint,
+        file_hash,
+    })
+}
+
+fn recordings_are_duplicates(left: &DuplicateSignature, right: &DuplicateSignature) -> bool {
+    let duration_close = left
+        .duration
+        .zip(right.duration)
+        .is_none_or(|(left, right)| (left - right).abs() <= 3.0);
+    if !duration_close {
+        return false;
+    }
+    let same_isrc = left
+        .isrc
+        .as_deref()
+        .zip(right.isrc.as_deref())
+        .is_some_and(|(left, right)| left == right);
+    if same_isrc {
+        return true;
+    }
+    let same_audio = left
+        .fingerprint
+        .as_deref()
+        .zip(right.fingerprint.as_deref())
+        .is_some_and(|(left, right)| left == right)
+        || left
+            .file_hash
+            .as_deref()
+            .zip(right.file_hash.as_deref())
+            .is_some_and(|(left, right)| left == right);
+    same_audio
+        && (left.title_artist == right.title_artist
+            || left.fingerprint.is_some() && right.fingerprint.is_some())
+}
+
+fn normalize_isrc(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn normalize_identity(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+async fn file_sha256(path: &std::path::Path) -> Result<String> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 128 * 1024];
+    loop {
+        let count = file.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf {
@@ -301,12 +427,76 @@ pub async fn apply(
                     .context(serde_json::json!({"output": final_path.display().to_string()})),
             )
             .await;
+            for duplicate in &item.duplicates {
+                if let Err(error) =
+                    finish_duplicate(&s, duplicate, final_path, delete_source_after_write).await
+                {
+                    s.increment_failed().await;
+                    let detail = format!("{error:#}");
+                    let _ = sqlx::query(
+                        "UPDATE tracks SET status='failed',stage='failed',error=?,stage_message='Duplicate output was avoided, but source cleanup failed',updated_at=? WHERE id=?",
+                    )
+                    .bind(&detail)
+                    .bind(Utc::now().to_rfc3339())
+                    .bind(duplicate.track_id.0)
+                    .execute(&s.pool)
+                    .await;
+                    s.log_entry(
+                        ActivityLogEntry::new(
+                            "error",
+                            "deduplicate",
+                            "Duplicate output was avoided, but source cleanup failed",
+                        )
+                        .file(duplicate.filename.clone())
+                        .error_text(detail),
+                    )
+                    .await;
+                }
+            }
             sqlx::query("DELETE FROM tracks WHERE id=?")
                 .bind(item.track_id.0)
                 .execute(&s.pool)
                 .await?;
         }
     }
+    Ok(())
+}
+
+async fn finish_duplicate(
+    state: &Arc<AppState>,
+    duplicate: &DuplicateSource,
+    output: &std::path::Path,
+    delete_source_after_write: bool,
+) -> Result<()> {
+    let source = std::path::Path::new(&duplicate.current_path);
+    if delete_source_after_write {
+        if paths_resolve_to_same_target(source, output).await? {
+            anyhow::bail!(
+                "refusing to remove duplicate source because it is the corrected output: {}",
+                source.display()
+            );
+        }
+        remove_source_after_output(source, output).await?;
+    }
+    sqlx::query("DELETE FROM tracks WHERE id=?")
+        .bind(duplicate.track_id.0)
+        .execute(&state.pool)
+        .await?;
+    state
+        .log_entry(
+            ActivityLogEntry::new(
+                "ok",
+                "deduplicate",
+                "Skipped duplicate recording; kept one corrected output",
+            )
+            .file(duplicate.filename.clone())
+            .context(serde_json::json!({
+                "source": duplicate.current_path,
+                "output": output.display().to_string(),
+                "source_removed": delete_source_after_write
+            })),
+        )
+        .await;
     Ok(())
 }
 
@@ -451,6 +641,56 @@ mod tests {
         );
     }
 
+    fn signature(
+        isrc: Option<&str>,
+        identity: &str,
+        duration: f64,
+        fingerprint: Option<&str>,
+        file_hash: Option<&str>,
+    ) -> DuplicateSignature {
+        DuplicateSignature {
+            isrc: isrc.map(normalize_isrc),
+            title_artist: identity.into(),
+            duration: Some(duration),
+            fingerprint: fingerprint.map(str::to_owned),
+            file_hash: file_hash.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn same_isrc_with_close_duration_is_one_output() {
+        let first = signature(
+            Some("QZ-DA5-20-82376"),
+            "twenty7:eyesonyou",
+            148.0,
+            None,
+            None,
+        );
+        let second = signature(Some("qzda52082376"), "twenty7:eyesonyou", 149.0, None, None);
+        assert!(recordings_are_duplicates(&first, &second));
+    }
+
+    #[test]
+    fn audio_fingerprint_detects_duplicate_with_different_tags() {
+        let first = signature(None, "bad:tags", 238.0, Some("audio-fp"), None);
+        let second = signature(None, "hoomaan:darling", 238.4, Some("audio-fp"), None);
+        assert!(recordings_are_duplicates(&first, &second));
+    }
+
+    #[test]
+    fn same_title_does_not_hide_a_different_recording() {
+        let first = signature(None, "artist:song", 180.0, Some("first"), None);
+        let second = signature(None, "artist:song", 180.0, Some("second"), None);
+        assert!(!recordings_are_duplicates(&first, &second));
+    }
+
+    #[test]
+    fn large_duration_difference_is_not_deduplicated() {
+        let first = signature(Some("US1234567890"), "artist:song", 180.0, None, None);
+        let second = signature(Some("US1234567890"), "artist:song", 240.0, None, None);
+        assert!(!recordings_are_duplicates(&first, &second));
+    }
+
     #[test]
     fn temporary_destination_keeps_audio_extension() {
         assert_eq!(
@@ -473,6 +713,47 @@ mod tests {
         remove_source_after_output(&source, &output).await.unwrap();
         assert!(!source.exists());
         assert_eq!(tokio::fs::read(&output).await.unwrap(), b"corrected");
+    }
+
+    #[tokio::test]
+    async fn duplicate_source_is_removed_after_the_kept_output_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("duplicates.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let source = directory.path().join("duplicate.mp3");
+        let output = directory.path().join("Artist - Song.mp3");
+        tokio::fs::write(&source, b"duplicate").await.unwrap();
+        tokio::fs::write(&output, b"corrected").await.unwrap();
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES(?,'duplicate.mp3','selected',0,'now','now','now','ready')")
+            .bind(source.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let state = Arc::new(AppState::new(
+            crate::config::Config::default(),
+            pool.clone(),
+        ));
+        let duplicate = DuplicateSource {
+            track_id: TrackId(track_id),
+            filename: "duplicate.mp3".into(),
+            current_path: source.to_string_lossy().into_owned(),
+        };
+
+        finish_duplicate(&state, &duplicate, &output, true)
+            .await
+            .unwrap();
+
+        assert!(!source.exists());
+        assert!(output.exists());
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE id=?")
+            .bind(track_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]

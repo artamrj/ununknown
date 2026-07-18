@@ -64,6 +64,22 @@ where
     })
 }
 
+pub async fn cached(pool: &SqlitePool, path: &Path) -> Result<Option<FingerprintResult>> {
+    let identity = file_identity(path).await?;
+    Ok(get(
+        pool,
+        path.to_string_lossy().as_ref(),
+        identity.size,
+        identity.mtime,
+    )
+    .await?
+    .map(|(fingerprint, duration)| FingerprintResult {
+        fingerprint,
+        duration,
+        source: FingerprintSource::Cache,
+    }))
+}
+
 async fn get(
     pool: &SqlitePool,
     path: &str,

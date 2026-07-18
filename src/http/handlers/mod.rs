@@ -150,6 +150,14 @@ pub struct PreviewItem {
     filename: String,
     current_path: String,
     destination_path: String,
+    duplicates: Vec<DuplicateSource>,
+}
+
+#[derive(Clone)]
+pub struct DuplicateSource {
+    track_id: TrackId,
+    filename: String,
+    current_path: String,
 }
 
 #[derive(Deserialize)]

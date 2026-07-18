@@ -225,7 +225,10 @@ export function App() {
     setError("");
     try {
       await saveSetup();
-      await api("/write", { method: "POST", body: "{}" });
+      const result = await api<{ count: number; outputs: number; duplicates_skipped: number }>("/write", { method: "POST", body: "{}" });
+      setNotice(result.duplicates_skipped
+        ? `Writing ${result.outputs} unique ${result.outputs === 1 ? "output" : "outputs"}; ${result.duplicates_skipped} duplicate ${result.duplicates_skipped === 1 ? "recording was" : "recordings were"} skipped.`
+        : `Writing ${result.outputs} ${result.outputs === 1 ? "output" : "outputs"}.`);
       await refresh();
     } catch (reason) {
       setError((reason as Error).message);

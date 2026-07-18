@@ -92,6 +92,12 @@ credentials they continue to provide title and cover through Spotify oEmbed.
    **Undo identification** without discarding its candidate choices.
 5. Select **Write corrected files**.
 
+Before writing, the output planner removes duplicate recordings from the batch. It uses a
+compatible ISRC first, then cached Chromaprint audio fingerprints, with a whole-file SHA-256
+fallback. Only one corrected output is written for a duplicate recording. Different audio,
+remixes, live versions, and materially different durations remain separate and receive numbered
+filenames when their corrected names collide. Existing output files are never bulk-deleted.
+
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,
 `/api/identify`, `/api/tracks`, and `/api/write`. There are no Docker,
 deployment, authentication, background-job, or production-build layers.
