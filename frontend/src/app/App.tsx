@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/api/client";
-import type { AutoApproveResult, Candidate, Setup, Track, TrackPage, Workflow } from "@/api/types";
+import type { AutoApproveResult, Candidate, RetryIssuesResult, Setup, Track, TrackPage, Workflow } from "@/api/types";
 import { Icon, type IconName } from "./Icons";
 
 const emptySetup: Setup = { input_dir: "", output_dir: "", delete_source_after_write: false, sources: {} };
@@ -27,6 +27,7 @@ export function App() {
   const [connected, setConnected] = useState(true);
   const [saving, setSaving] = useState(false);
   const [autoApproving, setAutoApproving] = useState(false);
+  const [retryingIssues, setRetryingIssues] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileInspector, setMobileInspector] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => {
@@ -195,6 +196,30 @@ export function App() {
     }
   };
 
+  const retryIssues = async () => {
+    const damaged = tracks.filter((track) => isProblem(track) && track.status === "corrupt").length;
+    if (damaged && !confirm(`Ununknown will try to salvage ${damaged} damaged ${damaged === 1 ? "file" : "files"} by skipping unreadable frames and re-encoding the valid audio. Each damaged original will be kept beside the repaired file as an .ununknown-damaged backup. Continue?`)) return;
+    setRetryingIssues(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api<RetryIssuesResult>("/tracks/retry-issues", { method: "POST", body: "{}" });
+      await refresh();
+      if (result.started) {
+        setNotice([
+          `Checking ${result.queued} ${result.queued === 1 ? "file" : "files"}, repairing damaged streams, and retrying identification.`,
+          result.unavailable ? `${result.unavailable} still missing.` : "",
+        ].filter(Boolean).join(" "));
+      } else {
+        setNotice(result.unavailable ? `${result.unavailable} source ${result.unavailable === 1 ? "file is" : "files are"} still missing. Restore them to their original locations, then check again.` : "No issues need to be checked.");
+      }
+    } catch (reason) {
+      setError((reason as Error).message);
+    } finally {
+      setRetryingIssues(false);
+    }
+  };
+
   const write = async () => {
     if (setup.delete_source_after_write && !confirm("Corrected files will be written first. Each original will then be permanently removed only after its output succeeds. Continue?")) return;
     setError("");
@@ -318,6 +343,7 @@ export function App() {
             <label className="search-field"><Icon name="search" size={16} /><span className="sr-only">Search queue</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search title, artist, album…" /></label>
             <button className="queue-order-button compact-button" onClick={cycleQueueOrder} aria-label={`Order tracks by ${queueOrderLabels[queueOrder]}`} title={`Current order: ${queueOrderLabels[queueOrder]}. Click to change.`}><Icon name="menu" size={14} /><span>{queueOrderLabels[queueOrder]}</span></button>
             {autoApprovable > 0 && filter === "review" && <button className="compact-button accent" disabled={autoApproving} onClick={autoApprove}><Icon name="sparkles" size={15} />{autoApproving ? "Checking…" : `Auto-select ${autoApprovable}`}</button>}
+            {counts.problems > 0 && filter === "problems" && <button className="compact-button accent issue-retry-button" disabled={busy || retryingIssues} onClick={() => void retryIssues()}>{retryingIssues || busy ? <span className="spinner" /> : <Icon name="refresh" size={15} />}{retryingIssues || busy ? "Checking…" : `Check & fix ${counts.problems}`}</button>}
           </header>
 
           <div className="track-list" role="list" aria-label="Music queue">

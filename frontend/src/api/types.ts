@@ -3,4 +3,5 @@ export type Candidate = { id: number; provider?: string; title?: string; artist?
 export type Track = { id: number; filename: string; duration?: number; current_title?: string; current_artist?: string; current_album?: string; current_album_artist?: string; current_track_number?: number; selected_candidate_id?: number; status: string; stage: string; stage_message?: string; error?: string; is_missing: boolean; candidates: Candidate[] };
 export type TrackPage = { items: Track[]; total: number };
 export type AutoApproveResult = { approved: number; remaining: number; low_confidence: number; unavailable: number };
+export type RetryIssuesResult = { started: boolean; queued: number; unavailable: number };
 export type Workflow = { phase: "idle" | "scan" | "fetch" | "preview" | "apply" | "finish" | "failed"; message: string; current_file?: string; current: number; total: number; processed: number; matched: number; unmatched: number; failed: number };

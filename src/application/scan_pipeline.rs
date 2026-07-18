@@ -104,11 +104,43 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             )
             .await;
     }
+    run_files(
+        state,
+        files,
+        "Starting staged matching",
+        "Matching complete",
+    )
+    .await
+}
+
+/// Re-run the complete integrity and identification pipeline for a selected set
+/// of source files. Unlike a full scan, this keeps the rest of the workspace
+/// intact and replaces only the outcomes for the supplied paths.
+pub async fn retry_files(state: Arc<AppState>, files: Vec<PathBuf>) -> Result<()> {
+    run_files(
+        state,
+        files,
+        "Checking files with issues",
+        "Issue check complete",
+    )
+    .await
+}
+
+async fn run_files(
+    state: Arc<AppState>,
+    mut files: Vec<PathBuf>,
+    starting_message: &'static str,
+    completion_message: &'static str,
+) -> Result<()> {
+    let cfg = state.config.read().await.clone();
+    files.sort();
+    files.dedup();
+    let total = files.len();
     state
         .set_workflow(
             WorkflowPhase::Fetch,
             "fetch",
-            "Starting staged matching",
+            starting_message,
             0,
             total,
             None,
@@ -184,7 +216,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             if cancelled {
                 "Scan stopped"
             } else {
-                "Matching complete"
+                completion_message
             },
         )
         .await;

@@ -23,7 +23,7 @@ mod tracks;
 mod workspace;
 
 pub use apply::start_apply;
-pub use scan::{start_scan, stop_scan};
+pub use scan::{retry_issues, start_scan, stop_scan};
 pub use settings::{setup, update_setup};
 pub use tracks::{
     artwork_preview, auto_approve_review, candidate_artwork_preview, list_tracks, manual_candidate,
