@@ -9,6 +9,7 @@ pub mod itunes;
 pub mod lastfm;
 pub mod musicbrainz;
 pub mod radiojavan;
+pub mod songrec;
 pub mod soundcloud;
 pub mod spotify;
 pub mod theaudiodb;

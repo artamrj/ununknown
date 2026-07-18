@@ -3,9 +3,9 @@
 Ununknown has one job: correct metadata for a folder of music.
 
 It first checks that each audio stream can be decoded, then tries every configured
-automatic source (audio fingerprinting, MusicBrainz, Apple Music, Deezer, Radio Javan, Audiomack, Genius,
+automatic source (audio fingerprinting, SongRec/Shazam, MusicBrainz, Apple Music, Deezer, Radio Javan, Audiomack, Genius,
 Spotify, Discogs, Last.fm, TheAudioDB, Wikidata, YouTube, and Cover Art Archive). Difficult
-tracks can optionally use AudD audio recognition. Reliable matches are selected
+tracks use SongRec when installed and can optionally use AudD audio recognition. Reliable matches are selected
 automatically. Uncertain and unmatched files stay in a short review list where you
 can choose a candidate or enter metadata manually. Corrected files are first written
 as separate copies with ReplayGain metadata. Damaged audio is reported and blocked
@@ -43,6 +43,13 @@ fields keep a source disabled.
   <https://acoustid.org/new-application>.
 - **AudD** is a fallback for difficult files that the free catalogs and AcoustID
   could not identify. Create a token at <https://dashboard.audd.io/>.
+- **SongRec / Shazam** recognizes difficult audio from a local fingerprint and then
+  feeds the recognized artist and title back through the metadata catalogs to find
+  album data, artwork, credits, release information, and ISRC. Ununknown supports
+  both the maintained `songrec` executable and `songrec-lib-cli`; `songrec` is
+  preferred. Install it with `cargo install songrec --no-default-features --features
+  ffmpeg`, or set `UNUNKNOWN_SONGREC_BIN` to the executable path. Recognition is
+  optional, cached for repeat scans, and limited to one request at a time.
 - **Spotify** verifies identified tracks by ISRC and contributes release, artwork,
   track number, and date metadata. Create an app at
   <https://developer.spotify.com/dashboard> and enter its client ID and secret.
@@ -53,8 +60,9 @@ fields keep a source disabled.
   music. Enable YouTube Data API v3 and create a key in
   <https://console.cloud.google.com/apis/library/youtube.googleapis.com>.
 
-The pipeline searches free catalogs first, invokes AudD only for unresolved audio,
-then uses identifiers such as ISRC to cross-check Spotify. A provider result is not
+The pipeline searches free catalogs first, invokes SongRec/Shazam for unresolved
+audio, uses AudD only if SongRec did not identify it, then uses identifiers such as
+ISRC to cross-check Spotify. A provider result is not
 automatically written unless it passes the existing confidence and ambiguity rules.
 Radio Javan search and song-link lookup require no key and contribute Persian music
 metadata, duration, release date, and original-resolution cover art.

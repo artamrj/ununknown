@@ -7,6 +7,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .output()
         .is_ok();
     let ffmpeg = crate::infrastructure::media::replaygain::available();
+    let songrec = crate::infrastructure::providers::songrec::available();
     Json(serde_json::json!({
         "input_dir": cfg.input_dir,
         "output_dir": cfg.output_dir,
@@ -21,6 +22,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "cover_art_archive": true,
             "fpcalc": fpcalc,
             "ffmpeg": ffmpeg,
+            "songrec": songrec,
             "integrity_check": crate::infrastructure::media::integrity::available(),
             "acoustid": !cfg.acoustid_key.is_empty(),
             "audd": !cfg.audd_token.is_empty(),

@@ -361,7 +361,7 @@ fn provider_trust(provider: &str) -> f64 {
         "spotify" | "itunes" | "deezer" | "musicbrainz" | "radiojavan" | "audiomack" | "genius" => {
             5.0
         }
-        "audd" | "acoustid" => 4.0,
+        "audd" | "acoustid" | "songrec" => 4.0,
         "discogs" | "theaudiodb" | "soundcloud" => 2.0,
         "lastfm" | "wikidata" | "youtube" => 1.0,
         _ => 0.0,

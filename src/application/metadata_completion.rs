@@ -555,7 +555,7 @@ fn normalize_empty_fields(candidate: &mut Candidate) {
 fn provider_priority(provider: &str) -> u8 {
     match provider {
         "musicbrainz" | "itunes" | "spotify" | "radiojavan" | "audiomack" | "genius" => 6,
-        "deezer" | "audd" => 5,
+        "deezer" | "audd" | "songrec" => 5,
         "discogs" | "theaudiodb" => 4,
         "lastfm" | "soundcloud" => 3,
         _ => 2,
@@ -566,7 +566,7 @@ fn artwork_priority(provider: &str) -> u8 {
     match provider {
         "itunes" | "spotify" => 8,
         "musicbrainz" | "radiojavan" | "audiomack" | "genius" => 7,
-        "soundcloud" => 6,
+        "soundcloud" | "songrec" => 6,
         "deezer" => 5,
         "discogs" | "theaudiodb" => 4,
         _ => 2,
@@ -631,6 +631,7 @@ fn provider_name(provider: &str) -> &str {
         "itunes" => "Apple Music",
         "musicbrainz" => "MusicBrainz",
         "radiojavan" => "Radio Javan",
+        "songrec" => "SongRec / Shazam",
         "audiomack" => "Audiomack",
         "genius" => "Genius",
         "theaudiodb" => "TheAudioDB",

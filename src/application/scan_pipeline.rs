@@ -22,6 +22,7 @@ struct PipelineLimits {
     metadata: Arc<Semaphore>,
     fingerprint: Arc<Semaphore>,
     acoustid: Arc<Semaphore>,
+    songrec: Arc<Semaphore>,
     disabled_providers: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -151,6 +152,10 @@ async fn run_files(
         metadata: Arc::new(Semaphore::new(cfg.scan_workers)),
         fingerprint: Arc::new(Semaphore::new(cfg.fingerprint_workers)),
         acoustid: Arc::new(Semaphore::new(cfg.lookup_workers)),
+        // Two workers keep first-time recognition from serializing the whole
+        // library while still avoiding the burst traffic that triggers Shazam
+        // rate limits.
+        songrec: Arc::new(Semaphore::new(2)),
         disabled_providers: Arc::new(Mutex::new(HashSet::new())),
     });
     let (persist_tx, persist_rx) = mpsc::channel(25);
@@ -754,8 +759,22 @@ async fn identify(
         out.extend(query_genius(state, limits, current, filename).await);
     }
     let has_strong_free_candidate = out.iter().any(|candidate| candidate.score >= 90.0);
+    let mut recognized_info = None;
+    let mut songrec_matched = false;
+    if !acoustid_matched && !has_strong_free_candidate && providers::songrec::available() {
+        let songrec_candidates =
+            query_songrec(state, limits, path, fingerprint.value, filename).await;
+        if let Some(recognized) = songrec_candidates.first() {
+            let info = audio_info_from_recognition(recognized, current);
+            out.extend(query_recognized_catalogs(state, cfg, limits, &info, filename).await);
+            recognized_info = Some(info);
+            songrec_matched = true;
+        }
+        out.extend(songrec_candidates);
+    }
     if !acoustid_matched
         && !has_strong_free_candidate
+        && !songrec_matched
         && !cfg.audd_token.trim().is_empty()
         && !fingerprint.value.is_empty()
     {
@@ -770,52 +789,37 @@ async fn identify(
         )
         .await;
         if let Some(recognized) = audd_candidates.first() {
-            let recognized_info = audio::AudioInfo {
-                title: Some(recognized.title.clone()),
-                artist: Some(recognized.artist.clone()),
-                album: recognized.album.clone(),
-                album_artist: recognized.album_artist.clone(),
-                duration: current.duration,
-                format: current.format.clone(),
-                ..Default::default()
-            };
-            match query_itunes(state, cfg, &recognized_info, filename).await {
-                Ok(candidates) => out.extend(candidates),
-                Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
-            }
-            out.extend(query_deezer(state, limits, &recognized_info, filename).await);
-            out.extend(query_radiojavan(state, limits, &recognized_info, filename).await);
-            out.extend(query_audiomack(state, limits, &recognized_info, filename).await);
-            if needs_genius_enrichment(&out) {
-                out.extend(query_genius(state, limits, &recognized_info, filename).await);
-            }
+            let info = audio_info_from_recognition(recognized, current);
+            out.extend(query_recognized_catalogs(state, cfg, limits, &info, filename).await);
+            recognized_info = Some(info);
         }
         out.extend(audd_candidates);
     }
+    let catalog_info = recognized_info.as_ref().unwrap_or(current);
     if !cfg.spotify_client_id.trim().is_empty() && !cfg.spotify_client_secret.trim().is_empty() {
         let isrcs = out
             .iter()
             .filter_map(|candidate| candidate.isrc.clone())
             .collect::<Vec<_>>();
-        out.extend(query_spotify(state, limits, cfg, current, filename, &isrcs).await);
+        out.extend(query_spotify(state, limits, cfg, catalog_info, filename, &isrcs).await);
     }
     if !cfg.soundcloud_client_id.trim().is_empty()
         && !cfg.soundcloud_client_secret.trim().is_empty()
     {
-        out.extend(query_soundcloud(state, limits, cfg, current, filename).await);
+        out.extend(query_soundcloud(state, limits, cfg, catalog_info, filename).await);
     }
-    out.extend(query_discogs(state, cfg, limits, current, filename).await);
-    out.extend(query_lastfm(state, cfg, limits, current, filename).await);
-    out.extend(query_theaudiodb(state, cfg, limits, current, filename).await);
-    out.extend(query_wikidata(state, limits, current, filename).await);
+    out.extend(query_discogs(state, cfg, limits, catalog_info, filename).await);
+    out.extend(query_lastfm(state, cfg, limits, catalog_info, filename).await);
+    out.extend(query_theaudiodb(state, cfg, limits, catalog_info, filename).await);
+    out.extend(query_wikidata(state, limits, catalog_info, filename).await);
     for candidate in &mut out {
         normalize_candidate_credits(candidate);
     }
     apply_source_agreement(&mut out)?;
     enrich_artwork_fallbacks(&mut out)?;
     apply_artwork_override(&state.pool, path, &mut out).await?;
-    let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, current) {
-        if let Some(artist) = current.artist.as_deref() {
+    let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, catalog_info) {
+        if let Some(artist) = catalog_info.artist.as_deref() {
             match providers::wikidata::artist_genres(&state.pool, &state.client, artist).await {
                 Ok(genres) => genres,
                 Err(error) => {
@@ -839,7 +843,7 @@ async fn identify(
     } else {
         Vec::new()
     };
-    crate::domain::genre::enrich(&mut out, current, &artist_genres)?;
+    crate::domain::genre::enrich(&mut out, catalog_info, &artist_genres)?;
     if out.is_empty() {
         state
             .log(
@@ -873,6 +877,76 @@ fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
         1
     } else {
         0
+    }
+}
+
+fn audio_info_from_recognition(
+    recognized: &providers::Candidate,
+    current: &audio::AudioInfo,
+) -> audio::AudioInfo {
+    audio::AudioInfo {
+        title: Some(recognized.title.clone()),
+        artist: Some(recognized.artist.clone()),
+        album: recognized.album.clone(),
+        album_artist: recognized.album_artist.clone(),
+        duration: current.duration,
+        format: current.format.clone(),
+        ..Default::default()
+    }
+}
+
+async fn query_recognized_catalogs(
+    state: &Arc<AppState>,
+    cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
+    recognized: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    let mut out = Vec::new();
+    match query_musicbrainz_text(state, cfg, recognized, filename).await {
+        Ok(candidates) => out.extend(candidates),
+        Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
+    }
+    match query_itunes(state, cfg, recognized, filename).await {
+        Ok(candidates) => out.extend(candidates),
+        Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
+    }
+    out.extend(query_deezer(state, limits, recognized, filename).await);
+    out.extend(query_radiojavan(state, limits, recognized, filename).await);
+    out.extend(query_audiomack(state, limits, recognized, filename).await);
+    if needs_genius_enrichment(&out) {
+        out.extend(query_genius(state, limits, recognized, filename).await);
+    }
+    out
+}
+
+async fn query_songrec(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    path: &Path,
+    fingerprint: &str,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "songrec").await {
+        return Vec::new();
+    }
+    let started = Instant::now();
+    let result = match limits.songrec.acquire().await {
+        Ok(_permit) => providers::songrec::recognize(&state.pool, path, fingerprint).await,
+        Err(error) => Err(error.into()),
+    };
+    match result {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                normalize_candidate_credits(candidate);
+            }
+            log_provider_count(state, filename, "songrec", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "songrec", error).await;
+            Vec::new()
+        }
     }
 }
 
@@ -2272,6 +2346,7 @@ fn provider_display_name(provider: &str) -> &str {
         "lastfm" => "Last.fm",
         "genius" => "Genius",
         "radiojavan" => "Radio Javan",
+        "songrec" => "SongRec / Shazam",
         "soundcloud" => "SoundCloud",
         "spotify" => "Spotify",
         "theaudiodb" => "TheAudioDB",
@@ -2292,6 +2367,9 @@ fn provider_reason(provider: &str) -> &str {
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
         "genius" => "Song identity, credited artist, album, release date, and song artwork",
         "radiojavan" => "Persian track title, artist, duration, release date, and original artwork",
+        "songrec" => {
+            "Audio fingerprint recognition through Shazam, with catalog enrichment for metadata and ISRC"
+        }
         "soundcloud" => "Creator-uploaded title, artist, genre, date, duration, and artwork",
         "spotify" => "ISRC, release, track position, duration, and cover metadata",
         "theaudiodb" => "Track, album, genre, and image enrichment",
