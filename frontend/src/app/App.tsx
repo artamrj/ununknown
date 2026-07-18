@@ -372,13 +372,16 @@ function NavButton({ active, label, count, className = "", onClick }: { active: 
 }
 
 function TrackRow({ track, active, onClick }: { track: Track; active: boolean; onClick: () => void }) {
-  const displayTitle = track.current_title || fileStem(track.filename);
-  const artist = track.current_artist || "Unknown artist";
+  const chosen = (isReady(track) || isCompleted(track)) ? selectedCandidate(track) : undefined;
+  const displayTitle = chosen?.title || track.current_title || fileStem(track.filename);
+  const artist = chosen?.artist || track.current_artist || "Unknown artist";
+  const album = chosen?.album || track.current_album || "Album not set";
+  const filename = chosen ? outputFilename(track, chosen) : track.filename;
   return (
     <button className={`track-row ${active ? "selected" : ""}`} onClick={onClick} role="listitem" aria-current={active ? "true" : undefined}>
-      <OriginalArtwork track={track} size="small" />
-      <span className="row-identity"><b>{displayTitle}</b><small>{artist}<i>·</i>{track.current_album || "Album not set"}</small></span>
-      <span className="row-file"><small>Original file</small><b title={track.filename}>{track.filename}</b></span>
+      {chosen ? <Artwork candidate={chosen} trackId={track.id} size="small" /> : <OriginalArtwork track={track} size="small" />}
+      <span className="row-identity"><b>{displayTitle}</b><small>{artist}<i>·</i>{album}</small></span>
+      <span className={`row-file ${chosen ? "chosen" : ""}`}><small>{chosen ? isCompleted(track) ? "Written file" : "New filename" : "Original file"}</small><b title={filename}>{filename}</b></span>
       <TrackStatus track={track} />
       <Icon name="chevron" size={16} className="row-chevron" />
     </button>
@@ -393,6 +396,13 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   const [actionError, setActionError] = useState("");
   const candidate = selectedCandidate(track);
   const corrupt = track.status === "corrupt";
+  const showChosenOverview = Boolean(candidate && (isReady(track) || isCompleted(track)));
+  const overviewTitle = showChosenOverview ? candidate?.title : track.current_title;
+  const overviewArtist = showChosenOverview ? candidate?.artist : track.current_artist;
+  const overviewAlbum = showChosenOverview ? candidate?.album : track.current_album;
+  const overviewAlbumArtist = showChosenOverview ? candidate?.album_artist : track.current_album_artist;
+  const overviewTrackNumber = showChosenOverview ? candidate?.track_number : track.current_track_number;
+  const overviewFilename = showChosenOverview && candidate ? outputFilename(track, candidate) : track.filename;
   useEffect(() => {
     setEditing(false);
     setAdvanced(false);
@@ -417,15 +427,15 @@ function TrackInspector({ track, onChoose, onSaved }: { track: Track; onChoose: 
   return (
     <div className="inspector-content">
       <header className="original-overview">
-        <OriginalArtwork track={track} size="large" />
+        {showChosenOverview && candidate ? <Artwork candidate={candidate} trackId={track.id} size="large" /> : <OriginalArtwork track={track} size="large" />}
         <div className="original-overview-main">
-          <div className="overview-label"><span>Original file</span><TrackStatus track={track} /></div>
-          <h2>{track.current_title || fileStem(track.filename)}</h2>
-          <p>{track.current_artist || "Unknown artist"}<i>·</i>{track.current_album || "Album not set"}</p>
-          <div className="original-filename"><Icon name="music" size={15} /><span><small>Filename</small><b title={track.filename}>{track.filename}</b></span></div>
+          <div className="overview-label"><span>{showChosenOverview ? isCompleted(track) ? "Written metadata" : "Chosen metadata" : "Original file"}</span><TrackStatus track={track} /></div>
+          <h2>{overviewTitle || fileStem(track.filename)}</h2>
+          <p>{overviewArtist || "Unknown artist"}<i>·</i>{overviewAlbum || "Album not set"}</p>
+          <div className={`original-filename ${showChosenOverview ? "chosen" : ""}`}><Icon name="music" size={15} /><span><small>{showChosenOverview ? isCompleted(track) ? "Written filename" : "New filename" : "Filename"}</small><b title={overviewFilename}>{overviewFilename}</b></span></div>
           <div className="original-audio-facts">
-            <span><small>Album artist</small><b>{track.current_album_artist || "Not set"}</b></span>
-            <span><small>Track</small><b>{track.current_track_number || "Not set"}</b></span>
+            <span><small>Album artist</small><b>{overviewAlbumArtist || "Not set"}</b></span>
+            <span><small>Track</small><b>{overviewTrackNumber ? `${overviewTrackNumber}${showChosenOverview && candidate?.track_total ? ` / ${candidate.track_total}` : ""}` : "Not set"}</b></span>
             <span><small>Audio</small><b>{[track.format?.toUpperCase(), formatDuration(track.duration)].filter(Boolean).join(" · ") || "Unknown"}</b></span>
           </div>
         </div>

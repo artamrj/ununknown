@@ -204,6 +204,8 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-so
 .row-file { min-width: 0; display: grid; gap: 3px; }
 .row-file small { color: var(--muted-2); font-size: 9px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
 .row-file b { overflow: hidden; color: var(--text-soft); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.row-file.chosen small { color: var(--success); }
+.row-file.chosen b { color: var(--text); font-weight: 600; }
 .status-pill { width: fit-content; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid transparent; border-radius: 999px; font-size: 10px; font-weight: 600; white-space: nowrap; }
 .status-pill.success { color: var(--success); border-color: color-mix(in srgb, var(--success) 25%, transparent); background: var(--success-soft); }
 .status-pill.review { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 25%, transparent); background: var(--warning-soft); }
@@ -242,6 +244,8 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-so
 .original-filename span { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; }
 .original-filename small { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
 .original-filename b { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.original-filename.chosen { color: var(--success); background: var(--success-soft); }
+.original-filename.chosen small { color: var(--success); }
 .original-audio-facts { display: grid; grid-template-columns: 1fr 0.55fr 0.75fr; gap: 1px; margin-top: 3px; overflow: hidden; border-radius: 6px; background: var(--border); }
 .original-audio-facts span { min-width: 0; display: grid; gap: 2px; padding: 6px 8px; background: var(--surface-1); }
 .original-audio-facts small { color: var(--muted); font-size: 8px; font-weight: 600; text-transform: uppercase; }
