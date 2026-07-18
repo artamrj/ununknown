@@ -3,7 +3,7 @@
 Ununknown has one job: correct metadata for a folder of music.
 
 It first checks that each audio stream can be decoded, then tries every configured
-automatic source (audio fingerprinting, SongRec/Shazam, MusicBrainz, Apple Music, Deezer, Radio Javan, Audiomack, Genius,
+automatic source (audio fingerprinting, SongRec/Shazam, MusicBrainz, Apple Music, Deezer, Radio Javan, Navahang, Audiomack, Genius,
 Spotify, Discogs, Last.fm, TheAudioDB, Wikidata, YouTube, and Cover Art Archive). Difficult
 tracks use SongRec when installed and can optionally use AudD audio recognition. Reliable matches are selected
 automatically. Uncertain and unmatched files stay in a short review list where you
@@ -66,6 +66,8 @@ ISRC to cross-check Spotify. A provider result is not
 automatically written unless it passes the existing confidence and ambiguity rules.
 Radio Javan search and song-link lookup require no key and contribute Persian music
 metadata, duration, release date, and original-resolution cover art.
+Navahang search and pasted song links require no key and contribute Persian song
+identity, duration, release date, credits, label, and original-resolution artwork.
 Audiomack search and pasted song links also work without user credentials and contribute
 track identity, album, duration, genre, release date, credits, label, ISRC when present, and
 original-resolution artwork.

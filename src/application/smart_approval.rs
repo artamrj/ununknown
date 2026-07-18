@@ -250,7 +250,14 @@ fn is_supported(candidate: &Evaluated<'_>) -> bool {
         && candidate.artist_similarity >= 0.82;
     let credible_catalog = matches!(
         candidate.candidate.provider.as_str(),
-        "itunes" | "deezer" | "musicbrainz" | "spotify" | "radiojavan" | "audiomack" | "genius"
+        "itunes"
+            | "deezer"
+            | "musicbrainz"
+            | "spotify"
+            | "radiojavan"
+            | "audiomack"
+            | "navahang"
+            | "genius"
     );
     let corroborated = candidate.sources >= 2
         && (!candidate.title_available || candidate.title_similarity >= 0.82)
@@ -358,9 +365,8 @@ fn meaningful_album(album: Option<&str>) -> Option<&str> {
 
 fn provider_trust(provider: &str) -> f64 {
     match provider {
-        "spotify" | "itunes" | "deezer" | "musicbrainz" | "radiojavan" | "audiomack" | "genius" => {
-            5.0
-        }
+        "spotify" | "itunes" | "deezer" | "musicbrainz" | "radiojavan" | "audiomack"
+        | "navahang" | "genius" => 5.0,
         "audd" | "acoustid" | "songrec" => 4.0,
         "discogs" | "theaudiodb" | "soundcloud" => 2.0,
         "lastfm" | "wikidata" | "youtube" => 1.0,

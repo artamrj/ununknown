@@ -8,6 +8,7 @@ pub mod genius;
 pub mod itunes;
 pub mod lastfm;
 pub mod musicbrainz;
+pub mod navahang;
 pub mod radiojavan;
 pub mod songrec;
 pub mod soundcloud;

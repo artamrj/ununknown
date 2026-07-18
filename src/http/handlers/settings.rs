@@ -14,6 +14,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "delete_source_after_write": cfg.delete_source_after_write,
         "sources": {
             "musicbrainz": true,
+            "navahang": true,
             "audiomack": true,
             "itunes": true,
             "deezer": true,

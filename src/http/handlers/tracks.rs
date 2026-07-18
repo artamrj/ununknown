@@ -464,7 +464,7 @@ pub async fn update_artwork(
     let supplied = value.cover_url.trim();
     let parsed = reqwest::Url::parse(supplied).map_err(|_| {
         ApiError::validation(
-            "Enter a valid HTTPS image, Spotify, SoundCloud, Audiomack, Radio Javan, or Genius song URL",
+            "Enter a valid HTTPS image, Spotify, SoundCloud, Audiomack, Navahang, Radio Javan, or Genius song URL",
         )
     })?;
     if parsed.scheme() != "https" {
@@ -488,6 +488,12 @@ pub async fn update_artwork(
             .map_err(|error| ApiError::validation(format!("Audiomack link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Audiomack did not return cover artwork"))?
+    } else if is_navahang_host(parsed.host_str()) {
+        crate::infrastructure::providers::navahang::lookup_url(&s.pool, &s.client, supplied)
+            .await
+            .map_err(|error| ApiError::validation(format!("Navahang link failed: {error:#}")))?
+            .cover_url
+            .ok_or_else(|| ApiError::validation("Navahang did not return cover artwork"))?
     } else if is_radiojavan_host(parsed.host_str()) {
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, supplied)
             .await
@@ -649,7 +655,7 @@ pub async fn resolve_source(
     let url = value.url.trim();
     let parsed = reqwest::Url::parse(url).map_err(|_| {
         ApiError::validation(
-            "Enter a valid Spotify, SoundCloud, Audiomack, Radio Javan, Genius, or YouTube URL",
+            "Enter a valid Spotify, SoundCloud, Audiomack, Navahang, Radio Javan, Genius, or YouTube URL",
         )
     })?;
     let candidate = if parsed.host_str() == Some("open.spotify.com") {
@@ -658,6 +664,8 @@ pub async fn resolve_source(
         crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
     } else if is_audiomack_host(parsed.host_str()) {
         crate::infrastructure::providers::audiomack::lookup_url(&s.pool, &s.client, url).await
+    } else if is_navahang_host(parsed.host_str()) {
+        crate::infrastructure::providers::navahang::lookup_url(&s.pool, &s.client, url).await
     } else if is_radiojavan_host(parsed.host_str()) {
         crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
     } else if is_genius_host(parsed.host_str()) {
@@ -675,6 +683,10 @@ fn is_soundcloud_host(host: Option<&str>) -> bool {
 
 fn is_audiomack_host(host: Option<&str>) -> bool {
     matches!(host, Some("audiomack.com" | "www.audiomack.com"))
+}
+
+fn is_navahang_host(host: Option<&str>) -> bool {
+    matches!(host, Some("navahang.com" | "www.navahang.com"))
 }
 
 fn is_radiojavan_host(host: Option<&str>) -> bool {

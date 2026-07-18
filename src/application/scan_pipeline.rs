@@ -755,6 +755,7 @@ async fn identify(
     out.extend(query_deezer(state, limits, current, filename).await);
     out.extend(query_radiojavan(state, limits, current, filename).await);
     out.extend(query_audiomack(state, limits, current, filename).await);
+    out.extend(query_navahang(state, limits, current, filename).await);
     if needs_genius_enrichment(&out) {
         out.extend(query_genius(state, limits, current, filename).await);
     }
@@ -870,7 +871,14 @@ fn candidate_trust_tier(candidate: &providers::Candidate) -> u8 {
         3
     } else if matches!(
         candidate.provider.as_str(),
-        "musicbrainz" | "itunes" | "deezer" | "spotify" | "radiojavan" | "audiomack" | "genius"
+        "musicbrainz"
+            | "itunes"
+            | "deezer"
+            | "spotify"
+            | "radiojavan"
+            | "audiomack"
+            | "navahang"
+            | "genius"
     ) {
         2
     } else if candidate_source_count(candidate) >= 2 {
@@ -914,6 +922,7 @@ async fn query_recognized_catalogs(
     out.extend(query_deezer(state, limits, recognized, filename).await);
     out.extend(query_radiojavan(state, limits, recognized, filename).await);
     out.extend(query_audiomack(state, limits, recognized, filename).await);
+    out.extend(query_navahang(state, limits, recognized, filename).await);
     if needs_genius_enrichment(&out) {
         out.extend(query_genius(state, limits, recognized, filename).await);
     }
@@ -1289,6 +1298,40 @@ async fn query_audiomack(
     }
 }
 
+async fn query_navahang(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<providers::Candidate> {
+    if provider_disabled(limits, "navahang").await {
+        return Vec::new();
+    }
+    let Some(title) = current
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Vec::new();
+    };
+    let started = Instant::now();
+    match providers::navahang::search(&state.pool, &state.client, title, current.artist.as_deref())
+        .await
+    {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, "navahang_catalog_search");
+            }
+            log_provider_count(state, filename, "navahang", candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, "navahang", error).await;
+            Vec::new()
+        }
+    }
+}
+
 async fn query_genius(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
@@ -1611,6 +1654,7 @@ fn score_text_candidate(
         "itunes" => 94.0,
         "radiojavan" => 92.0,
         "audiomack" => 90.0,
+        "navahang" => 92.0,
         "genius" => 90.0,
         "deezer" => 90.0,
         "musicbrainz" => 82.0,
@@ -1803,7 +1847,7 @@ fn artwork_agrees(left: &providers::Candidate, right: &providers::Candidate) -> 
 fn artwork_provider_priority(provider: &str) -> u8 {
     match provider {
         "itunes" | "spotify" => 8,
-        "musicbrainz" | "radiojavan" | "audiomack" | "genius" => 7,
+        "musicbrainz" | "radiojavan" | "audiomack" | "navahang" | "genius" => 7,
         "soundcloud" => 6,
         "deezer" => 5,
         "discogs" => 4,
@@ -1906,7 +1950,14 @@ fn unique_exact_catalog_match(
 ) -> bool {
     if !matches!(
         best.provider.as_str(),
-        "itunes" | "musicbrainz" | "deezer" | "spotify" | "radiojavan" | "audiomack" | "genius"
+        "itunes"
+            | "musicbrainz"
+            | "deezer"
+            | "spotify"
+            | "radiojavan"
+            | "audiomack"
+            | "navahang"
+            | "genius"
     ) || best.duration_delta.is_none_or(|delta| delta > 5.0)
     {
         return false;
@@ -2342,6 +2393,7 @@ fn provider_display_name(provider: &str) -> &str {
         "deezer" => "Deezer",
         "audd" => "AudD",
         "audiomack" => "Audiomack",
+        "navahang" => "Navahang",
         "itunes" => "Apple Music",
         "lastfm" => "Last.fm",
         "genius" => "Genius",
@@ -2363,6 +2415,9 @@ fn provider_reason(provider: &str) -> &str {
         "audd" => "Audio recognition with ISRC and linked catalog metadata",
         "audiomack" => {
             "Song identity, original artwork, duration, album, genre, release date, credits, label, and ISRC when supplied"
+        }
+        "navahang" => {
+            "Persian song identity, duration, release date, credits, label, and original artwork"
         }
         "lastfm" => "Track popularity, tags, and MusicBrainz ID evidence",
         "genius" => "Song identity, credited artist, album, release date, and song artwork",
