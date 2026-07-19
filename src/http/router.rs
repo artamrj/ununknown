@@ -16,6 +16,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/identify", post(handlers::start_scan))
         .route("/stop", post(handlers::stop_scan))
         .route("/tracks", get(handlers::list_tracks))
+        .route(
+            "/tracks/{id}",
+            axum::routing::delete(handlers::remove_track),
+        )
         .route("/tracks/retry-issues", post(handlers::retry_issues))
         .route("/tracks/auto-approve", post(handlers::auto_approve_review))
         .route("/tracks/{id}/audio", get(handlers::track_audio))

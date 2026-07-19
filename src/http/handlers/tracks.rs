@@ -21,6 +21,86 @@ pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Track
     Ok(Json(TrackPage { items, total }))
 }
 
+pub async fn remove_track(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if s.workflow_running().await {
+        return Err(ApiError::conflict(
+            "Wait for the current scan or write operation to finish",
+        ));
+    }
+
+    let track = queries::track(&s.pool, id).await?;
+    if track.stage != TrackStage::Review || track.selected_candidate_id.is_some() {
+        return Err(ApiError::validation(
+            "Only unresolved tracks in Review can be removed",
+        ));
+    }
+
+    let input_dir = s.config.read().await.input_dir.clone();
+    let input_dir = tokio::fs::canonicalize(&input_dir)
+        .await
+        .map_err(|error| anyhow::anyhow!("could not verify the music folder: {error}"))?;
+    let source = tokio::fs::canonicalize(&track.path)
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ApiError::not_found("music file no longer exists")
+            } else {
+                ApiError::Internal(error.into())
+            }
+        })?;
+    if source == input_dir || !source.starts_with(&input_dir) {
+        return Err(ApiError::validation(
+            "Refusing to remove a file outside the configured music folder",
+        ));
+    }
+    if !tokio::fs::metadata(&source).await?.is_file() {
+        return Err(ApiError::validation(
+            "The selected music path is not a regular file",
+        ));
+    }
+
+    tokio::fs::remove_file(&source).await.map_err(|error| {
+        ApiError::Internal(anyhow::anyhow!("could not remove music file: {error}"))
+    })?;
+
+    let canonical_path = source.to_string_lossy().into_owned();
+    let mut transaction = s.pool.begin().await?;
+    for table in [
+        "fingerprint_cache",
+        "replaygain_cache",
+        "integrity_cache",
+        "artwork_overrides",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE path=? OR path=?"
+        )))
+        .bind(&track.path)
+        .bind(&canonical_path)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query("DELETE FROM tracks WHERE id=?")
+        .bind(id.0)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+
+    s.log_entry(
+        crate::app::ActivityLogEntry::new("ok", "review", "Removed music file from Review")
+            .file(track.filename.clone())
+            .detail(format!("Removed source: {}", source.display())),
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "removed": true,
+        "filename": track.filename,
+    })))
+}
+
 pub async fn auto_approve_review(
     State(s): State<Arc<AppState>>,
 ) -> ApiResult<Json<AutoApproveResult>> {
@@ -808,6 +888,73 @@ fn is_youtube_host(host: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use crate::{config::Config, infrastructure::db};
+
+    #[tokio::test]
+    async fn remove_track_deletes_review_file_and_database_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("music");
+        tokio::fs::create_dir(&input).await.unwrap();
+        let source = input.join("remove-me.mp3");
+        tokio::fs::write(&source, b"test audio").await.unwrap();
+        let database = directory.path().join("remove-track.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let config = Config {
+            input_dir: input.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let state = Arc::new(AppState::new(config, pool.clone()));
+        let track_id = insert_test_track(&pool, source.to_str().unwrap(), "needs_review", 0).await;
+        insert_test_candidate(&pool, track_id, "Candidate", 70.0).await;
+
+        let response = remove_track(State(state), Path(TrackId(track_id)))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response["removed"], true);
+        assert!(!source.exists());
+        let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE id=?")
+            .bind(track_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let candidates: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM candidates WHERE track_id=?")
+                .bind(track_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(tracks, 0);
+        assert_eq!(candidates, 0);
+    }
+
+    #[tokio::test]
+    async fn remove_track_refuses_files_outside_music_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("music");
+        tokio::fs::create_dir(&input).await.unwrap();
+        let source = directory.path().join("keep-me.mp3");
+        tokio::fs::write(&source, b"test audio").await.unwrap();
+        let database = directory.path().join("safe-remove-track.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let config = Config {
+            input_dir: input.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let state = Arc::new(AppState::new(config, pool.clone()));
+        let track_id = insert_test_track(&pool, source.to_str().unwrap(), "needs_review", 0).await;
+
+        let result = remove_track(State(state), Path(TrackId(track_id))).await;
+
+        assert!(matches!(result, Err(ApiError::Validation(_))));
+        assert!(source.exists());
+        let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE id=?")
+            .bind(track_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tracks, 1);
+    }
 
     #[tokio::test]
     async fn manual_metadata_resolves_a_completely_unmatched_track() {

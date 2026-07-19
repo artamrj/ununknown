@@ -1183,6 +1183,48 @@ input:focus {
 .decision-note b {
   font-size: 13px;
 }
+.review-file-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 13px;
+  margin: -10px 0 22px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-2) 65%, transparent);
+}
+.review-file-actions > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.review-file-actions b {
+  color: var(--text-soft);
+  font-size: 11px;
+}
+.review-file-actions small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.remove-file-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--error) 28%, var(--border));
+  border-radius: 7px;
+  color: var(--error);
+  background: var(--error-soft);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.remove-file-button:hover:not(:disabled) {
+  border-color: var(--error);
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+}
 .decision-note p,
 .decision-note small {
   color: var(--text-soft);

@@ -780,6 +780,7 @@ function TrackInspector({
   const [editing, setEditing] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [undoing, setUndoing] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [choosingId, setChoosingId] = useState<number>();
   const [actionError, setActionError] = useState("");
   const candidate = selectedCandidate(track);
@@ -801,6 +802,7 @@ function TrackInspector({
     setAdvanced(false);
     setActionError("");
     setChoosingId(undefined);
+    setRemoving(false);
   }, [track.id]);
   const undoIdentification = async () => {
     setUndoing(true);
@@ -823,6 +825,24 @@ function TrackInspector({
       setActionError((reason as Error).message);
     } finally {
       setChoosingId(undefined);
+    }
+  };
+  const removeMusicFile = async () => {
+    if (
+      !confirm(
+        `Permanently remove "${track.filename}" from the music folder? This cannot be undone.`,
+      )
+    )
+      return;
+    setRemoving(true);
+    setActionError("");
+    try {
+      await api(`/tracks/${track.id}`, { method: "DELETE" });
+      await onSaved();
+    } catch (reason) {
+      setActionError((reason as Error).message);
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -917,6 +937,23 @@ function TrackInspector({
             )}
           </div>
         </section>
+      )}
+
+      {isReview(track) && (
+        <div className="review-file-actions">
+          <span>
+            <b>Don’t want this file in your library?</b>
+            <small>Remove the original music file and this review item.</small>
+          </span>
+          <button
+            className="remove-file-button"
+            disabled={removing}
+            onClick={() => void removeMusicFile()}
+          >
+            <Icon name="trash" size={15} />
+            {removing ? "Removing…" : "Remove music file"}
+          </button>
+        </div>
       )}
 
       {isReview(track) && track.candidates.length > 0 && (

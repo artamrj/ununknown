@@ -27,8 +27,8 @@ pub use scan::{retry_issues, start_scan, stop_scan};
 pub use settings::{setup, update_setup};
 pub use tracks::{
     artwork_preview, auto_approve_review, candidate_artwork_preview, list_tracks, manual_candidate,
-    original_artwork_preview, resolve_source, return_to_review, select_candidate, track_audio,
-    update_artwork,
+    original_artwork_preview, remove_track, resolve_source, return_to_review, select_candidate,
+    track_audio, update_artwork,
 };
 pub use workspace::workspace;
 
