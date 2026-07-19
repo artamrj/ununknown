@@ -479,6 +479,32 @@ input {
 input::placeholder {
   color: var(--muted-2);
 }
+textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 13px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--input);
+  font: inherit;
+  line-height: 1.5;
+}
+textarea:hover {
+  border-color: var(--border-strong);
+}
+textarea:focus {
+  border-color: var(--accent);
+  outline: 0;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.drawer-content label > small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+}
 input:hover {
   border-color: var(--border-strong);
 }

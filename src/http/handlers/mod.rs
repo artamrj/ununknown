@@ -198,6 +198,7 @@ pub struct SourceLookupRequest {
 pub struct SetupRequest {
     input_dir: String,
     output_dir: String,
+    reference_dirs: Option<Vec<String>>,
     delete_source_after_write: Option<bool>,
     automatic_scan_enabled: Option<bool>,
     automatic_scan_interval_minutes: Option<u64>,

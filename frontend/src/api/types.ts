@@ -1,6 +1,13 @@
 export type Setup = {
   input_dir: string;
   output_dir: string;
+  reference_dirs: string[];
+  reference_index: {
+    files: number;
+    updated: number;
+    reused: number;
+    failed: number;
+  };
   delete_source_after_write: boolean;
   automatic_scan_enabled: boolean;
   automatic_scan_interval_minutes: number;

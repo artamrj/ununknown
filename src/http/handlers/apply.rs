@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::ActivityLogEntry;
+use crate::application::reference_library;
 use crate::infrastructure::fingerprint_cache;
 use crate::infrastructure::media::{fingerprint, replaygain};
 use chrono::Utc;
@@ -62,12 +63,34 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
     .fetch_all(&s.pool)
     .await?;
     let cfg = s.config.read().await.clone();
+    reference_library::validate_layout(&cfg).await?;
     let selected = queries::selected_for_tracks(&s.pool, tracks).await?;
     let selected_count = selected.len();
     let mut items: Vec<PreviewItem> = Vec::new();
     let mut signatures = Vec::new();
     for (track, candidate) in selected {
         let signature = duplicate_signature(&s.pool, &track, &candidate).await?;
+        if let Some(found) = reference_library::find_duplicate(
+            &s.pool,
+            std::path::Path::new(&track.path),
+            signature.fingerprint.as_deref(),
+            signature.duration.unwrap_or_default(),
+        )
+        .await?
+        {
+            reference_library::mark_existing_track(&s.pool, track.id.0, &found).await?;
+            s.log_entry(
+                ActivityLogEntry::new(
+                    "ok",
+                    "deduplicate",
+                    "Skipped output; recording already exists in a read-only library",
+                )
+                .file(track.filename)
+                .detail(format!("{} match: {}", found.reason, found.path)),
+            )
+            .await;
+            continue;
+        }
         if let Some(index) = signatures
             .iter()
             .position(|existing| recordings_are_duplicates(existing, &signature))
@@ -109,7 +132,7 @@ pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize>
     if prepared.selected_count == 0 {
         return Ok(0);
     }
-    let count = prepared.selected_count;
+    let count = prepared.outputs;
     s.start_automatic_apply_workflow().await;
     if s.frontend_active_until().await.is_some() || s.workflow_cancelled().await {
         s.finish_workflow(

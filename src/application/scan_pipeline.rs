@@ -44,6 +44,7 @@ enum ProcessOutcome {
     Matched,
     NeedsReview,
     Corrupt,
+    Duplicate,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +55,16 @@ struct FingerprintEvidence<'a> {
 
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
+    state
+        .set_workflow(WorkflowPhase::Scan, "scan", "Discovering music", 0, 0, None)
+        .await;
+    crate::application::reference_library::refresh(&state).await?;
+    if state.workflow_cancelled().await {
+        state
+            .finish_workflow(WorkflowPhase::Idle, "idle", "Scan stopped")
+            .await;
+        return Ok(());
+    }
     state
         .set_workflow(WorkflowPhase::Scan, "scan", "Discovering music", 0, 0, None)
         .await;
@@ -131,6 +142,20 @@ async fn discover_files_in_background(input_dir: String) -> Result<(Vec<PathBuf>
 }
 
 pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
+    state
+        .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan: checking libraries")
+        .await;
+    crate::application::reference_library::refresh(&state).await?;
+    if state.workflow_cancelled().await || state.frontend_active_until().await.is_some() {
+        state
+            .finish_workflow(
+                WorkflowPhase::Idle,
+                "idle",
+                "Automatic scan paused while the web app is open",
+            )
+            .await;
+        return Ok(0);
+    }
     let cfg = state.config.read().await.clone();
     let (files, walk_errors) = discover_files_in_background(cfg.input_dir).await?;
     for error in walk_errors {
@@ -143,11 +168,15 @@ pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
     }
     let pending = automatic_pending_files(&state.pool, files).await?;
     if pending.is_empty() || state.frontend_active_until().await.is_some() {
+        state
+            .finish_workflow(
+                WorkflowPhase::Idle,
+                "idle",
+                "Automatic scan: no new or changed music",
+            )
+            .await;
         return Ok(0);
     }
-    state
-        .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan: discovering new music")
-        .await;
     if state.frontend_active_until().await.is_some() {
         state
             .finish_workflow(
@@ -426,6 +455,17 @@ async fn process_file(
                     .await;
                 break;
             }
+            Ok(ProcessOutcome::Duplicate) => {
+                state
+                    .log(
+                        "ok",
+                        "deduplicate",
+                        Some(&filename),
+                        "Skipped because this recording is already in a read-only library",
+                    )
+                    .await;
+                break;
+            }
             Err(error) if attempt < ATTEMPTS => {
                 tracing::warn!(path=%job.path.display(), attempt, "track attempt failed: {error:#}");
                 state
@@ -625,6 +665,60 @@ async fn process(
             (String::new(), info.duration)
         }
     };
+    match crate::application::reference_library::find_duplicate(
+        &state.pool,
+        path,
+        (!fp.is_empty()).then_some(fp.as_str()),
+        duration,
+    )
+    .await
+    {
+        Ok(Some(found)) => {
+            let message = format!(
+                "Already exists in read-only library ({}): {}",
+                found.reason, found.path
+            );
+            let mut transaction = state.pool.begin().await?;
+            let track_id = upsert_track_outcome(
+                &mut transaction,
+                path,
+                Some(&info),
+                "duplicate",
+                "skipped",
+                Some(&message),
+                None,
+            )
+            .await?;
+            sqlx::query("UPDATE tracks SET output_path=? WHERE id=?")
+                .bind(&found.path)
+                .bind(track_id)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("DELETE FROM candidates WHERE track_id=?")
+                .bind(track_id)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            state
+                .log("ok", "deduplicate", Some(filename), &message)
+                .await;
+            return Ok(ProcessOutcome::Duplicate);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            state
+                .log_entry(
+                    ActivityLogEntry::new(
+                        "warn",
+                        "deduplicate",
+                        "Reference-library comparison failed; continuing identification",
+                    )
+                    .file(filename.to_owned())
+                    .error_text(format!("{error:#}")),
+                )
+                .await;
+        }
+    }
     let cfg = state.config.read().await.clone();
     if cfg.acoustid_key.is_empty() {
         state

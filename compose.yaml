@@ -17,6 +17,7 @@ services:
       UNUNKNOWN_INPUT_DIR: /data/input
       UNUNKNOWN_INPUT_MODE: "${UNUNKNOWN_INPUT_MODE:-ro}"
       UNUNKNOWN_OUTPUT_DIR: /data/output
+      UNUNKNOWN_REFERENCE_DIRS: /data/reference
       UNUNKNOWN_STATIC_DIR: /usr/share/ununknown
       UNUNKNOWN_ACOUSTID_KEY: "${UNUNKNOWN_ACOUSTID_KEY:-}"
       UNUNKNOWN_AUDD_TOKEN: "${UNUNKNOWN_AUDD_TOKEN:-}"
@@ -30,6 +31,7 @@ services:
       UNUNKNOWN_THEAUDIODB_KEY: "${UNUNKNOWN_THEAUDIODB_KEY:-}"
     volumes:
       - "${UNUNKNOWN_INPUT_PATH:-./music}:/data/input:${UNUNKNOWN_INPUT_MODE:-ro}"
+      - "${UNUNKNOWN_REFERENCE_PATH:-./reference}:/data/reference:ro"
       - type: bind
         source: "${UNUNKNOWN_OUTPUT_PATH:-./output}"
         target: /data/output

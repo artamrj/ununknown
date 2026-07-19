@@ -7,6 +7,7 @@ pub struct Config {
     pub db_path: String,
     pub input_dir: String,
     pub output_dir: String,
+    pub reference_dirs: Vec<String>,
     pub delete_source_after_write: bool,
     pub automatic_scan_enabled: bool,
     pub automatic_scan_interval_minutes: u64,
@@ -33,6 +34,7 @@ impl Default for Config {
             db_path: ".local/cache/ununknown.sqlite".into(),
             input_dir: ".local/input".into(),
             output_dir: ".local/output".into(),
+            reference_dirs: Vec::new(),
             delete_source_after_write: false,
             automatic_scan_enabled: true,
             automatic_scan_interval_minutes: 5,
@@ -57,6 +59,15 @@ impl Default for Config {
 
 impl Config {
     pub fn normalize(&mut self) {
+        self.reference_dirs = self
+            .reference_dirs
+            .iter()
+            .map(|path| path.trim())
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect();
+        self.reference_dirs.sort();
+        self.reference_dirs.dedup();
         self.scan_workers = self.scan_workers.clamp(1, 32);
         self.fingerprint_workers = self.fingerprint_workers.clamp(1, 16);
         self.lookup_workers = self.lookup_workers.clamp(1, 16);
@@ -81,6 +92,11 @@ impl Config {
 
         override_from_env!(input_dir, "UNUNKNOWN_INPUT_DIR");
         override_from_env!(output_dir, "UNUNKNOWN_OUTPUT_DIR");
+        if let Some(value) = std::env::var_os("UNUNKNOWN_REFERENCE_DIRS") {
+            self.reference_dirs = std::env::split_paths(&value)
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+        }
         override_from_env!(acoustid_key, "UNUNKNOWN_ACOUSTID_KEY");
         override_from_env!(audd_token, "UNUNKNOWN_AUDD_TOKEN");
         override_from_env!(spotify_client_id, "UNUNKNOWN_SPOTIFY_CLIENT_ID");

@@ -14,6 +14,8 @@ import { Icon, type IconName } from "./Icons";
 const emptySetup: Setup = {
   input_dir: "",
   output_dir: "",
+  reference_dirs: [],
+  reference_index: { files: 0, updated: 0, reused: 0, failed: 0 },
   delete_source_after_write: false,
   automatic_scan_enabled: true,
   automatic_scan_interval_minutes: 5,
@@ -156,6 +158,7 @@ export function App() {
         body: JSON.stringify({
           input_dir: setup.input_dir,
           output_dir: setup.output_dir,
+          reference_dirs: setup.reference_dirs,
           delete_source_after_write: setup.delete_source_after_write,
           automatic_scan_enabled: setup.automatic_scan_enabled,
           automatic_scan_interval_minutes: setup.automatic_scan_interval_minutes,
@@ -938,11 +941,17 @@ function TrackInspector({
         />
       )}
 
-      {(isReview(track) || isProblem(track)) && (
+      {(isReview(track) || isProblem(track) || track.stage === "skipped") && (
         <section className={`decision-note ${isProblem(track) ? "problem" : "review"}`}>
-          <Icon name={isProblem(track) ? "alert" : "info"} />
+          <Icon name={isProblem(track) ? "alert" : track.stage === "skipped" ? "skip" : "info"} />
           <div>
-            <b>{isProblem(track) ? problemTitle(track) : "Your review is needed"}</b>
+            <b>
+              {isProblem(track)
+                ? problemTitle(track)
+                : track.stage === "skipped"
+                  ? "Already in a reference library"
+                  : "Your review is needed"}
+            </b>
             <p>
               {track.stage_message ||
                 friendlyTrackError(track) ||
@@ -1552,6 +1561,28 @@ function SettingsDrawer({
                 value={setup.output_dir}
                 onChange={(event) => setSetup({ ...setup, output_dir: event.target.value })}
               />
+            </label>
+            <label>
+              <span>Read-only reference libraries</span>
+              <textarea
+                rows={4}
+                placeholder={"/Music/Archive\n/Volumes/NAS/Collection"}
+                value={setup.reference_dirs.join("\n")}
+                onChange={(event) =>
+                  setSetup({ ...setup, reference_dirs: event.target.value.split("\n") })
+                }
+              />
+              <small>
+                One folder per line. These files are indexed for duplicate detection and are never
+                changed or removed.
+                {setup.reference_index.files
+                  ? ` ${setup.reference_index.files.toLocaleString()} files currently cached${
+                      setup.reference_index.failed
+                        ? `; ${setup.reference_index.failed.toLocaleString()} could not be fingerprinted.`
+                        : "."
+                    }`
+                  : " The first music scan builds the index."}
+              </small>
             </label>
           </section>
           <section>
