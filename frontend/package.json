@@ -25,6 +25,6 @@
     "prettier": "^3.8.4",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.61.1",
-    "vite": "^8.0.16"
+    "vite": "^8.1.5"
   }
 }
