@@ -30,28 +30,30 @@ pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_
 }
 
 pub async fn run_automatic_cycle(state: Arc<AppState>) -> Result<()> {
-    if state.workflow_running().await {
+    if state.workflow_running().await || state.frontend_active_until().await.is_some() {
         return Ok(());
     }
     let enabled = state.config.read().await.automatic_scan_enabled;
     if !enabled {
         return Ok(());
     }
-
-    let scanned = scan_pipeline::run_automatic(state.clone()).await?;
-    if state.workflow_cancelled().await {
-        return Ok(());
+    async {
+        let scanned = scan_pipeline::run_automatic(state.clone()).await?;
+        if state.workflow_cancelled().await || state.frontend_active_until().await.is_some() {
+            return Ok(());
+        }
+        let written = super::apply::apply_ready_automatically(state.clone()).await?;
+        state
+            .log_entry(
+                ActivityLogEntry::new("ok", "automatic_scan", "Automatic cleaning cycle complete")
+                    .detail(format!(
+                        "Scanned {scanned} changed files; wrote {written} ready tracks"
+                    )),
+            )
+            .await;
+        Ok(())
     }
-    let written = super::apply::apply_ready_automatically(state.clone()).await?;
-    state
-        .log_entry(
-            ActivityLogEntry::new("ok", "automatic_scan", "Automatic cleaning cycle complete")
-                .detail(format!(
-                    "Scanned {scanned} changed files; wrote {written} ready tracks"
-                )),
-        )
-        .await;
-    Ok(())
+    .await
 }
 
 pub async fn stop_scan(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {

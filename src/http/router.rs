@@ -13,6 +13,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/health", get(health))
         .route("/setup", get(handlers::setup).put(handlers::update_setup))
         .route("/status", get(handlers::workspace))
+        .route("/activity", post(handlers::frontend_activity))
         .route("/identify", post(handlers::start_scan))
         .route("/stop", post(handlers::stop_scan))
         .route("/tracks", get(handlers::list_tracks))

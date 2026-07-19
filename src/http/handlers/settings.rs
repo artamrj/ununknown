@@ -128,5 +128,6 @@ pub async fn update_setup(
     }
     crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
+    s.notify_automation_scheduler();
     Ok(Json(serde_json::json!({"saved": true})))
 }

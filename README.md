@@ -128,7 +128,11 @@ the app is idle. Saved settings and configuration are preserved.
 Automatic cleaning is enabled by default every five minutes and can be changed or disabled in
 **Settings → Automatic cleaning**. Each cycle scans only new or changed source files, writes
 strictly matched tracks that are already safe to apply, and leaves every ambiguous or incomplete
-track in Review. The scheduler runs in the backend, so the browser does not need to stay open.
+track in Review. The scheduler sleeps while any frontend page is open and resumes in the backend
+after the page closes, keeping automatic work away from active review sessions. Between deadlines
+it uses an event-driven sleep instead of polling; folder discovery runs off the async request
+runtime, and unchanged files are compared by size and modification time without decoding audio or
+contacting metadata providers.
 
 ## Stronger matching with optional services
 

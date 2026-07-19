@@ -81,7 +81,6 @@ async fn main() -> Result<()> {
         let mut current_schedule: Option<(bool, u64)> = None;
         let mut next_run = tokio::time::Instant::now();
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
             let schedule = {
                 let config = automatic_scan_state.config.read().await;
                 (
@@ -94,14 +93,28 @@ async fn main() -> Result<()> {
                 next_run = tokio::time::Instant::now()
                     + Duration::from_secs(schedule.1.saturating_mul(60));
             }
-            if !schedule.0
-                || tokio::time::Instant::now() < next_run
-                || automatic_scan_state.workflow_running().await
-            {
+            if !schedule.0 {
+                automatic_scan_state.wait_for_automation_change().await;
                 continue;
             }
-            next_run =
-                tokio::time::Instant::now() + Duration::from_secs(schedule.1.saturating_mul(60));
+            if tokio::time::Instant::now() < next_run {
+                tokio::select! {
+                    () = tokio::time::sleep_until(next_run) => {}
+                    () = automatic_scan_state.wait_for_automation_change() => {}
+                }
+                continue;
+            }
+            if automatic_scan_state.workflow_running().await {
+                automatic_scan_state.wait_for_automation_change().await;
+                continue;
+            }
+            if let Some(active_until) = automatic_scan_state.frontend_active_until().await {
+                tokio::select! {
+                    () = tokio::time::sleep_until(active_until) => {}
+                    () = automatic_scan_state.wait_for_automation_change() => {}
+                }
+                continue;
+            }
             if let Err(error) =
                 http::handlers::run_automatic_cycle(automatic_scan_state.clone()).await
             {
@@ -114,6 +127,8 @@ async fn main() -> Result<()> {
                     )
                     .await;
             }
+            next_run =
+                tokio::time::Instant::now() + Duration::from_secs(schedule.1.saturating_mul(60));
         }
     });
     let api = http::router().layer(middleware::from_fn(http::protect_local_api));

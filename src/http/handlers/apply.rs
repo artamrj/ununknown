@@ -102,12 +102,24 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
 }
 
 pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize> {
+    if s.frontend_active_until().await.is_some() {
+        return Ok(0);
+    }
     let prepared = prepare_apply(&s).await?;
     if prepared.selected_count == 0 {
         return Ok(0);
     }
     let count = prepared.selected_count;
-    s.start_apply_workflow().await;
+    s.start_automatic_apply_workflow().await;
+    if s.frontend_active_until().await.is_some() || s.workflow_cancelled().await {
+        s.finish_workflow(
+            WorkflowPhase::Idle,
+            "idle",
+            "Automatic write paused while the web app is open",
+        )
+        .await;
+        return Ok(0);
+    }
     let result = apply(
         s.clone(),
         prepared.items,

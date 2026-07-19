@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -65,7 +65,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             "Walking input folder for supported audio files",
         )
         .await;
-    let (files, walk_errors) = discover_files(&cfg.input_dir);
+    let (files, walk_errors) = discover_files_in_background(cfg.input_dir.clone()).await?;
     let total = files.len();
     state
         .log(
@@ -91,14 +91,14 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             .await;
     }
     let snapshot_files = files.clone();
-    run_files(
+    let cancelled = run_files(
         state.clone(),
         files,
         "Starting staged matching",
         "Matching complete",
     )
     .await?;
-    if !state.workflow_cancelled().await {
+    if !cancelled {
         remember_scanned_files(&state.pool, &snapshot_files).await?;
     }
     Ok(())
@@ -124,9 +124,15 @@ fn discover_files(input_dir: &str) -> (Vec<PathBuf>, Vec<String>) {
     (files, walk_errors)
 }
 
+async fn discover_files_in_background(input_dir: String) -> Result<(Vec<PathBuf>, Vec<String>)> {
+    tokio::task::spawn_blocking(move || discover_files(&input_dir))
+        .await
+        .context("music folder discovery task failed")
+}
+
 pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
     let cfg = state.config.read().await.clone();
-    let (files, walk_errors) = discover_files(&cfg.input_dir);
+    let (files, walk_errors) = discover_files_in_background(cfg.input_dir).await?;
     for error in walk_errors {
         state
             .log_entry(
@@ -136,24 +142,34 @@ pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
             .await;
     }
     let pending = automatic_pending_files(&state.pool, files).await?;
-    if pending.is_empty() {
+    if pending.is_empty() || state.frontend_active_until().await.is_some() {
         return Ok(0);
     }
     state
-        .reset_workflow(WorkflowPhase::Scan, "Automatic scan: discovering new music")
+        .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan: discovering new music")
         .await;
+    if state.frontend_active_until().await.is_some() {
+        state
+            .finish_workflow(
+                WorkflowPhase::Idle,
+                "idle",
+                "Automatic scan paused while the web app is open",
+            )
+            .await;
+        return Ok(0);
+    }
     let snapshot_files = pending.clone();
-    run_files(
+    let cancelled = run_files(
         state.clone(),
         pending,
         "Automatic scan: matching new or changed music",
         "Automatic scan complete",
     )
     .await?;
-    if !state.workflow_cancelled().await {
+    if !cancelled {
         remember_scanned_files(&state.pool, &snapshot_files).await?;
     }
-    Ok(snapshot_files.len())
+    Ok(if cancelled { 0 } else { snapshot_files.len() })
 }
 
 /// Re-run the complete integrity and identification pipeline for a selected set
@@ -161,14 +177,14 @@ pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
 /// intact and replaces only the outcomes for the supplied paths.
 pub async fn retry_files(state: Arc<AppState>, files: Vec<PathBuf>) -> Result<()> {
     let snapshot_files = files.clone();
-    run_files(
+    let cancelled = run_files(
         state.clone(),
         files,
         "Checking files with issues",
         "Issue check complete",
     )
     .await?;
-    if !state.workflow_cancelled().await {
+    if !cancelled {
         remember_scanned_files(&state.pool, &snapshot_files).await?;
     }
     Ok(())
@@ -178,21 +194,30 @@ async fn automatic_pending_files(
     pool: &sqlx::SqlitePool,
     files: Vec<PathBuf>,
 ) -> Result<Vec<PathBuf>> {
-    let rows: Vec<(String, i64, i64)> =
-        sqlx::query_as("SELECT path,file_size,file_mtime_ns FROM automatic_scan_files")
-            .fetch_all(pool)
-            .await?;
-    let known = rows
-        .into_iter()
-        .map(|(path, size, modified)| (path, (size, modified)))
-        .collect::<HashMap<_, _>>();
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT path,file_size,file_mtime_ns FROM automatic_scan_files ORDER BY path",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut known = rows.into_iter().peekable();
     let mut pending = Vec::new();
     for path in files {
         let Some((size, modified)) = file_snapshot(&path).await else {
             continue;
         };
-        let text = path.to_string_lossy();
-        if known.get(text.as_ref()) != Some(&(size, modified)) {
+        let text = path.to_string_lossy().into_owned();
+        while known
+            .peek()
+            .is_some_and(|(known_path, _, _)| known_path < &text)
+        {
+            known.next();
+        }
+        let unchanged = known
+            .peek()
+            .is_some_and(|(known_path, known_size, known_modified)| {
+                known_path == &text && *known_size == size && *known_modified == modified
+            });
+        if !unchanged {
             pending.push(path);
         }
     }
@@ -243,7 +268,7 @@ async fn run_files(
     mut files: Vec<PathBuf>,
     starting_message: &'static str,
     completion_message: &'static str,
-) -> Result<()> {
+) -> Result<bool> {
     let cfg = state.config.read().await.clone();
     files.sort();
     files.dedup();
@@ -336,7 +361,7 @@ async fn run_files(
             },
         )
         .await;
-    Ok(())
+    Ok(cancelled)
 }
 
 async fn process_file(

@@ -2,7 +2,12 @@ use crate::{config::Config, types::WorkflowPhase};
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::{
+    sync::{Notify, RwLock, Semaphore},
+    time::Instant,
+};
+
+const FRONTEND_ACTIVITY_LEASE: Duration = Duration::from_secs(2 * 60);
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Workflow {
@@ -17,6 +22,8 @@ pub struct Workflow {
     pub failed: usize,
     #[serde(skip)]
     pub cancelled: bool,
+    #[serde(skip)]
+    pub automatic: bool,
 }
 
 pub struct ActivityLogEntry {
@@ -86,6 +93,8 @@ pub struct AppState {
     pub spotify_auth: crate::infrastructure::providers::spotify::SpotifyAuth,
     pub soundcloud_auth: crate::infrastructure::providers::soundcloud::SoundCloudAuth,
     pub workflow: RwLock<Workflow>,
+    frontend_last_seen: RwLock<Option<Instant>>,
+    automation_notify: Notify,
 }
 
 impl AppState {
@@ -109,6 +118,8 @@ impl AppState {
                 message: "Ready".into(),
                 ..Default::default()
             }),
+            frontend_last_seen: RwLock::new(None),
+            automation_notify: Notify::new(),
         }
     }
 
@@ -127,6 +138,15 @@ impl AppState {
         };
     }
 
+    pub async fn reset_automatic_workflow(&self, phase: WorkflowPhase, message: impl Into<String>) {
+        *self.workflow.write().await = Workflow {
+            phase,
+            message: message.into(),
+            automatic: true,
+            ..Default::default()
+        };
+    }
+
     pub async fn cancel_workflow(&self) {
         self.workflow.write().await.cancelled = true;
     }
@@ -141,6 +161,16 @@ impl AppState {
         workflow.message = "Writing corrected copies".into();
         workflow.current = 0;
         workflow.cancelled = false;
+        workflow.automatic = false;
+    }
+
+    pub async fn start_automatic_apply_workflow(&self) {
+        let mut workflow = self.workflow.write().await;
+        workflow.phase = WorkflowPhase::Apply;
+        workflow.message = "Writing corrected copies automatically".into();
+        workflow.current = 0;
+        workflow.cancelled = false;
+        workflow.automatic = true;
     }
 
     pub async fn finish_workflow(
@@ -153,7 +183,35 @@ impl AppState {
         workflow.phase = phase;
         workflow.message = message.into();
         workflow.cancelled = false;
+        workflow.automatic = false;
         workflow.current_file = None;
+        self.automation_notify.notify_one();
+    }
+
+    pub async fn note_frontend_activity(&self) {
+        *self.frontend_last_seen.write().await = Some(Instant::now());
+        let mut workflow = self.workflow.write().await;
+        if workflow.automatic {
+            workflow.cancelled = true;
+        }
+        drop(workflow);
+        self.automation_notify.notify_one();
+    }
+
+    pub async fn frontend_active_until(&self) -> Option<Instant> {
+        self.frontend_last_seen
+            .read()
+            .await
+            .map(|last_seen| last_seen + FRONTEND_ACTIVITY_LEASE)
+            .filter(|active_until| *active_until > Instant::now())
+    }
+
+    pub fn notify_automation_scheduler(&self) {
+        self.automation_notify.notify_one();
+    }
+
+    pub async fn wait_for_automation_change(&self) {
+        self.automation_notify.notified().await;
     }
 
     pub async fn set_workflow(
@@ -222,5 +280,33 @@ impl AppState {
             "{}",
             entry.message
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn frontend_activity_only_cancels_automatic_workflows() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("frontend-activity.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let state = AppState::new(Config::default(), pool);
+
+        state
+            .reset_workflow(WorkflowPhase::Scan, "Manual scan")
+            .await;
+        state.note_frontend_activity().await;
+        assert!(!state.workflow_cancelled().await);
+        assert!(state.frontend_active_until().await.is_some());
+
+        state
+            .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan")
+            .await;
+        state.note_frontend_activity().await;
+        assert!(state.workflow_cancelled().await);
     }
 }

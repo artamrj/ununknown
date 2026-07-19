@@ -30,7 +30,7 @@ pub use tracks::{
     original_artwork_preview, remove_track, resolve_source, return_to_review, select_candidate,
     track_audio, update_artwork,
 };
-pub use workspace::workspace;
+pub use workspace::{frontend_activity, workspace};
 
 #[derive(Serialize, FromRow)]
 pub struct Track {

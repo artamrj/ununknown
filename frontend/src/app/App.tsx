@@ -106,6 +106,21 @@ export function App() {
   }, [loadApp]);
 
   useEffect(() => {
+    const reportActivity = () => {
+      void api("/activity", { method: "POST", body: "{}" }).catch(() => undefined);
+    };
+    reportActivity();
+    const timer = window.setInterval(reportActivity, 30_000);
+    window.addEventListener("focus", reportActivity);
+    document.addEventListener("visibilitychange", reportActivity);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", reportActivity);
+      document.removeEventListener("visibilitychange", reportActivity);
+    };
+  }, []);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("ununknown-theme", theme);
   }, [theme]);
@@ -1583,7 +1598,7 @@ function SettingsDrawer({
                 </b>
                 <small>
                   Confident matches are written automatically. Uncertain music always stays in
-                  Review.
+                  Review. Automatic work pauses while this web app is open.
                 </small>
               </span>
             </label>
