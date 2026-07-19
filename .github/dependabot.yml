@@ -26,6 +26,12 @@ updates:
       frontend-dependencies:
         patterns:
           - "*"
+    # typescript-eslint 8 requires TypeScript <6.1. Keep compatible TypeScript
+    # updates without opening a broken TypeScript 7 pull request.
+    ignore:
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
 
   # Actions referenced by workflow files in .github/workflows.
   - package-ecosystem: "github-actions"
