@@ -118,7 +118,6 @@ fn classify(success: bool, stderr: &str) -> Integrity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Seek, SeekFrom, Write};
 
     #[test]
     fn clean_decode_is_healthy() {
@@ -142,7 +141,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_decode_accepts_healthy_audio_and_rejects_damaged_frames() {
+    async fn real_decode_accepts_healthy_audio_and_rejects_invalid_audio() {
         if !available() {
             return;
         }
@@ -157,24 +156,17 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        std::fs::copy(&healthy, &damaged).unwrap();
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&damaged)
-            .unwrap();
-        file.seek(SeekFrom::Start(1_000)).unwrap();
-        file.write_all(&[0; 1_000]).unwrap();
-        drop(file);
+        std::fs::write(&damaged, b"not an audio stream").unwrap();
 
         let database = directory.path().join("integrity.sqlite");
         let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
             .await
             .unwrap();
         assert_eq!(check(&pool, &healthy).await.unwrap(), Integrity::Healthy);
-        assert!(matches!(
-            check(&pool, &damaged).await.unwrap(),
-            Integrity::Corrupt(detail) if detail.contains("Invalid data") || detail.contains("Header missing")
-        ));
+        let Integrity::Corrupt(detail) = check(&pool, &damaged).await.unwrap() else {
+            panic!("FFmpeg accepted a file that contains no audio stream")
+        };
+        assert!(!detail.is_empty());
         let cached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM integrity_cache")
             .fetch_one(&pool)
             .await

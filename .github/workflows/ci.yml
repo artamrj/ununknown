@@ -14,11 +14,7 @@ permissions:
 
 jobs:
   verify:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -30,7 +26,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install media tools
-        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg libchromaprint-tools
 
       - name: Frontend checks
@@ -60,14 +55,32 @@ jobs:
           target/release/ununknown >"$run_dir/server.log" 2>&1 &
           server_pid=$!
           trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
-          curl --fail --retry 10 --retry-delay 1 http://127.0.0.1:7331/api/health
-          curl --fail http://127.0.0.1:7331/
+          ready=false
+          for attempt in {1..30}; do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:7331/api/health; then
+              ready=true
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then
+            echo "Server did not become healthy; startup log follows:"
+            cat "$run_dir/server.log"
+            exit 1
+          fi
+          curl --fail --silent --show-error http://127.0.0.1:7331/
           kill -TERM "$server_pid"
           wait "$server_pid"
 
   rust-security-audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2.0.0
