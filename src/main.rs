@@ -76,6 +76,46 @@ async fn main() -> Result<()> {
             }
         }
     });
+    let automatic_scan_state = state.clone();
+    tokio::spawn(async move {
+        let mut current_schedule: Option<(bool, u64)> = None;
+        let mut next_run = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let schedule = {
+                let config = automatic_scan_state.config.read().await;
+                (
+                    config.automatic_scan_enabled,
+                    config.automatic_scan_interval_minutes,
+                )
+            };
+            if current_schedule != Some(schedule) {
+                current_schedule = Some(schedule);
+                next_run = tokio::time::Instant::now()
+                    + Duration::from_secs(schedule.1.saturating_mul(60));
+            }
+            if !schedule.0
+                || tokio::time::Instant::now() < next_run
+                || automatic_scan_state.workflow_running().await
+            {
+                continue;
+            }
+            next_run =
+                tokio::time::Instant::now() + Duration::from_secs(schedule.1.saturating_mul(60));
+            if let Err(error) =
+                http::handlers::run_automatic_cycle(automatic_scan_state.clone()).await
+            {
+                tracing::error!(%error, "automatic cleaning cycle failed");
+                automatic_scan_state
+                    .finish_workflow(
+                        types::WorkflowPhase::Failed,
+                        "failed",
+                        format!("Automatic cleaning failed: {error}"),
+                    )
+                    .await;
+            }
+        }
+    });
     let api = http::router().layer(middleware::from_fn(http::protect_local_api));
     let app = Router::new().nest("/api", api);
     let app = if let Some(directory) = &frontend {

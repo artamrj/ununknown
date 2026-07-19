@@ -15,6 +15,8 @@ const emptySetup: Setup = {
   input_dir: "",
   output_dir: "",
   delete_source_after_write: false,
+  automatic_scan_enabled: true,
+  automatic_scan_interval_minutes: 5,
   sources: {},
 };
 const busyPhases = new Set(["scan", "fetch", "apply"]);
@@ -140,6 +142,8 @@ export function App() {
           input_dir: setup.input_dir,
           output_dir: setup.output_dir,
           delete_source_after_write: setup.delete_source_after_write,
+          automatic_scan_enabled: setup.automatic_scan_enabled,
+          automatic_scan_interval_minutes: setup.automatic_scan_interval_minutes,
           acoustid_key: keys.acoustid || undefined,
           audd_token: keys.audd || undefined,
           spotify_client_id: keys.spotify_client_id || undefined,
@@ -1559,6 +1563,51 @@ function SettingsDrawer({
                 </small>
               </span>
             </label>
+          </section>
+          <section>
+            <h3>Automatic cleaning</h3>
+            <label className={`automation-toggle ${setup.automatic_scan_enabled ? "enabled" : ""}`}>
+              <input
+                type="checkbox"
+                checked={setup.automatic_scan_enabled}
+                onChange={(event) =>
+                  setSetup({ ...setup, automatic_scan_enabled: event.target.checked })
+                }
+              />
+              <span className="toggle-ui" />
+              <span>
+                <b>
+                  {setup.automatic_scan_enabled
+                    ? "Scan and write automatically"
+                    : "Automatic cleaning is off"}
+                </b>
+                <small>
+                  Confident matches are written automatically. Uncertain music always stays in
+                  Review.
+                </small>
+              </span>
+            </label>
+            {setup.automatic_scan_enabled && (
+              <label className="automation-interval">
+                <span>Run every</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="1440"
+                  value={setup.automatic_scan_interval_minutes}
+                  onChange={(event) =>
+                    setSetup({
+                      ...setup,
+                      automatic_scan_interval_minutes: Math.min(
+                        1440,
+                        Math.max(1, Number(event.target.value) || 1),
+                      ),
+                    })
+                  }
+                />
+                <span>minutes</span>
+              </label>
+            )}
           </section>
           <ProviderStatus sources={setup.sources} />
           <details className="source-key-settings">

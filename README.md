@@ -125,6 +125,11 @@ Fingerprint, integrity-check, and ReplayGain caches share a 100 MiB limit, with
 the oldest entries removed first; the limit is checked at startup and hourly while
 the app is idle. Saved settings and configuration are preserved.
 
+Automatic cleaning is enabled by default every five minutes and can be changed or disabled in
+**Settings → Automatic cleaning**. Each cycle scans only new or changed source files, writes
+strictly matched tracks that are already safe to apply, and leaves every ambiguous or incomplete
+track in Review. The scheduler runs in the backend, so the browser does not need to stay open.
+
 ## Stronger matching with optional services
 
 Open **Optional source keys** in the setup screen to enable these sources. Empty
@@ -183,6 +188,10 @@ credentials they continue to provide title and cover through Spotify oEmbed.
    incomplete tracks remain in review. Any identified track can be returned to review with
    **Undo identification** without discarding its candidate choices.
 5. Select **Write corrected files**.
+
+Steps 3 and 5 can run automatically at the configured interval. Automatic runs never choose a
+Review candidate; they only write tracks that passed the normal strict matching and completeness
+checks.
 
 Before writing, the output planner removes duplicate recordings from the batch. It uses a
 compatible ISRC first, then cached Chromaprint audio fingerprints, with a whole-file SHA-256

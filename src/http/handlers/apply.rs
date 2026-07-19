@@ -16,23 +16,53 @@ struct DuplicateSignature {
     file_hash: Option<String>,
 }
 
+struct PreparedApply {
+    items: Vec<PreviewItem>,
+    selected_count: usize,
+    outputs: usize,
+    duplicates_skipped: usize,
+    delete_source_after_write: bool,
+}
+
 pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
     if s.workflow_running().await {
         return Err(ApiError::conflict("workflow is already running"));
     }
+    let prepared = prepare_apply(&s).await?;
+    if prepared.selected_count == 0 {
+        return Err(ApiError::validation(
+            "No identified tracks are ready to write",
+        ));
+    }
+    let PreparedApply {
+        items,
+        selected_count,
+        outputs,
+        duplicates_skipped,
+        delete_source_after_write,
+    } = prepared;
+    s.start_apply_workflow().await;
+    let state = s.clone();
+    tokio::spawn(async move {
+        finish_apply_workflow(state, items, delete_source_after_write).await;
+    });
+    Ok(Json(serde_json::json!({
+        "started": true,
+        "count": selected_count,
+        "outputs": outputs,
+        "duplicates_skipped": duplicates_skipped
+    })))
+}
+
+async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
     let tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0 AND status!='corrupt'",
+        "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0 AND status!='corrupt' AND stage='ready'",
         queries::TRACK_FIELDS
     )))
     .fetch_all(&s.pool)
     .await?;
     let cfg = s.config.read().await.clone();
     let selected = queries::selected_for_tracks(&s.pool, tracks).await?;
-    if selected.is_empty() {
-        return Err(ApiError::validation(
-            "No identified tracks are ready to write",
-        ));
-    }
     let selected_count = selected.len();
     let mut items: Vec<PreviewItem> = Vec::new();
     let mut signatures = Vec::new();
@@ -62,30 +92,68 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
     let outputs = items.len();
     let duplicates_skipped = selected_count.saturating_sub(outputs);
     let delete_source_after_write = cfg.delete_source_after_write;
+    Ok(PreparedApply {
+        items,
+        selected_count,
+        outputs,
+        duplicates_skipped,
+        delete_source_after_write,
+    })
+}
+
+pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize> {
+    let prepared = prepare_apply(&s).await?;
+    if prepared.selected_count == 0 {
+        return Ok(0);
+    }
+    let count = prepared.selected_count;
     s.start_apply_workflow().await;
-    let state = s.clone();
-    tokio::spawn(async move {
-        let result = apply(state.clone(), items, delete_source_after_write).await;
-        if state.workflow_cancelled().await {
-            state
-                .finish_workflow(WorkflowPhase::Idle, "idle", "Apply stopped")
-                .await;
-        } else if let Err(error) = result {
-            state
-                .finish_workflow(WorkflowPhase::Failed, "failed", error.to_string())
-                .await;
-        } else {
-            state
-                .finish_workflow(WorkflowPhase::Finish, "finish", "Apply complete")
-                .await;
-        }
-    });
-    Ok(Json(serde_json::json!({
-        "started": true,
-        "count": selected_count,
-        "outputs": outputs,
-        "duplicates_skipped": duplicates_skipped
-    })))
+    let result = apply(
+        s.clone(),
+        prepared.items,
+        prepared.delete_source_after_write,
+    )
+    .await;
+    if s.workflow_cancelled().await {
+        s.finish_workflow(WorkflowPhase::Idle, "idle", "Automatic write stopped")
+            .await;
+    } else if let Err(error) = &result {
+        s.finish_workflow(WorkflowPhase::Failed, "failed", error.to_string())
+            .await;
+    } else {
+        s.finish_workflow(
+            WorkflowPhase::Finish,
+            "finish",
+            format!(
+                "Automatic cleaning complete · {count} {} written",
+                if count == 1 { "track" } else { "tracks" }
+            ),
+        )
+        .await;
+    }
+    result?;
+    Ok(count)
+}
+
+async fn finish_apply_workflow(
+    state: Arc<AppState>,
+    items: Vec<PreviewItem>,
+    delete_source_after_write: bool,
+) {
+    let result = apply(state.clone(), items, delete_source_after_write).await;
+    if state.workflow_cancelled().await {
+        state
+            .finish_workflow(WorkflowPhase::Idle, "idle", "Apply stopped")
+            .await;
+    } else if let Err(error) = result {
+        state
+            .finish_workflow(WorkflowPhase::Failed, "failed", error.to_string())
+            .await;
+    } else {
+        state
+            .finish_workflow(WorkflowPhase::Finish, "finish", "Apply complete")
+            .await;
+    }
 }
 
 async fn duplicate_signature(
@@ -839,6 +907,41 @@ async fn remove_source_after_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automatic_write_excludes_tracks_that_are_still_in_review() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("review-write.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/review.mp3','review.mp3','needs_review',0,'now','now','now','review')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let candidate_id = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,score) VALUES(?,'deezer','Song','Artist',80)")
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
+            .bind(candidate_id)
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = Arc::new(AppState::new(
+            crate::config::Config::default(),
+            pool.clone(),
+        ));
+
+        let prepared = prepare_apply(&state).await.unwrap();
+
+        assert_eq!(prepared.selected_count, 0);
+        assert!(prepared.items.is_empty());
+    }
 
     #[test]
     fn recognizes_only_numbered_variants_of_the_preferred_destination() {

@@ -23,7 +23,7 @@ mod tracks;
 mod workspace;
 
 pub use apply::start_apply;
-pub use scan::{retry_issues, start_scan, stop_scan};
+pub use scan::{retry_issues, run_automatic_cycle, start_scan, stop_scan};
 pub use settings::{setup, update_setup};
 pub use tracks::{
     artwork_preview, auto_approve_review, candidate_artwork_preview, list_tracks, manual_candidate,
@@ -199,6 +199,8 @@ pub struct SetupRequest {
     input_dir: String,
     output_dir: String,
     delete_source_after_write: Option<bool>,
+    automatic_scan_enabled: Option<bool>,
+    automatic_scan_interval_minutes: Option<u64>,
     acoustid_key: Option<String>,
     audd_token: Option<String>,
     spotify_client_id: Option<String>,

@@ -7,10 +7,10 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::{Mutex, Semaphore, mpsc, oneshot},
@@ -65,22 +65,7 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             "Walking input folder for supported audio files",
         )
         .await;
-    let mut walk_errors = Vec::new();
-    let mut files: Vec<PathBuf> = WalkDir::new(&cfg.input_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| match entry {
-            Ok(entry) => Some(entry),
-            Err(error) => {
-                tracing::warn!("input folder walk error: {error:#}");
-                walk_errors.push(format!("{error:#}"));
-                None
-            }
-        })
-        .filter(|e| e.file_type().is_file() && audio::is_supported(e.path()))
-        .filter_map(|e| e.path().canonicalize().ok())
-        .collect();
-    files.sort();
+    let (files, walk_errors) = discover_files(&cfg.input_dir);
     let total = files.len();
     state
         .log(
@@ -105,26 +90,152 @@ pub async fn run(state: Arc<AppState>) -> Result<()> {
             )
             .await;
     }
+    let snapshot_files = files.clone();
     run_files(
-        state,
+        state.clone(),
         files,
         "Starting staged matching",
         "Matching complete",
     )
-    .await
+    .await?;
+    if !state.workflow_cancelled().await {
+        remember_scanned_files(&state.pool, &snapshot_files).await?;
+    }
+    Ok(())
+}
+
+fn discover_files(input_dir: &str) -> (Vec<PathBuf>, Vec<String>) {
+    let mut walk_errors = Vec::new();
+    let mut files: Vec<PathBuf> = WalkDir::new(input_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(error) => {
+                tracing::warn!("input folder walk error: {error:#}");
+                walk_errors.push(format!("{error:#}"));
+                None
+            }
+        })
+        .filter(|e| e.file_type().is_file() && audio::is_supported(e.path()))
+        .filter_map(|e| e.path().canonicalize().ok())
+        .collect();
+    files.sort();
+    (files, walk_errors)
+}
+
+pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
+    let cfg = state.config.read().await.clone();
+    let (files, walk_errors) = discover_files(&cfg.input_dir);
+    for error in walk_errors {
+        state
+            .log_entry(
+                ActivityLogEntry::new("error", "automatic_scan", "Input folder walk error")
+                    .error_text(error),
+            )
+            .await;
+    }
+    let pending = automatic_pending_files(&state.pool, files).await?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    state
+        .reset_workflow(WorkflowPhase::Scan, "Automatic scan: discovering new music")
+        .await;
+    let snapshot_files = pending.clone();
+    run_files(
+        state.clone(),
+        pending,
+        "Automatic scan: matching new or changed music",
+        "Automatic scan complete",
+    )
+    .await?;
+    if !state.workflow_cancelled().await {
+        remember_scanned_files(&state.pool, &snapshot_files).await?;
+    }
+    Ok(snapshot_files.len())
 }
 
 /// Re-run the complete integrity and identification pipeline for a selected set
 /// of source files. Unlike a full scan, this keeps the rest of the workspace
 /// intact and replaces only the outcomes for the supplied paths.
 pub async fn retry_files(state: Arc<AppState>, files: Vec<PathBuf>) -> Result<()> {
+    let snapshot_files = files.clone();
     run_files(
-        state,
+        state.clone(),
         files,
         "Checking files with issues",
         "Issue check complete",
     )
-    .await
+    .await?;
+    if !state.workflow_cancelled().await {
+        remember_scanned_files(&state.pool, &snapshot_files).await?;
+    }
+    Ok(())
+}
+
+async fn automatic_pending_files(
+    pool: &sqlx::SqlitePool,
+    files: Vec<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let rows: Vec<(String, i64, i64)> =
+        sqlx::query_as("SELECT path,file_size,file_mtime_ns FROM automatic_scan_files")
+            .fetch_all(pool)
+            .await?;
+    let known = rows
+        .into_iter()
+        .map(|(path, size, modified)| (path, (size, modified)))
+        .collect::<HashMap<_, _>>();
+    let mut pending = Vec::new();
+    for path in files {
+        let Some((size, modified)) = file_snapshot(&path).await else {
+            continue;
+        };
+        let text = path.to_string_lossy();
+        if known.get(text.as_ref()) != Some(&(size, modified)) {
+            pending.push(path);
+        }
+    }
+    Ok(pending)
+}
+
+async fn remember_scanned_files(pool: &sqlx::SqlitePool, files: &[PathBuf]) -> Result<()> {
+    let mut transaction = pool.begin().await?;
+    for path in files {
+        let Some((size, modified)) = file_snapshot(path).await else {
+            continue;
+        };
+        sqlx::query(
+            "INSERT INTO automatic_scan_files(path,file_size,file_mtime_ns,checked_at)
+             VALUES(?,?,?,?)
+             ON CONFLICT(path) DO UPDATE SET
+               file_size=excluded.file_size,
+               file_mtime_ns=excluded.file_mtime_ns,
+               checked_at=excluded.checked_at",
+        )
+        .bind(path.to_string_lossy().as_ref())
+        .bind(size)
+        .bind(modified)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn file_snapshot(path: &Path) -> Option<(i64, i64)> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let nanos = modified
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Some((size, i64::try_from(nanos).unwrap_or(i64::MAX)))
 }
 
 async fn run_files(
@@ -2634,6 +2745,41 @@ async fn upsert_track_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn automatic_scan_only_returns_new_or_changed_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("automatic-files.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let source = directory.path().join("song.mp3");
+        tokio::fs::write(&source, b"first version").await.unwrap();
+        let source = source.canonicalize().unwrap();
+
+        let pending = automatic_pending_files(&pool, vec![source.clone()])
+            .await
+            .unwrap();
+        assert_eq!(pending, vec![source.clone()]);
+
+        remember_scanned_files(&pool, std::slice::from_ref(&source))
+            .await
+            .unwrap();
+        assert!(
+            automatic_pending_files(&pool, vec![source.clone()])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        tokio::fs::write(&source, b"a changed and longer version")
+            .await
+            .unwrap();
+        let pending = automatic_pending_files(&pool, vec![source.clone()])
+            .await
+            .unwrap();
+        assert_eq!(pending, vec![source]);
+    }
 
     async fn test_pool() -> sqlx::SqlitePool {
         let dir = tempfile::tempdir().unwrap();

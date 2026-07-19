@@ -8,6 +8,8 @@ pub struct Config {
     pub input_dir: String,
     pub output_dir: String,
     pub delete_source_after_write: bool,
+    pub automatic_scan_enabled: bool,
+    pub automatic_scan_interval_minutes: u64,
     pub acoustid_key: String,
     pub audd_token: String,
     pub spotify_client_id: String,
@@ -32,6 +34,8 @@ impl Default for Config {
             input_dir: ".local/input".into(),
             output_dir: ".local/output".into(),
             delete_source_after_write: false,
+            automatic_scan_enabled: true,
+            automatic_scan_interval_minutes: 5,
             acoustid_key: String::new(),
             audd_token: String::new(),
             spotify_client_id: String::new(),
@@ -57,6 +61,8 @@ impl Config {
         self.fingerprint_workers = self.fingerprint_workers.clamp(1, 16);
         self.lookup_workers = self.lookup_workers.clamp(1, 16);
         self.write_workers = self.write_workers.clamp(1, 8);
+        self.automatic_scan_interval_minutes =
+            self.automatic_scan_interval_minutes.clamp(1, 24 * 60);
     }
 
     /// Environment values take precedence without being copied back into the
@@ -110,5 +116,18 @@ mod tests {
         assert_eq!(config.fingerprint_workers, 16);
         assert_eq!(config.lookup_workers, 1);
         assert_eq!(config.write_workers, 8);
+    }
+
+    #[test]
+    fn automatic_scan_interval_is_bounded() {
+        let mut config = Config {
+            automatic_scan_interval_minutes: 0,
+            ..Config::default()
+        };
+        config.normalize();
+        assert_eq!(config.automatic_scan_interval_minutes, 1);
+        config.automatic_scan_interval_minutes = u64::MAX;
+        config.normalize();
+        assert_eq!(config.automatic_scan_interval_minutes, 24 * 60);
     }
 }

@@ -12,6 +12,8 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         "input_dir": cfg.input_dir,
         "output_dir": cfg.output_dir,
         "delete_source_after_write": cfg.delete_source_after_write,
+        "automatic_scan_enabled": cfg.automatic_scan_enabled,
+        "automatic_scan_interval_minutes": cfg.automatic_scan_interval_minutes,
         "sources": {
             "musicbrainz": true,
             "navahang": true,
@@ -72,6 +74,13 @@ pub async fn update_setup(
     cfg.input_dir = input_dir.into();
     cfg.output_dir = output_dir.into();
     cfg.delete_source_after_write = delete_source_after_write;
+    cfg.automatic_scan_enabled = body
+        .automatic_scan_enabled
+        .unwrap_or(cfg.automatic_scan_enabled);
+    cfg.automatic_scan_interval_minutes = body
+        .automatic_scan_interval_minutes
+        .unwrap_or(cfg.automatic_scan_interval_minutes)
+        .clamp(1, 24 * 60);
     if let Some(value) = body.acoustid_key.filter(|value| !value.trim().is_empty()) {
         cfg.acoustid_key = value.trim().into();
     }
