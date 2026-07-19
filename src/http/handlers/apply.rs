@@ -20,10 +20,10 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
     if s.workflow_running().await {
         return Err(ApiError::conflict("workflow is already running"));
     }
-    let tracks: Vec<Track> = sqlx::query_as(&format!(
+    let tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0 AND status!='corrupt'",
         queries::TRACK_FIELDS
-    ))
+    )))
     .fetch_all(&s.pool)
     .await?;
     let cfg = s.config.read().await.clone();

@@ -3,10 +3,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<TrackPage>> {
-    let tracks: Vec<Track> = sqlx::query_as(&format!(
+    let tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM tracks ORDER BY path LIMIT 10000",
         queries::TRACK_FIELDS
-    ))
+    )))
     .fetch_all(&s.pool)
     .await?;
     let total = tracks.len() as i64;
@@ -30,10 +30,10 @@ pub async fn auto_approve_review(
         ));
     }
 
-    let tracks: Vec<Track> = sqlx::query_as(&format!(
+    let tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM tracks WHERE stage='review' AND selected_candidate_id IS NULL ORDER BY id",
         queries::TRACK_FIELDS
-    ))
+    )))
     .fetch_all(&s.pool)
     .await?;
     let candidate_rows: Vec<CandidateRow> = sqlx::query_as(
