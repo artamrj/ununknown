@@ -1,5 +1,5 @@
 use crate::config::Config;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use sqlx::{
     SqlitePool,
@@ -9,6 +9,7 @@ use std::{path::Path, str::FromStr, time::Duration};
 
 const DAILY_CACHE_CLEANUP_KEY: &str = "last_disposable_cache_cleanup";
 const MEDIA_CACHE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub async fn connect(path: &str) -> Result<SqlitePool> {
     if let Some(parent) = Path::new(path).parent() {
@@ -17,6 +18,7 @@ pub async fn connect(path: &str) -> Result<SqlitePool> {
     let url = format!("sqlite://{path}?mode=rwc");
     let options = SqliteConnectOptions::from_str(&url)?
         .create_if_missing(true)
+        .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(30));
@@ -25,8 +27,30 @@ pub async fn connect(path: &str) -> Result<SqlitePool> {
         .acquire_timeout(Duration::from_secs(30))
         .connect_with(options)
         .await?;
-    sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .context("database migration failed")?;
+    // Keep the legacy declaration referenced until the next schema change
+    // removes it; migration files are now the authoritative upgrade path.
+    debug_assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS tracks"));
+    restrict_database_permissions(path).await?;
     Ok(pool)
+}
+
+#[cfg(unix)]
+async fn restrict_database_permissions(path: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("could not protect database file {path}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn restrict_database_permissions(_path: &str) -> Result<()> {
+    Ok(())
 }
 
 const SCHEMA: &str = r#"
@@ -171,10 +195,11 @@ pub async fn load_settings(pool: &SqlitePool, defaults: Config) -> Result<Config
         .fetch_optional(pool)
         .await?;
     let mut config = match value {
-        Some(value) => serde_json::from_str(&value).unwrap_or(defaults),
+        Some(value) => serde_json::from_str(&value).context("stored configuration is invalid")?,
         None => defaults,
     };
     config.db_path = db_path;
+    config.normalize();
     save_settings(pool, &config).await?;
     Ok(config)
 }
@@ -436,6 +461,42 @@ mod tests {
                 .await
                 .unwrap(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn new_databases_record_the_schema_migration() {
+        let pool = test_pool().await;
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn legacy_database_is_adopted_by_the_migrator() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let legacy = SqlitePoolOptions::new().connect(&url).await.unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&legacy).await.unwrap();
+        legacy.close().await;
+
+        let pool = connect(path.to_str().unwrap()).await.unwrap();
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
         );
     }
 }

@@ -185,7 +185,7 @@ async fn file_sha256(path: &std::path::Path) -> Result<String> {
 }
 
 fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf {
-    if reserved.insert(base.clone()) {
+    if !base.exists() && reserved.insert(base.clone()) {
         return base;
     }
     let parent = base.parent().unwrap_or_else(|| std::path::Path::new(""));
@@ -200,11 +200,66 @@ fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf
             None => format!("{stem} ({number})"),
         };
         let candidate = parent.join(filename);
-        if reserved.insert(candidate.clone()) {
+        if !candidate.exists() && reserved.insert(candidate.clone()) {
             return candidate;
         }
     }
     unreachable!()
+}
+
+fn numbered_destination(base: &std::path::Path, number: usize) -> PathBuf {
+    let parent = base.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = base
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Corrected track");
+    let extension = base.extension().and_then(|value| value.to_str());
+    let filename = match extension {
+        Some(extension) => format!("{stem} ({number}).{extension}"),
+        None => format!("{stem} ({number})"),
+    };
+    parent.join(filename)
+}
+
+/// Atomically publishes a completed temporary file without replacing anything
+/// already present. A hard link is used because the temporary and final paths
+/// are deliberately in the same directory; unlike rename, hard-link creation
+/// fails when the destination already exists on every supported platform.
+async fn publish_no_clobber(
+    temporary: &std::path::Path,
+    preferred: &std::path::Path,
+) -> Result<PathBuf> {
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(temporary)
+        .await?
+        .sync_all()
+        .await?;
+
+    let mut number = 1;
+    loop {
+        let destination = if number == 1 {
+            preferred.to_owned()
+        } else {
+            numbered_destination(preferred, number)
+        };
+        match tokio::fs::hard_link(temporary, &destination).await {
+            Ok(()) => {
+                if let Err(error) = tokio::fs::remove_file(temporary).await {
+                    tracing::warn!(
+                        path = %temporary.display(),
+                        %error,
+                        "published output but could not remove temporary link"
+                    );
+                }
+                return Ok(destination);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                number += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn temporary_destination(destination: &std::path::Path, track_id: i64) -> PathBuf {
@@ -347,15 +402,23 @@ pub async fn apply(
             )
             .await;
         }
-        let mut result = match result {
-            Ok(_) => tokio::fs::rename(&temporary, &dest)
-                .await
-                .map_err(anyhow::Error::from),
+        let publication = match result {
+            Ok(_) => publish_no_clobber(&temporary, &dest).await,
             Err(error) => Err(error),
         };
-        let output_was_written = result.is_ok();
+        let output_was_written = publication.is_ok();
+        let final_path = publication.as_ref().unwrap_or(&dest).clone();
+        let mut result = publication.map(|_| ());
         if output_was_written && delete_source_after_write {
-            result = remove_source_after_output(&src, &dest).await.map(|_| ());
+            if paths_resolve_to_same_target(&src, &final_path).await? {
+                anyhow::bail!(
+                    "refusing to remove source because input and output resolve to the same file: {}",
+                    src.display()
+                );
+            }
+            result = remove_source_after_output(&src, &final_path)
+                .await
+                .map(|_| ());
             if result.is_ok() {
                 s.log_entry(
                     ActivityLogEntry::new(
@@ -366,7 +429,7 @@ pub async fn apply(
                     .file(item.filename.clone())
                     .context(serde_json::json!({
                         "source": src.display().to_string(),
-                        "output": dest.display().to_string()
+                        "output": final_path.display().to_string()
                     })),
                 )
                 .await;
@@ -389,7 +452,7 @@ pub async fn apply(
                     .error(e.as_ref())
                     .context(serde_json::json!({
                         "temporary": temporary.display().to_string(),
-                        "destination": dest.display().to_string()
+                        "destination": final_path.display().to_string()
                     })),
                 )
                 .await;
@@ -400,11 +463,10 @@ pub async fn apply(
             s.increment_failed().await;
             let _ = tokio::fs::remove_file(&temporary).await;
         }
-        let final_path = &dest;
         sqlx::query(
             "UPDATE tracks SET output_path=?,status=?,error=?,last_applied_at=? WHERE id=?",
         )
-        .bind(final_path.to_string_lossy())
+        .bind(output_was_written.then(|| final_path.to_string_lossy().into_owned()))
         .bind(status)
         .bind(error)
         .bind(Utc::now().to_rfc3339())
@@ -429,7 +491,7 @@ pub async fn apply(
             .await;
             for duplicate in &item.duplicates {
                 if let Err(error) =
-                    finish_duplicate(&s, duplicate, final_path, delete_source_after_write).await
+                    finish_duplicate(&s, duplicate, &final_path, delete_source_after_write).await
                 {
                     s.increment_failed().await;
                     let detail = format!("{error:#}");
@@ -632,13 +694,43 @@ mod tests {
 
     #[test]
     fn duplicate_destinations_get_numbered_without_overwrite() {
+        let directory = tempfile::tempdir().unwrap();
         let mut reserved = HashSet::new();
-        let base = PathBuf::from("/output/Artist - Song.mp3");
+        let base = directory.path().join("Artist - Song.mp3");
         assert_eq!(unique_destination(base.clone(), &mut reserved), base);
         assert_eq!(
-            unique_destination(base, &mut reserved),
-            PathBuf::from("/output/Artist - Song (2).mp3")
+            unique_destination(base.clone(), &mut reserved),
+            directory.path().join("Artist - Song (2).mp3")
         );
+
+        std::fs::write(directory.path().join("Artist - Song (3).mp3"), b"existing").unwrap();
+        reserved.insert(directory.path().join("Artist - Song (2).mp3"));
+        reserved.insert(base.clone());
+        assert_eq!(
+            unique_destination(base, &mut reserved),
+            directory.path().join("Artist - Song (4).mp3")
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_never_replaces_an_existing_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join(".temporary.mp3");
+        let preferred = directory.path().join("Artist - Song.mp3");
+        tokio::fs::write(&temporary, b"new output").await.unwrap();
+        tokio::fs::write(&preferred, b"existing output")
+            .await
+            .unwrap();
+
+        let published = publish_no_clobber(&temporary, &preferred).await.unwrap();
+
+        assert_eq!(published, directory.path().join("Artist - Song (2).mp3"));
+        assert_eq!(
+            tokio::fs::read(&preferred).await.unwrap(),
+            b"existing output"
+        );
+        assert_eq!(tokio::fs::read(&published).await.unwrap(), b"new output");
+        assert!(!temporary.exists());
     }
 
     fn signature(

@@ -51,13 +51,18 @@ impl From<std::io::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match self {
-            Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, message) = match self {
+            Self::Validation(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::Internal(error) => {
+                tracing::error!(error = %format!("{error:#}"), "API request failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_owned(),
+                )
+            }
         };
-        let message = self.to_string();
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
 }

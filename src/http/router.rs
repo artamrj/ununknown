@@ -1,13 +1,16 @@
 use crate::{app::AppState, http::handlers};
-use axum::{Json, Router, http::StatusCode, routing::get, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/health",
-            get(|| async { Json(serde_json::json!({"status":"ok"})) }),
-        )
+        .route("/health", get(health))
         .route("/setup", get(handlers::setup).put(handlers::update_setup))
         .route("/status", get(handlers::workspace))
         .route("/identify", post(handlers::start_scan))
@@ -41,6 +44,19 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/write", post(handlers::start_apply))
         .fallback(api_not_found)
+}
+
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(1) => (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))),
+        Ok(_) | Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status":"unavailable"})),
+        ),
+    }
 }
 
 async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {

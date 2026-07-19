@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install media tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg libchromaprint-tools
+
+      - name: Frontend checks
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run format:check
+          npm run lint
+          npm audit --audit-level=high
+          npm run build
+
+      - name: Rust checks
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-targets --all-features
+          cargo build --locked --release
+
+      - name: Production smoke test
+        run: |
+          run_dir="$(mktemp -d)"
+          mkdir -p "$run_dir/input" "$run_dir/output"
+          UNUNKNOWN_DB="$run_dir/ununknown.sqlite" \
+          UNUNKNOWN_INPUT_DIR="$run_dir/input" \
+          UNUNKNOWN_OUTPUT_DIR="$run_dir/output" \
+          UNUNKNOWN_STATIC_DIR="$GITHUB_WORKSPACE/frontend/dist" \
+          target/release/ununknown >"$run_dir/server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
+          curl --fail --retry 10 --retry-delay 1 http://127.0.0.1:7331/api/health
+          curl --fail http://127.0.0.1:7331/
+          kill -TERM "$server_pid"
+          wait "$server_pid"
+
+  rust-security-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

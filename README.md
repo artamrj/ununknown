@@ -33,6 +33,36 @@ The launcher stores temporary data under `.local/`:
 - `.local/output` — corrected copies
 - `.local/cache` — SQLite and fingerprint/provider caches
 
+## Production build
+
+Production is a single-user local deployment. The optimized Rust server serves both the API and the
+built React application on `127.0.0.1:7331`; it refuses non-loopback bind addresses because the API
+has intentional access to local media paths.
+
+Create a versioned release archive:
+
+```bash
+./scripts/build-release.sh
+```
+
+Extract the archive from `dist/`, then run `bin/ununknown-run`. Application data is stored under
+`~/Library/Application Support/Ununknown` on macOS or
+`${XDG_STATE_HOME:-~/.local/state}/ununknown` on Linux. Override that location with
+`UNUNKNOWN_DATA_DIR`. FFmpeg and Chromaprint remain recommended runtime dependencies.
+
+The server supports `UNUNKNOWN_DB`, `UNUNKNOWN_INPUT_DIR`, `UNUNKNOWN_OUTPUT_DIR`,
+`UNUNKNOWN_STATIC_DIR`, and a loopback-only `UNUNKNOWN_BIND`. Provider credentials can be supplied
+without persisting them in SQLite through `UNUNKNOWN_ACOUSTID_KEY`, `UNUNKNOWN_AUDD_TOKEN`,
+`UNUNKNOWN_SPOTIFY_CLIENT_ID`, `UNUNKNOWN_SPOTIFY_CLIENT_SECRET`,
+`UNUNKNOWN_SOUNDCLOUD_CLIENT_ID`, `UNUNKNOWN_SOUNDCLOUD_CLIENT_SECRET`,
+`UNUNKNOWN_YOUTUBE_API_KEY`, `UNUNKNOWN_DISCOGS_TOKEN`, `UNUNKNOWN_LASTFM_KEY`, and
+`UNUNKNOWN_THEAUDIODB_KEY`.
+
+Send `SIGTERM` or press Ctrl+C for a graceful stop. The server asks an active workflow to stop at a
+safe boundary, waits up to 30 seconds, drains HTTP requests, and closes SQLite. Back up the database
+and keep **Remove input after successful output** disabled until the output has been verified for a
+new library.
+
 Disposable provider responses and downloaded artwork are cleared automatically at
 local midnight while the app is idle. A missed cleanup runs on the next startup.
 Fingerprint, integrity-check, and ReplayGain caches share a 100 MiB limit, with
@@ -105,5 +135,6 @@ remixes, live versions, and materially different durations remain separate and r
 filenames when their corrected names collide. Existing output files are never bulk-deleted.
 
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,
-`/api/identify`, `/api/tracks`, and `/api/write`. There are no Docker,
-deployment, authentication, background-job, or production-build layers.
+`/api/identify`, `/api/tracks`, and `/api/write`. Production packages keep that API on loopback,
+serve the frontend from the same process, apply versioned SQLite migrations, and publish corrected
+outputs atomically without replacing existing files.
