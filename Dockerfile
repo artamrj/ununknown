@@ -38,10 +38,11 @@ LABEL org.opencontainers.image.title="Ununknown" \
       org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.licenses="MIT"
 
-RUN apk add --no-cache alsa-lib ca-certificates chromaprint ffmpeg tini && \
+RUN apk add --no-cache alsa-lib ca-certificates chromaprint ffmpeg su-exec tini && \
     command -v ffmpeg && \
     command -v ffprobe && \
     command -v fpcalc && \
+    command -v su-exec && \
     command -v tini && \
     addgroup -S -g 10001 ununknown && \
     adduser -S -D -H -u 10001 -G ununknown ununknown && \
@@ -51,10 +52,15 @@ RUN apk add --no-cache alsa-lib ca-certificates chromaprint ffmpeg tini && \
 COPY --from=backend --chown=10001:10001 /tmp/ununknown /usr/local/bin/ununknown
 COPY --from=songrec --chown=10001:10001 /opt/songrec/bin/songrec-lib-cli /usr/local/bin/songrec-lib-cli
 COPY --from=frontend --chown=10001:10001 /build/frontend/dist/ /usr/share/ununknown/
+COPY --chmod=755 scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN command -v songrec-lib-cli
+RUN command -v songrec-lib-cli && \
+    sh -n /usr/local/bin/docker-entrypoint.sh
 
-ENV UNUNKNOWN_BIND=0.0.0.0:7331 \
+ENV PUID=10001 \
+    PGID=10001 \
+    HOME=/tmp \
+    UNUNKNOWN_BIND=0.0.0.0:7331 \
     UNUNKNOWN_ALLOW_NON_LOOPBACK=true \
     UNUNKNOWN_DB=/data/cache/ununknown.sqlite \
     UNUNKNOWN_INPUT_DIR=/data/input \
@@ -63,9 +69,8 @@ ENV UNUNKNOWN_BIND=0.0.0.0:7331 \
     UNUNKNOWN_SONGREC_BIN=/usr/local/bin/songrec-lib-cli \
     RUST_LOG=info
 
-USER 10001:10001
 EXPOSE 7331
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7331/api/health"]
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/usr/local/bin/ununknown"]

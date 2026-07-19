@@ -60,26 +60,27 @@ without persisting them in SQLite through `UNUNKNOWN_ACOUSTID_KEY`, `UNUNKNOWN_A
 
 ### Docker Compose and GHCR
 
-The included Compose deployment pulls `ghcr.io/artamrj/ununknown:latest`, runs as a non-root user,
-uses a read-only container filesystem, and publishes the application only on
+The included Compose deployment pulls `ghcr.io/artamrj/ununknown:latest`, runs the application as a
+non-root user, uses a read-only container filesystem, and publishes the application only on
 `127.0.0.1:7331`. Prepare it with:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
-mkdir -p music output data
-# On Linux, set PUID and PGID in .env to the output of `id -u` and `id -g`.
+# Point UNUNKNOWN_INPUT_PATH at an existing music library. On Linux, set PUID
+# and PGID in .env to the output of `id -u` and `id -g`.
 docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
 Then open <http://127.0.0.1:7331>. Put input files in `music/`; corrected copies are written to
-`output/`; SQLite and caches are stored in `data/`. These locations, the image tag, port, log level,
-and optional provider credentials are documented in `.env.example`. The input mount is read-only,
-so **Remove input after successful output** cannot delete source music in this deployment. If that
-behavior is intentionally required, remove `read_only: true` from the `/data/input` volume only
-after backing up the library.
+`output/`; SQLite and caches are stored in `data/`. On startup, the container creates the writable
+mounts when necessary, assigns them to `PUID:PGID`, and drops root privileges before starting the
+application. These locations, the image tag, port, log level, and optional provider credentials are
+documented in `.env.example`. The input mount is read-only, so **Remove input after successful
+output** cannot delete source music in this deployment. If that behavior is intentionally required,
+remove `read_only: true` from the `/data/input` volume only after backing up the library.
 
 For a reproducible NAS deployment, set `UNUNKNOWN_TAG` in `.env` to an exact release such as
 `0.6.0` instead of `latest`. The image contains FFmpeg/ffprobe, Chromaprint/fpcalc, the headless
