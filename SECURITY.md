@@ -4,8 +4,10 @@
 
 Ununknown is a single-user local application. Its API intentionally accepts file-system paths and
 can write corrected media or remove source files when that option is enabled. The server therefore
-refuses to bind to non-loopback addresses. Do not expose it through a reverse proxy, tunnel, shared
-host, or public network.
+refuses to bind to non-loopback addresses by default. The official container explicitly opts into
+an internal `0.0.0.0` bind so Docker networking can reach it, while `compose.yaml` publishes that
+port only on host loopback. Do not change `UNUNKNOWN_HOST` to `0.0.0.0`, or expose the app through a
+reverse proxy, tunnel, shared host, or public network.
 
 The bundled UI and API share one origin. Mutating browser requests with a non-loopback `Origin` are
 rejected. API responses use restrictive browser security headers and internal errors are logged

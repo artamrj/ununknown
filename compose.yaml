@@ -1,0 +1,48 @@
+name: ununknown
+
+services:
+  ununknown:
+    image: "${UNUNKNOWN_IMAGE:-ghcr.io/artamrj/ununknown}:${UNUNKNOWN_TAG:-latest}"
+    user: "${PUID:-1000}:${PGID:-1000}"
+    restart: unless-stopped
+    ports:
+      - "${UNUNKNOWN_HOST:-127.0.0.1}:${UNUNKNOWN_PORT:-7331}:7331"
+    environment:
+      HOME: /tmp
+      RUST_LOG: "${RUST_LOG:-info}"
+      UNUNKNOWN_BIND: 0.0.0.0:7331
+      UNUNKNOWN_ALLOW_NON_LOOPBACK: "true"
+      UNUNKNOWN_DB: /data/cache/ununknown.sqlite
+      UNUNKNOWN_INPUT_DIR: /data/input
+      UNUNKNOWN_OUTPUT_DIR: /data/output
+      UNUNKNOWN_STATIC_DIR: /usr/share/ununknown
+      UNUNKNOWN_ACOUSTID_KEY: "${UNUNKNOWN_ACOUSTID_KEY:-}"
+      UNUNKNOWN_AUDD_TOKEN: "${UNUNKNOWN_AUDD_TOKEN:-}"
+      UNUNKNOWN_SPOTIFY_CLIENT_ID: "${UNUNKNOWN_SPOTIFY_CLIENT_ID:-}"
+      UNUNKNOWN_SPOTIFY_CLIENT_SECRET: "${UNUNKNOWN_SPOTIFY_CLIENT_SECRET:-}"
+      UNUNKNOWN_SOUNDCLOUD_CLIENT_ID: "${UNUNKNOWN_SOUNDCLOUD_CLIENT_ID:-}"
+      UNUNKNOWN_SOUNDCLOUD_CLIENT_SECRET: "${UNUNKNOWN_SOUNDCLOUD_CLIENT_SECRET:-}"
+      UNUNKNOWN_YOUTUBE_API_KEY: "${UNUNKNOWN_YOUTUBE_API_KEY:-}"
+      UNUNKNOWN_DISCOGS_TOKEN: "${UNUNKNOWN_DISCOGS_TOKEN:-}"
+      UNUNKNOWN_LASTFM_KEY: "${UNUNKNOWN_LASTFM_KEY:-}"
+      UNUNKNOWN_THEAUDIODB_KEY: "${UNUNKNOWN_THEAUDIODB_KEY:-}"
+    volumes:
+      - type: bind
+        source: "${UNUNKNOWN_INPUT_PATH:-./music}"
+        target: /data/input
+        read_only: true
+      - type: bind
+        source: "${UNUNKNOWN_OUTPUT_PATH:-./output}"
+        target: /data/output
+      - type: bind
+        source: "${UNUNKNOWN_DATA_PATH:-./data}"
+        target: /data/cache
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    stop_grace_period: 45s

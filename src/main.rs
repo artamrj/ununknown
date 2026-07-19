@@ -104,11 +104,24 @@ async fn main() -> Result<()> {
 
 fn listen_address() -> Result<SocketAddr> {
     let raw = std::env::var("UNUNKNOWN_BIND").unwrap_or_else(|_| "127.0.0.1:7331".into());
+    let allow_non_loopback = std::env::var("UNUNKNOWN_ALLOW_NON_LOOPBACK").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    });
+    parse_listen_address(&raw, allow_non_loopback)
+}
+
+fn parse_listen_address(raw: &str, allow_non_loopback: bool) -> Result<SocketAddr> {
     let address: SocketAddr = raw
         .parse()
         .with_context(|| format!("invalid UNUNKNOWN_BIND address: {raw}"))?;
-    if !address.ip().is_loopback() {
-        bail!("UNUNKNOWN_BIND must use a loopback address; this local API must not be exposed")
+    if !address.ip().is_loopback() && !allow_non_loopback {
+        bail!(
+            "UNUNKNOWN_BIND must use a loopback address; containers may set \
+             UNUNKNOWN_ALLOW_NON_LOOPBACK=true only when the published host port remains loopback-only"
+        )
     }
     Ok(address)
 }
@@ -184,4 +197,31 @@ fn duration_until_next_local_midnight() -> Duration {
     (next_midnight - now)
         .to_std()
         .unwrap_or_else(|_| Duration::from_secs(24 * 60 * 60))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listen_address_accepts_loopback_by_default() {
+        assert_eq!(
+            parse_listen_address("127.0.0.1:7331", false).unwrap(),
+            "127.0.0.1:7331".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn listen_address_rejects_non_loopback_without_explicit_opt_in() {
+        let error = parse_listen_address("0.0.0.0:7331", false).unwrap_err();
+        assert!(error.to_string().contains("UNUNKNOWN_ALLOW_NON_LOOPBACK"));
+    }
+
+    #[test]
+    fn listen_address_accepts_container_bind_with_explicit_opt_in() {
+        assert_eq!(
+            parse_listen_address("0.0.0.0:7331", true).unwrap(),
+            "0.0.0.0:7331".parse().unwrap()
+        );
+    }
 }

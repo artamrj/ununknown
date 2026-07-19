@@ -1,0 +1,16 @@
+.git
+.github
+.cargo
+.local
+target
+dist
+frontend/node_modules
+frontend/dist
+data
+music
+output
+cache
+.env
+.env.*
+*.log
+.DS_Store

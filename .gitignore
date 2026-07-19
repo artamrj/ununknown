@@ -9,3 +9,5 @@
 /config/config.toml
 .DS_Store
 .env.local
+.env
+!.env.example

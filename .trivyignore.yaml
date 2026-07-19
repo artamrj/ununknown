@@ -1,0 +1,16 @@
+vulnerabilities:
+  - id: CVE-2026-37555
+    purls:
+      - pkg:apk/alpine/libsndfile@1.2.2-r2?os_name=alpine&os_version=3.24
+    expired_at: 2026-10-19
+    statement: No fixed libsndfile package is available in Alpine 3.24; required transitively by FFmpeg.
+  - id: CVE-2025-52194
+    purls:
+      - pkg:apk/alpine/libsndfile@1.2.2-r2?os_name=alpine&os_version=3.24
+    expired_at: 2026-10-19
+    statement: No fixed libsndfile package is available in Alpine 3.24; required transitively by FFmpeg.
+  - id: CVE-2026-1861
+    purls:
+      - pkg:apk/alpine/libvpx@1.15.2-r1?os_name=alpine&os_version=3.24
+    expired_at: 2026-10-19
+    statement: The fixed libvpx release is not yet available in Alpine 3.24; required transitively by FFmpeg.

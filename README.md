@@ -58,6 +58,53 @@ without persisting them in SQLite through `UNUNKNOWN_ACOUSTID_KEY`, `UNUNKNOWN_A
 `UNUNKNOWN_YOUTUBE_API_KEY`, `UNUNKNOWN_DISCOGS_TOKEN`, `UNUNKNOWN_LASTFM_KEY`, and
 `UNUNKNOWN_THEAUDIODB_KEY`.
 
+### Docker Compose and GHCR
+
+The included Compose deployment pulls `ghcr.io/artamrj/ununknown:latest`, runs as a non-root user,
+uses a read-only container filesystem, and publishes the application only on
+`127.0.0.1:7331`. Prepare it with:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+mkdir -p music output data
+# On Linux, set PUID and PGID in .env to the output of `id -u` and `id -g`.
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+Then open <http://127.0.0.1:7331>. Put input files in `music/`; corrected copies are written to
+`output/`; SQLite and caches are stored in `data/`. These locations, the image tag, port, log level,
+and optional provider credentials are documented in `.env.example`. The input mount is read-only,
+so **Remove input after successful output** cannot delete source music in this deployment. If that
+behavior is intentionally required, remove `read_only: true` from the `/data/input` volume only
+after backing up the library.
+
+The image is built for `linux/amd64` and `linux/arm64` by the `container` job in GitHub Actions.
+Pull requests build the image without publishing it. A successful push to `main` publishes `main`,
+`latest`, and `sha-*` tags to GitHub Container Registry; a tag such as `v0.6.0` also publishes
+`0.6.0` and `0.6`. No registry password is required in the workflow: it uses the repository's
+short-lived `GITHUB_TOKEN`. GHCR packages are private on first publication unless their package
+visibility is changed in GitHub. For a private package, log in on the deployment host with a
+personal access token that has `read:packages` before running `docker compose pull`; otherwise,
+change the package visibility to public in GitHub's package settings.
+
+Before publication, Trivy blocks critical and high image vulnerabilities. The exact FFmpeg
+dependency findings that currently have no Alpine 3.24 fix are documented as time-limited,
+package-specific exceptions in `.trivyignore.yaml`; CI will fail when those exceptions expire.
+
+For a one-off local image instead of GHCR:
+
+```bash
+docker build -t ununknown:local .
+UNUNKNOWN_IMAGE=ununknown UNUNKNOWN_TAG=local docker compose up -d
+```
+
+Do not change `UNUNKNOWN_HOST` to `0.0.0.0`. The container's internal non-loopback bind is an
+explicit Docker-only exception; the published host port must remain loopback-only because the API
+accepts local filesystem paths and has no multi-user authentication.
+
 Send `SIGTERM` or press Ctrl+C for a graceful stop. The server asks an active workflow to stop at a
 safe boundary, waits up to 30 seconds, drains HTTP requests, and closes SQLite. Back up the database
 and keep **Remove input after successful output** disabled until the output has been verified for a
