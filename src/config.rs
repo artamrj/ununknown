@@ -96,6 +96,11 @@ impl Config {
             self.reference_dirs = std::env::split_paths(&value)
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect();
+        } else if self.reference_dirs.is_empty() && std::path::Path::new("/data/reference").is_dir()
+        {
+            // Docker users only need one read-only volume mount. The standard
+            // container path is discovered without another environment value.
+            self.reference_dirs = vec!["/data/reference".into()];
         }
         override_from_env!(acoustid_key, "UNUNKNOWN_ACOUSTID_KEY");
         override_from_env!(audd_token, "UNUNKNOWN_AUDD_TOKEN");

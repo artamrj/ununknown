@@ -51,7 +51,7 @@ Extract the archive from `dist/`, then run `bin/ununknown-run`. Application data
 `UNUNKNOWN_DATA_DIR`. FFmpeg and Chromaprint remain recommended runtime dependencies.
 
 The server supports `UNUNKNOWN_DB`, `UNUNKNOWN_INPUT_DIR`, `UNUNKNOWN_OUTPUT_DIR`,
-`UNUNKNOWN_REFERENCE_DIRS` (an OS path-list), `UNUNKNOWN_STATIC_DIR`, and a loopback-only
+`UNUNKNOWN_REFERENCE_DIRS` (an optional OS path-list), `UNUNKNOWN_STATIC_DIR`, and a loopback-only
 `UNUNKNOWN_BIND`. Provider credentials can be supplied
 without persisting them in SQLite through `UNUNKNOWN_ACOUSTID_KEY`, `UNUNKNOWN_AUDD_TOKEN`,
 `UNUNKNOWN_SPOTIFY_CLIENT_ID`, `UNUNKNOWN_SPOTIFY_CLIENT_SECRET`,
@@ -77,7 +77,8 @@ docker compose ps
 
 Then open <http://127.0.0.1:7331>. Put input files in `music/`; corrected copies are written to
 `output/`; existing music for duplicate checks goes in `reference/`; SQLite and caches are stored
-in `data/`. The reference mount is read-only. On startup, the container creates the writable
+in `data/`. The `/data/reference` folder is detected automatically and its mount is read-only, so
+no extra container environment setting is needed. On startup, the container creates the writable
 mounts when necessary, assigns them to `PUID:PGID`, and drops root privileges before starting the
 application. These locations, the image tag, port, log level, and optional provider credentials are
 documented in `.env.example`. The input mount is read-only, so **Remove input after successful

@@ -46,7 +46,7 @@ RUN apk add --no-cache alsa-lib ca-certificates chromaprint ffmpeg su-exec tini 
     command -v tini && \
     addgroup -S -g 10001 ununknown && \
     adduser -S -D -H -u 10001 -G ununknown ununknown && \
-    mkdir -p /data/cache /data/input /data/output /usr/share/ununknown && \
+    mkdir -p /data/cache /data/input /data/output /data/reference /usr/share/ununknown && \
     chown -R 10001:10001 /data /usr/share/ununknown
 
 COPY --from=backend --chown=10001:10001 /tmp/ununknown /usr/local/bin/ununknown
