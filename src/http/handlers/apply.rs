@@ -181,7 +181,7 @@ async fn file_sha256(path: &std::path::Path) -> Result<String> {
         }
         digest.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf {

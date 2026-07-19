@@ -3,7 +3,7 @@ use crate::infrastructure::provider_cache::{ProviderCache, search_key};
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Duration, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Client;
 use serde_json::Value;
 use sha1::Sha1;

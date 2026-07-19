@@ -73,8 +73,7 @@ pub fn release_key(release_id: &str) -> String {
 }
 
 fn sha256_hex(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn normalize_query(query: &str) -> String {
