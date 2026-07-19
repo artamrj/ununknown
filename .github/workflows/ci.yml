@@ -4,18 +4,26 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
+    paths-ignore:
+      - "**/*.md"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
 
@@ -25,7 +33,19 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install media tools
+      - name: Cache Rust dependencies and build output
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-rust-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Install media test tools
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg libchromaprint-tools
 
       - name: Frontend checks
@@ -42,131 +62,3 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --locked --all-targets --all-features -- -D warnings
           cargo test --locked --all-targets --all-features
-          cargo build --locked --release
-
-      - name: Production smoke test
-        run: |
-          run_dir="$(mktemp -d)"
-          mkdir -p "$run_dir/input" "$run_dir/output"
-          UNUNKNOWN_DB="$run_dir/ununknown.sqlite" \
-          UNUNKNOWN_INPUT_DIR="$run_dir/input" \
-          UNUNKNOWN_OUTPUT_DIR="$run_dir/output" \
-          UNUNKNOWN_STATIC_DIR="$GITHUB_WORKSPACE/frontend/dist" \
-          target/release/ununknown >"$run_dir/server.log" 2>&1 &
-          server_pid=$!
-          trap 'kill -TERM "$server_pid" 2>/dev/null || true' EXIT
-          ready=false
-          for attempt in {1..30}; do
-            if curl --fail --silent --output /dev/null http://127.0.0.1:7331/api/health; then
-              ready=true
-              break
-            fi
-            if ! kill -0 "$server_pid" 2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          if [[ "$ready" != true ]]; then
-            echo "Server did not become healthy; startup log follows:"
-            cat "$run_dir/server.log"
-            exit 1
-          fi
-          curl --fail --silent --show-error http://127.0.0.1:7331/
-          kill -TERM "$server_pid"
-          wait "$server_pid"
-
-  rust-security-audit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      checks: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  container:
-    needs:
-      - verify
-      - rust-security-audit
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate image metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build image for vulnerability scan
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64
-          load: true
-          tags: ununknown:ci
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            VCS_REF=${{ github.sha }}
-            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          version: v0.72.0
-          image-ref: ununknown:ci
-          format: table
-          exit-code: "1"
-          ignore-unfixed: false
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          trivyignores: .trivyignore.yaml
-
-      - name: Publish multi-platform image
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            VCS_REF=${{ github.sha }}
-            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
-          cache-from: type=gha
-          provenance: mode=max
-          sbom: true

@@ -81,14 +81,20 @@ so **Remove input after successful output** cannot delete source music in this d
 behavior is intentionally required, remove `read_only: true` from the `/data/input` volume only
 after backing up the library.
 
-The image is built for `linux/amd64` and `linux/arm64` by the `container` job in GitHub Actions.
-Pull requests build the image without publishing it. A successful push to `main` publishes `main`,
-`latest`, and `sha-*` tags to GitHub Container Registry; a tag such as `v0.6.0` also publishes
-`0.6.0` and `0.6`. No registry password is required in the workflow: it uses the repository's
-short-lived `GITHUB_TOKEN`. GHCR packages are private on first publication unless their package
-visibility is changed in GitHub. For a private package, log in on the deployment host with a
-personal access token that has `read:packages` before running `docker compose pull`; otherwise,
-change the package visibility to public in GitHub's package settings.
+For a reproducible NAS deployment, set `UNUNKNOWN_TAG` in `.env` to an exact release such as
+`0.6.0` instead of `latest`. The image contains FFmpeg/ffprobe, Chromaprint/fpcalc, the headless
+SongRec CLI, CA certificates, and tini; no media tools need to be installed on the Docker host.
+
+Normal pushes and pull requests only run the fast source checks. Pushing a stable semantic version
+tag such as `v0.6.0` starts the separate release workflow. It builds `linux/amd64` and
+`linux/arm64` images once, in parallel on native GitHub runners, scans both images, publishes a
+multi-architecture manifest to GHCR, and creates the matching GitHub Release. That example creates
+image tags `0.6.0`, `v0.6.0`, `0.6`, `0`, and `latest`. No registry password is required in the
+workflow: it uses the repository's short-lived `GITHUB_TOKEN`. GHCR packages are private on first
+publication unless their package visibility is changed in GitHub. For a private package, log in on
+the deployment host with a personal access token that has `read:packages` before running
+`docker compose pull`; otherwise, change the package visibility to public in GitHub's package
+settings.
 
 Before publication, Trivy blocks critical and high image vulnerabilities. The exact FFmpeg
 dependency findings that currently have no Alpine 3.24 fix are documented as time-limited,

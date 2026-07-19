@@ -7,6 +7,15 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/ ./
 RUN npm run build
 
+FROM rust:1.97-alpine3.24 AS songrec
+RUN apk add --no-cache alsa-lib-dev
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/songrec,sharing=locked \
+    RUSTFLAGS="-C target-feature=-crt-static" \
+    CARGO_TARGET_DIR=/build/songrec \
+    cargo install songrec-lib --version 0.5.3 --locked --root /opt/songrec
+
 FROM rust:1.97-alpine3.24 AS backend
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
@@ -29,14 +38,21 @@ LABEL org.opencontainers.image.title="Ununknown" \
       org.opencontainers.image.source="${SOURCE_URL}" \
       org.opencontainers.image.licenses="MIT"
 
-RUN apk add --no-cache ca-certificates chromaprint ffmpeg tini && \
+RUN apk add --no-cache alsa-lib ca-certificates chromaprint ffmpeg tini && \
+    command -v ffmpeg && \
+    command -v ffprobe && \
+    command -v fpcalc && \
+    command -v tini && \
     addgroup -S -g 10001 ununknown && \
     adduser -S -D -H -u 10001 -G ununknown ununknown && \
     mkdir -p /data/cache /data/input /data/output /usr/share/ununknown && \
     chown -R 10001:10001 /data /usr/share/ununknown
 
 COPY --from=backend --chown=10001:10001 /tmp/ununknown /usr/local/bin/ununknown
+COPY --from=songrec --chown=10001:10001 /opt/songrec/bin/songrec-lib-cli /usr/local/bin/songrec-lib-cli
 COPY --from=frontend --chown=10001:10001 /build/frontend/dist/ /usr/share/ununknown/
+
+RUN command -v songrec-lib-cli
 
 ENV UNUNKNOWN_BIND=0.0.0.0:7331 \
     UNUNKNOWN_ALLOW_NON_LOOPBACK=true \
@@ -44,6 +60,7 @@ ENV UNUNKNOWN_BIND=0.0.0.0:7331 \
     UNUNKNOWN_INPUT_DIR=/data/input \
     UNUNKNOWN_OUTPUT_DIR=/data/output \
     UNUNKNOWN_STATIC_DIR=/usr/share/ununknown \
+    UNUNKNOWN_SONGREC_BIN=/usr/local/bin/songrec-lib-cli \
     RUST_LOG=info
 
 USER 10001:10001
