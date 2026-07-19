@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM rust:1.96-alpine3.24 AS backend
+FROM rust:1.97-alpine3.24 AS backend
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY migrations/ ./migrations/
