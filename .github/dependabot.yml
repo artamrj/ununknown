@@ -1,18 +1,54 @@
 version: 2
+
 updates:
-  - package-ecosystem: cargo
-    directory: /
+  # Rust application dependencies from Cargo.toml/Cargo.lock.
+  - package-ecosystem: "cargo"
+    directory: "/"
     schedule:
-      interval: monthly
-  - package-ecosystem: npm
-    directory: /frontend
+      interval: "monthly"
+      time: "04:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 2
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
+
+  # Frontend dependencies from frontend/package.json and package-lock.json.
+  - package-ecosystem: "npm"
+    directory: "/frontend"
     schedule:
-      interval: monthly
-  - package-ecosystem: github-actions
-    directory: /
+      interval: "monthly"
+      time: "04:10"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 2
+    groups:
+      frontend-dependencies:
+        patterns:
+          - "*"
+
+  # Actions referenced by workflow files in .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
-      interval: monthly
-  - package-ecosystem: docker
-    directory: /
+      interval: "monthly"
+      time: "04:20"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  # Base images referenced by the root Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
     schedule:
-      interval: monthly
+      interval: "monthly"
+      time: "04:30"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 2
+    groups:
+      docker-images:
+        patterns:
+          - "*"

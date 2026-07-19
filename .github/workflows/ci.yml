@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 15
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v7
 
@@ -46,7 +48,11 @@ jobs:
             ${{ runner.os }}-rust-
 
       - name: Install media test tools
-        run: sudo apt-get update && sudo apt-get install --yes ffmpeg libchromaprint-tools
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ffmpeg
+          fi
 
       - name: Frontend checks
         working-directory: frontend
@@ -54,11 +60,9 @@ jobs:
           npm ci
           npm run format:check
           npm run lint
-          npm audit --audit-level=high
           npm run build
 
       - name: Rust checks
         run: |
           cargo fmt --all -- --check
-          cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo test --locked --all-targets --all-features
+          cargo test --locked

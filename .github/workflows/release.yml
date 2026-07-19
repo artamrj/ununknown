@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Existing release tag, for example v0.6.0
+        description: Release version to create, for example v0.6.0
         required: true
         type: string
 
@@ -42,7 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+          # A manual release may create a tag that does not exist yet. Build the
+          # exact commit selected in the workflow UI instead of checking out the
+          # requested version as a ref.
+          ref: ${{ github.sha }}
 
       - name: Resolve version
         id: version
@@ -106,7 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref }}
+          ref: ${{ github.sha }}
 
       - name: Resolve version
         id: version
@@ -156,4 +159,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
-        run: gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --target "$RELEASE_SHA" \
+              --generate-notes \
+              --title "$RELEASE_TAG"
