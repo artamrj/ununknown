@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::ActivityLogEntry;
 use crate::infrastructure::fingerprint_cache;
-use crate::infrastructure::media::replaygain;
+use crate::infrastructure::media::{fingerprint, replaygain};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -36,7 +36,6 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
     let selected_count = selected.len();
     let mut items: Vec<PreviewItem> = Vec::new();
     let mut signatures = Vec::new();
-    let mut reserved_destinations = HashSet::new();
     for (track, candidate) in selected {
         let signature = duplicate_signature(&s.pool, &track, &candidate).await?;
         if let Some(index) = signatures
@@ -50,10 +49,7 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
             });
             continue;
         }
-        let dest = unique_destination(
-            PathBuf::from(destination(&cfg, &track, &candidate)?),
-            &mut reserved_destinations,
-        );
+        let dest = PathBuf::from(destination(&cfg, &track, &candidate)?);
         items.push(PreviewItem {
             track_id: track.id,
             filename: track.filename.clone(),
@@ -184,29 +180,6 @@ async fn file_sha256(path: &std::path::Path) -> Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-fn unique_destination(base: PathBuf, reserved: &mut HashSet<PathBuf>) -> PathBuf {
-    if !base.exists() && reserved.insert(base.clone()) {
-        return base;
-    }
-    let parent = base.parent().unwrap_or_else(|| std::path::Path::new(""));
-    let stem = base
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Corrected track");
-    let extension = base.extension().and_then(|value| value.to_str());
-    for number in 2.. {
-        let filename = match extension {
-            Some(extension) => format!("{stem} ({number}).{extension}"),
-            None => format!("{stem} ({number})"),
-        };
-        let candidate = parent.join(filename);
-        if !candidate.exists() && reserved.insert(candidate.clone()) {
-            return candidate;
-        }
-    }
-    unreachable!()
-}
-
 fn numbered_destination(base: &std::path::Path, number: usize) -> PathBuf {
     let parent = base.parent().unwrap_or_else(|| std::path::Path::new(""));
     let stem = base
@@ -221,20 +194,163 @@ fn numbered_destination(base: &std::path::Path, number: usize) -> PathBuf {
     parent.join(filename)
 }
 
-/// Atomically publishes a completed temporary file without replacing anything
-/// already present. A hard link is used because the temporary and final paths
-/// are deliberately in the same directory; unlike rename, hard-link creation
-/// fails when the destination already exists on every supported platform.
+#[derive(Debug, Eq, PartialEq)]
+enum Publication {
+    Written(PathBuf),
+    Reused(PathBuf),
+}
+
+impl Publication {
+    fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Written(path) | Self::Reused(path) => path,
+        }
+    }
+
+    fn reused_existing(&self) -> bool {
+        matches!(self, Self::Reused(_))
+    }
+}
+
+fn destination_variant_number(
+    preferred: &std::path::Path,
+    candidate: &std::path::Path,
+) -> Option<usize> {
+    if candidate.file_name() == preferred.file_name() {
+        return Some(1);
+    }
+    if candidate.extension() != preferred.extension() {
+        return None;
+    }
+    let preferred_stem = preferred.file_stem()?.to_str()?;
+    let candidate_stem = candidate.file_stem()?.to_str()?;
+    let number = candidate_stem
+        .strip_prefix(preferred_stem)?
+        .strip_prefix(" (")?
+        .strip_suffix(')')?
+        .parse::<usize>()
+        .ok()?;
+    (number >= 2).then_some(number)
+}
+
+async fn existing_destination_variants(preferred: &std::path::Path) -> Result<Vec<PathBuf>> {
+    let parent = preferred
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut directory = match tokio::fs::read_dir(parent).await {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut variants = Vec::new();
+    while let Some(entry) = directory.next_entry().await? {
+        let path = entry.path();
+        if let Some(number) = destination_variant_number(preferred, &path)
+            && tokio::fs::metadata(&path)
+                .await
+                .is_ok_and(|metadata| metadata.is_file())
+        {
+            variants.push((number, path));
+        }
+    }
+    variants.sort_by_key(|(number, _)| *number);
+    Ok(variants.into_iter().map(|(_, path)| path).collect())
+}
+
+struct AudioEquivalenceProbe {
+    file_size: u64,
+    file_hash: String,
+    fingerprint: Option<Option<(String, f64)>>,
+}
+
+async fn files_are_equivalent_audio(
+    temporary: &std::path::Path,
+    existing: &std::path::Path,
+    probe: &mut Option<AudioEquivalenceProbe>,
+) -> Result<bool> {
+    if probe.is_none() {
+        let metadata = tokio::fs::metadata(temporary).await?;
+        *probe = Some(AudioEquivalenceProbe {
+            file_size: metadata.len(),
+            file_hash: file_sha256(temporary).await?,
+            fingerprint: None,
+        });
+    }
+    let probe = probe.as_mut().expect("temporary probe initialized");
+    let existing_metadata = tokio::fs::metadata(existing).await?;
+    if !existing_metadata.is_file() {
+        return Ok(false);
+    }
+    if probe.file_size == existing_metadata.len() {
+        let existing_hash = file_sha256(existing).await?;
+        if probe.file_hash == existing_hash {
+            return Ok(true);
+        }
+    }
+
+    if probe.fingerprint.is_none() {
+        probe.fingerprint = Some(fingerprint::calculate(temporary).await.ok());
+    }
+    let (
+        Some((temporary_fingerprint, temporary_duration)),
+        Ok((existing_fingerprint, existing_duration)),
+    ) = (
+        probe.fingerprint.as_ref().and_then(Option::as_ref),
+        fingerprint::calculate(existing).await,
+    )
+    else {
+        return Ok(false);
+    };
+    Ok(temporary_fingerprint == &existing_fingerprint
+        && (temporary_duration - existing_duration).abs() <= 3.0)
+}
+
+async fn discard_temporary(temporary: &std::path::Path) {
+    if let Err(error) = tokio::fs::remove_file(temporary).await {
+        tracing::warn!(
+            path = %temporary.display(),
+            %error,
+            "reused existing output but could not remove temporary file"
+        );
+    }
+}
+
+async fn paths_are_same_existing_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    tokio::try_join!(
+        tokio::fs::canonicalize(left),
+        tokio::fs::canonicalize(right)
+    )
+    .is_ok_and(|(left, right)| left == right)
+}
+
+/// Reuses an equivalent existing output instead of creating another numbered
+/// copy. A genuinely different recording is still published without replacing
+/// anything already present. Hard links keep the final publication atomic.
 async fn publish_no_clobber(
     temporary: &std::path::Path,
     preferred: &std::path::Path,
-) -> Result<PathBuf> {
+    excluded_source: Option<&std::path::Path>,
+) -> Result<Publication> {
     tokio::fs::OpenOptions::new()
         .write(true)
         .open(temporary)
         .await?
         .sync_all()
         .await?;
+
+    let mut equivalence_probe = None;
+    for existing in existing_destination_variants(preferred).await? {
+        if let Some(source) = excluded_source
+            && paths_are_same_existing_file(source, &existing).await
+        {
+            continue;
+        }
+        if files_are_equivalent_audio(temporary, &existing, &mut equivalence_probe).await? {
+            discard_temporary(temporary).await;
+            return Ok(Publication::Reused(existing));
+        }
+    }
 
     let mut number = 1;
     loop {
@@ -252,9 +368,21 @@ async fn publish_no_clobber(
                         "published output but could not remove temporary link"
                     );
                 }
-                return Ok(destination);
+                return Ok(Publication::Written(destination));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if let Some(source) = excluded_source
+                    && paths_are_same_existing_file(source, &destination).await
+                {
+                    number += 1;
+                    continue;
+                }
+                if files_are_equivalent_audio(temporary, &destination, &mut equivalence_probe)
+                    .await?
+                {
+                    discard_temporary(temporary).await;
+                    return Ok(Publication::Reused(destination));
+                }
                 number += 1;
             }
             Err(error) => return Err(error.into()),
@@ -403,13 +531,17 @@ pub async fn apply(
             .await;
         }
         let publication = match result {
-            Ok(_) => publish_no_clobber(&temporary, &dest).await,
+            Ok(_) => publish_no_clobber(&temporary, &dest, Some(&src)).await,
             Err(error) => Err(error),
         };
-        let output_was_written = publication.is_ok();
-        let final_path = publication.as_ref().unwrap_or(&dest).clone();
+        let output_available = publication.is_ok();
+        let reused_existing = publication.as_ref().is_ok_and(Publication::reused_existing);
+        let final_path = publication
+            .as_ref()
+            .map(|publication| publication.path().to_owned())
+            .unwrap_or_else(|_| dest.clone());
         let mut result = publication.map(|_| ());
-        if output_was_written && delete_source_after_write {
+        if output_available && delete_source_after_write {
             if paths_resolve_to_same_target(&src, &final_path).await? {
                 anyhow::bail!(
                     "refusing to remove source because input and output resolve to the same file: {}",
@@ -442,8 +574,8 @@ pub async fn apply(
                     ActivityLogEntry::new(
                         "error",
                         "apply",
-                        if output_was_written {
-                            "Corrected output was written, but original removal failed"
+                        if output_available {
+                            "Corrected output is available, but original removal failed"
                         } else {
                             "Tag writing failed"
                         },
@@ -466,7 +598,7 @@ pub async fn apply(
         sqlx::query(
             "UPDATE tracks SET output_path=?,status=?,error=?,last_applied_at=? WHERE id=?",
         )
-        .bind(output_was_written.then(|| final_path.to_string_lossy().into_owned()))
+        .bind(output_available.then(|| final_path.to_string_lossy().into_owned()))
         .bind(status)
         .bind(error)
         .bind(Utc::now().to_rfc3339())
@@ -484,9 +616,25 @@ pub async fn apply(
         .await;
         if status == "applied" {
             s.log_entry(
-                ActivityLogEntry::new("ok", "apply", "Applied metadata changes")
-                    .file(item.filename.clone())
-                    .context(serde_json::json!({"output": final_path.display().to_string()})),
+                ActivityLogEntry::new(
+                    "ok",
+                    if reused_existing {
+                        "deduplicate"
+                    } else {
+                        "apply"
+                    },
+                    if reused_existing {
+                        "Skipped duplicate output; equivalent corrected file already exists"
+                    } else {
+                        "Applied metadata changes"
+                    },
+                )
+                .file(item.filename.clone())
+                .context(serde_json::json!({
+                    "output": final_path.display().to_string(),
+                    "source_removed": delete_source_after_write,
+                    "reused_existing": reused_existing
+                })),
             )
             .await;
             for duplicate in &item.duplicates {
@@ -693,22 +841,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duplicate_destinations_get_numbered_without_overwrite() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut reserved = HashSet::new();
-        let base = directory.path().join("Artist - Song.mp3");
-        assert_eq!(unique_destination(base.clone(), &mut reserved), base);
+    fn recognizes_only_numbered_variants_of_the_preferred_destination() {
+        let base = std::path::Path::new("/output/Artist - Song.mp3");
+        assert_eq!(destination_variant_number(base, base), Some(1));
         assert_eq!(
-            unique_destination(base.clone(), &mut reserved),
-            directory.path().join("Artist - Song (2).mp3")
+            destination_variant_number(base, std::path::Path::new("/output/Artist - Song (2).mp3")),
+            Some(2)
         );
-
-        std::fs::write(directory.path().join("Artist - Song (3).mp3"), b"existing").unwrap();
-        reserved.insert(directory.path().join("Artist - Song (2).mp3"));
-        reserved.insert(base.clone());
         assert_eq!(
-            unique_destination(base, &mut reserved),
-            directory.path().join("Artist - Song (4).mp3")
+            destination_variant_number(
+                base,
+                std::path::Path::new("/output/Artist - Song Remix (2).mp3")
+            ),
+            None
+        );
+        assert_eq!(
+            destination_variant_number(
+                base,
+                std::path::Path::new("/output/Artist - Song (2).flac")
+            ),
+            None
         );
     }
 
@@ -722,14 +874,144 @@ mod tests {
             .await
             .unwrap();
 
-        let published = publish_no_clobber(&temporary, &preferred).await.unwrap();
+        let published = publish_no_clobber(&temporary, &preferred, None)
+            .await
+            .unwrap();
 
-        assert_eq!(published, directory.path().join("Artist - Song (2).mp3"));
+        assert_eq!(
+            published,
+            Publication::Written(directory.path().join("Artist - Song (2).mp3"))
+        );
         assert_eq!(
             tokio::fs::read(&preferred).await.unwrap(),
             b"existing output"
         );
-        assert_eq!(tokio::fs::read(&published).await.unwrap(), b"new output");
+        assert_eq!(
+            tokio::fs::read(published.path()).await.unwrap(),
+            b"new output"
+        );
+        assert!(!temporary.exists());
+    }
+
+    #[tokio::test]
+    async fn equivalent_existing_output_is_reused_without_numbering() {
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join(".temporary.mp3");
+        let preferred = directory.path().join("Artist - Song.mp3");
+        tokio::fs::write(&temporary, b"same corrected audio")
+            .await
+            .unwrap();
+        tokio::fs::write(&preferred, b"same corrected audio")
+            .await
+            .unwrap();
+
+        let published = publish_no_clobber(&temporary, &preferred, None)
+            .await
+            .unwrap();
+
+        assert_eq!(published, Publication::Reused(preferred));
+        assert!(!temporary.exists());
+        assert!(!directory.path().join("Artist - Song (2).mp3").exists());
+    }
+
+    #[tokio::test]
+    async fn audio_fingerprint_reuses_existing_output_with_different_tags() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+            || std::process::Command::new("fpcalc")
+                .arg("-version")
+                .output()
+                .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let temporary = directory.path().join(".temporary.mp3");
+        let preferred = directory.path().join("Artist - Song.mp3");
+        let generated = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=4")
+            .args(["-q:a", "4", "-metadata", "title=Existing"])
+            .arg(&preferred)
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let retagged = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&preferred)
+            .args([
+                "-map",
+                "0:a:0",
+                "-c:a",
+                "copy",
+                "-metadata",
+                "title=Retagged",
+            ])
+            .arg(&temporary)
+            .status()
+            .unwrap();
+        assert!(retagged.success());
+        assert_ne!(
+            file_sha256(&temporary).await.unwrap(),
+            file_sha256(&preferred).await.unwrap()
+        );
+
+        let published = publish_no_clobber(&temporary, &preferred, None)
+            .await
+            .unwrap();
+
+        assert_eq!(published, Publication::Reused(preferred));
+        assert!(!temporary.exists());
+        assert!(!directory.path().join("Artist - Song (2).mp3").exists());
+    }
+
+    #[tokio::test]
+    async fn reused_output_removes_source_only_in_delete_mode() {
+        for delete_source in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("input.mp3");
+            let temporary = directory.path().join(".temporary.mp3");
+            let preferred = directory.path().join("Artist - Song.mp3");
+            tokio::fs::write(&source, b"same corrected audio")
+                .await
+                .unwrap();
+            tokio::fs::copy(&source, &temporary).await.unwrap();
+            tokio::fs::copy(&source, &preferred).await.unwrap();
+
+            let published = publish_no_clobber(&temporary, &preferred, None)
+                .await
+                .unwrap();
+            assert!(published.reused_existing());
+            if delete_source {
+                remove_source_after_output(&source, published.path())
+                    .await
+                    .unwrap();
+            }
+
+            assert_eq!(source.exists(), !delete_source);
+            assert!(preferred.exists());
+            assert!(!directory.path().join("Artist - Song (2).mp3").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn source_file_is_not_mistaken_for_an_existing_corrected_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("Artist - Song.mp3");
+        let existing_output = directory.path().join("Artist - Song (2).mp3");
+        let temporary = directory.path().join(".temporary.mp3");
+        tokio::fs::write(&source, b"same audio").await.unwrap();
+        tokio::fs::copy(&source, &existing_output).await.unwrap();
+        tokio::fs::copy(&source, &temporary).await.unwrap();
+
+        let published = publish_no_clobber(&temporary, &source, Some(&source))
+            .await
+            .unwrap();
+
+        assert_eq!(published, Publication::Reused(existing_output));
+        assert!(source.exists());
         assert!(!temporary.exists());
     }
 
