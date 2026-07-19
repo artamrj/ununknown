@@ -1,10 +1,14 @@
 use crate::config::Config;
 use anyhow::Result;
+use chrono::{DateTime, Local, Utc};
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{path::Path, str::FromStr, time::Duration};
+
+const DAILY_CACHE_CLEANUP_KEY: &str = "last_disposable_cache_cleanup";
+const MEDIA_CACHE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 
 pub async fn connect(path: &str) -> Result<SqlitePool> {
     if let Some(parent) = Path::new(path).parent() {
@@ -29,6 +33,11 @@ const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS maintenance (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
@@ -189,6 +198,118 @@ pub async fn cleanup(pool: &SqlitePool, _config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Removes reproducible web-provider responses once per local calendar day and
+/// limits reusable media-analysis results to 100 MiB. User settings and workflow
+/// data live in separate tables and are intentionally preserved.
+pub async fn run_daily_cache_cleanup_if_due(pool: &SqlitePool) -> Result<bool> {
+    let last_cleanup: Option<String> =
+        sqlx::query_scalar("SELECT value FROM maintenance WHERE key=?")
+            .bind(DAILY_CACHE_CLEANUP_KEY)
+            .fetch_optional(pool)
+            .await?;
+    let now = Utc::now();
+    let today = now.with_timezone(&Local).date_naive();
+    let cleanup_due = last_cleanup
+        .as_deref()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .is_none_or(|last| last.with_timezone(&Local).date_naive() < today);
+    if !cleanup_due {
+        return Ok(false);
+    }
+
+    let provider_rows_removed = sqlx::query("DELETE FROM provider_cache")
+        .execute(pool)
+        .await?
+        .rows_affected();
+    let media_rows_removed =
+        enforce_media_cache_limit_with_limit(pool, MEDIA_CACHE_LIMIT_BYTES).await?;
+    sqlx::query(
+        "INSERT INTO maintenance(key,value) VALUES(?,?) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(DAILY_CACHE_CLEANUP_KEY)
+    .bind(now.to_rfc3339())
+    .execute(pool)
+    .await?;
+
+    if provider_rows_removed + media_rows_removed > 0 {
+        // DELETE makes pages reusable, while VACUUM and the WAL checkpoint
+        // return that space to the filesystem.
+        compact(pool).await?;
+    }
+    tracing::info!(
+        provider_rows_removed,
+        media_rows_removed,
+        "daily cache maintenance complete"
+    );
+    Ok(true)
+}
+
+/// Enforces the combined 100 MiB limit independently of the midnight provider
+/// cache purge, so a large scan cannot leave analysis caches oversized all day.
+pub async fn enforce_media_cache_limit(pool: &SqlitePool) -> Result<u64> {
+    let removed = enforce_media_cache_limit_with_limit(pool, MEDIA_CACHE_LIMIT_BYTES).await?;
+    if removed > 0 {
+        compact(pool).await?;
+        tracing::info!(removed, "media-analysis cache limit enforced");
+    }
+    Ok(removed)
+}
+
+async fn compact(pool: &SqlitePool) -> Result<()> {
+    sqlx::query("VACUUM").execute(pool).await?;
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn enforce_media_cache_limit_with_limit(pool: &SqlitePool, limit_bytes: u64) -> Result<u64> {
+    let entries: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT cache_kind,path,estimated_bytes FROM (
+           SELECT 'fingerprint' AS cache_kind,path,updated_at AS cached_at,
+             length(CAST(path AS BLOB)) + length(CAST(fingerprint AS BLOB))
+             + length(CAST(updated_at AS BLOB)) + 32 AS estimated_bytes
+           FROM fingerprint_cache
+           UNION ALL
+           SELECT 'integrity',path,checked_at,
+             length(CAST(path AS BLOB)) + length(CAST(COALESCE(diagnostic,'') AS BLOB))
+             + length(CAST(checked_at AS BLOB)) + 40
+           FROM integrity_cache
+           UNION ALL
+           SELECT 'replaygain',path,updated_at,
+             length(CAST(path AS BLOB)) + length(CAST(updated_at AS BLOB)) + 48
+           FROM replaygain_cache
+         ) ORDER BY cached_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut total_bytes = entries
+        .iter()
+        .map(|(_, _, bytes)| (*bytes).max(0) as u64)
+        .sum::<u64>();
+    let mut removed = 0;
+
+    for (cache_kind, path, bytes) in entries {
+        if total_bytes <= limit_bytes {
+            break;
+        }
+        let query = match cache_kind.as_str() {
+            "fingerprint" => "DELETE FROM fingerprint_cache WHERE path=?",
+            "integrity" => "DELETE FROM integrity_cache WHERE path=?",
+            "replaygain" => "DELETE FROM replaygain_cache WHERE path=?",
+            _ => continue,
+        };
+        removed += sqlx::query(query)
+            .bind(path)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total_bytes = total_bytes.saturating_sub(bytes.max(0) as u64);
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +342,100 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(keys, vec!["fresh"]);
+    }
+
+    #[tokio::test]
+    async fn daily_cleanup_preserves_settings_and_media_analysis_caches() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO settings(key,value) VALUES('config','saved')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('artwork-url','cover','{}',datetime('now','+30 days'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO fingerprint_cache(path,file_size,file_mtime,fingerprint,duration,updated_at) VALUES('/music/song.mp3',1,2,'fingerprint',3.0,datetime('now'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(run_daily_cache_cleanup_if_due(&pool).await.unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key='config'")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "saved"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM provider_cache")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fingerprint_cache")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn daily_cleanup_does_not_run_twice_within_one_day() {
+        let pool = test_pool().await;
+        assert!(run_daily_cache_cleanup_if_due(&pool).await.unwrap());
+        sqlx::query("INSERT INTO provider_cache(provider,cache_key,response_json,expires_at) VALUES('musicbrainz','fresh','{}',datetime('now','+7 days'))")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert!(!run_daily_cache_cleanup_if_due(&pool).await.unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM provider_cache")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn media_cache_limit_evicts_the_oldest_entries_across_tables() {
+        let pool = test_pool().await;
+        sqlx::query("INSERT INTO fingerprint_cache(path,file_size,file_mtime,fingerprint,duration,updated_at) VALUES('/old.mp3',1,2,?,3.0,'2026-01-01T00:00:00Z')")
+            .bind("x".repeat(100))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO integrity_cache(path,file_size,file_mtime_ns,is_healthy,diagnostic,checked_at) VALUES('/new.mp3',1,2,1,?,'2026-01-02T00:00:00Z')")
+            .bind("y".repeat(100))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            enforce_media_cache_limit_with_limit(&pool, 180)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM fingerprint_cache")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM integrity_cache")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
     }
 }

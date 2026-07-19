@@ -33,6 +33,12 @@ The launcher stores temporary data under `.local/`:
 - `.local/output` — corrected copies
 - `.local/cache` — SQLite and fingerprint/provider caches
 
+Disposable provider responses and downloaded artwork are cleared automatically at
+local midnight while the app is idle. A missed cleanup runs on the next startup.
+Fingerprint, integrity-check, and ReplayGain caches share a 100 MiB limit, with
+the oldest entries removed first; the limit is checked at startup and hourly while
+the app is idle. Saved settings and configuration are preserved.
+
 ## Stronger matching with optional services
 
 Open **Optional source keys** in the setup screen to enable these sources. Empty
