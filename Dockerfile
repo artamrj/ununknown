@@ -64,6 +64,7 @@ ENV PUID=10001 \
     UNUNKNOWN_ALLOW_NON_LOOPBACK=true \
     UNUNKNOWN_DB=/data/cache/ununknown.sqlite \
     UNUNKNOWN_INPUT_DIR=/data/input \
+    UNUNKNOWN_INPUT_MODE=auto \
     UNUNKNOWN_OUTPUT_DIR=/data/output \
     UNUNKNOWN_STATIC_DIR=/usr/share/ununknown \
     UNUNKNOWN_SONGREC_BIN=/usr/local/bin/songrec-lib-cli \

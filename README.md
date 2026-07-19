@@ -80,7 +80,9 @@ mounts when necessary, assigns them to `PUID:PGID`, and drops root privileges be
 application. These locations, the image tag, port, log level, and optional provider credentials are
 documented in `.env.example`. The input mount is read-only, so **Remove input after successful
 output** cannot delete source music in this deployment. If that behavior is intentionally required,
-remove `read_only: true` from the `/data/input` volume only after backing up the library.
+back up the library and set `UNUNKNOWN_INPUT_MODE=rw` in `.env`. On startup, writable input
+directories are assigned to `PUID:PGID` automatically so originals can be removed; ownership of the
+music files themselves is not changed.
 
 For a reproducible NAS deployment, set `UNUNKNOWN_TAG` in `.env` to an exact release such as
 `0.6.0` instead of `latest`. The image contains FFmpeg/ffprobe, Chromaprint/fpcalc, the headless
