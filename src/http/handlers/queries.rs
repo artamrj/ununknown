@@ -3,12 +3,12 @@ use super::*;
 pub(super) const TRACK_FIELDS: &str = "id,path,output_path,filename,format,duration,current_title,current_artist,current_album,current_album_artist,current_track_number,selected_candidate_id,status,error,is_missing,stage,stage_message,retry_count,next_retry_at";
 
 pub(super) async fn track(pool: &sqlx::SqlitePool, id: TrackId) -> ApiResult<Track> {
-    Ok(
-        sqlx::query_as(&format!("SELECT {TRACK_FIELDS} FROM tracks WHERE id=?"))
-            .bind(id.0)
-            .fetch_one(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {TRACK_FIELDS} FROM tracks WHERE id=?"
+    )))
+    .bind(id.0)
+    .fetch_one(pool)
+    .await?)
 }
 
 pub(super) async fn selected(
