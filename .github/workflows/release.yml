@@ -89,6 +89,8 @@ jobs:
 
       - name: Scan published architecture
         uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
         with:
           version: v0.72.0
           image-ref: ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.value }}-${{ matrix.suffix }}
