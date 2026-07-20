@@ -16,14 +16,30 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     CARGO_TARGET_DIR=/build/songrec \
     cargo install songrec-lib --version 0.5.3 --locked --root /opt/songrec
 
-FROM rust:1.97-alpine3.24 AS backend
+FROM rust:1.97-alpine3.24 AS chef
 WORKDIR /build
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --version 0.1.77 --locked
+
+# Generate a dependency-only build recipe. Changes to application source rerun
+# this inexpensive step, but leave the cooked dependency layer reusable.
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY migrations/ ./migrations/
+COPY src/ ./src/
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS backend
+COPY --from=planner /build/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo chef cook --locked --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY migrations/ ./migrations/
 COPY src/ ./src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/build/target \
     cargo build --locked --release && \
     cp target/release/ununknown /tmp/ununknown
 
