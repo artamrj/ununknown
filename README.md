@@ -212,7 +212,10 @@ stores each reference file's size, modification time, duration, and Chromaprint 
 SQLite. Later scans fingerprint only new or changed files. Input recordings already present in a
 reference library are marked **Skipped** with the matching path before any online catalog lookup or
 output write. When fingerprinting is unavailable, an exact SHA-256 file hash is used as a safe
-fallback. Reference folders may not overlap the input or output folder.
+fallback. Reference folders may not overlap the input or output folder. When **Remove processed
+inputs and duplicates** is enabled, a matched input duplicate is removed only after Ununknown
+rechecks that its reference copy is accessible and resolves to a different file. The input mount
+must be writable; reference mounts remain read-only.
 
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,
 `/api/identify`, `/api/tracks`, and `/api/write`. Production packages keep that API on loopback,

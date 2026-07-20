@@ -79,6 +79,35 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
         .await?
         {
             reference_library::mark_existing_track(&s.pool, track.id.0, &found).await?;
+            let source_removed = if cfg.delete_source_after_write {
+                match reference_library::remove_input_duplicate(
+                    &s.pool,
+                    track.id.0,
+                    std::path::Path::new(&track.path),
+                    &found,
+                )
+                .await
+                {
+                    Ok(()) => true,
+                    Err(error) => {
+                        reference_library::mark_removal_failed(&s.pool, track.id.0, &found, &error)
+                            .await?;
+                        s.log_entry(
+                            ActivityLogEntry::new(
+                                "warn",
+                                "deduplicate",
+                                "Duplicate was skipped but could not be removed from input",
+                            )
+                            .file(track.filename.clone())
+                            .error(error.as_ref()),
+                        )
+                        .await;
+                        false
+                    }
+                }
+            } else {
+                false
+            };
             s.log_entry(
                 ActivityLogEntry::new(
                     "ok",
@@ -86,7 +115,10 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
                     "Skipped output; recording already exists in a read-only library",
                 )
                 .file(track.filename)
-                .detail(format!("{} match: {}", found.reason, found.path)),
+                .detail(format!(
+                    "{} match: {}; input removed: {}",
+                    found.reason, found.path, source_removed
+                )),
             )
             .await;
             continue;

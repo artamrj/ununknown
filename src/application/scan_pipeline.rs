@@ -699,6 +699,47 @@ async fn process(
                 .execute(&mut *transaction)
                 .await?;
             transaction.commit().await?;
+            if state.config.read().await.delete_source_after_write {
+                match crate::application::reference_library::remove_input_duplicate(
+                    &state.pool,
+                    track_id,
+                    path,
+                    &found,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        state
+                            .log(
+                                "ok",
+                                "deduplicate",
+                                Some(filename),
+                                "Removed input duplicate after verifying the read-only reference copy",
+                            )
+                            .await;
+                    }
+                    Err(error) => {
+                        crate::application::reference_library::mark_removal_failed(
+                            &state.pool,
+                            track_id,
+                            &found,
+                            &error,
+                        )
+                        .await?;
+                        state
+                            .log_entry(
+                                ActivityLogEntry::new(
+                                    "warn",
+                                    "deduplicate",
+                                    "Duplicate was skipped but could not be removed from input",
+                                )
+                                .file(filename.to_owned())
+                                .error(error.as_ref()),
+                            )
+                            .await;
+                    }
+                }
+            }
             state
                 .log("ok", "deduplicate", Some(filename), &message)
                 .await;

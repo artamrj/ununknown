@@ -257,6 +257,70 @@ pub async fn mark_existing_track(
     Ok(())
 }
 
+/// Removes only the input copy after re-checking that the independently
+/// mounted reference copy still exists and resolves to a different file.
+pub async fn remove_input_duplicate(
+    pool: &SqlitePool,
+    track_id: i64,
+    source: &Path,
+    found: &ReferenceMatch,
+) -> Result<()> {
+    let reference = Path::new(&found.path);
+    let metadata = tokio::fs::metadata(reference)
+        .await
+        .with_context(|| format!("reference copy is unavailable: {}", reference.display()))?;
+    if !metadata.is_file() {
+        bail!("reference copy is not a file: {}", reference.display());
+    }
+    let (source_resolved, reference_resolved) = tokio::try_join!(
+        tokio::fs::canonicalize(source),
+        tokio::fs::canonicalize(reference)
+    )?;
+    if source_resolved == reference_resolved {
+        bail!(
+            "refusing to remove input because it is the reference copy: {}",
+            source.display()
+        );
+    }
+    tokio::fs::remove_file(source)
+        .await
+        .with_context(|| format!("could not remove input duplicate: {}", source.display()))?;
+    sqlx::query(
+        "UPDATE tracks SET is_missing=1,status='duplicate',stage='skipped',
+         stage_message=?,error=NULL,updated_at=? WHERE id=?",
+    )
+    .bind(format!(
+        "Removed input duplicate; existing {} match kept at {}",
+        found.reason, found.path
+    ))
+    .bind(Utc::now().to_rfc3339())
+    .bind(track_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_removal_failed(
+    pool: &SqlitePool,
+    track_id: i64,
+    found: &ReferenceMatch,
+    error: &anyhow::Error,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE tracks SET stage_message=?,error=?,updated_at=? WHERE id=?",
+    )
+    .bind(format!(
+        "Already exists at {}, but the input duplicate could not be removed; check input-folder permissions",
+        found.path
+    ))
+    .bind(format!("{error:#}"))
+    .bind(Utc::now().to_rfc3339())
+    .bind(track_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Finds the same recording in a reference folder. Fingerprints catch tag,
 /// container, and bitrate differences; SHA-256 is a fallback for files fpcalc
 /// could not analyze.
@@ -551,5 +615,65 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn verified_reference_copy_allows_only_input_to_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("removal.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let source = directory.path().join("input.mp3");
+        let reference = directory.path().join("library.mp3");
+        tokio::fs::write(&source, b"duplicate").await.unwrap();
+        tokio::fs::write(&reference, b"duplicate").await.unwrap();
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES(?,'input.mp3','duplicate',0,'now','now','now','skipped')")
+            .bind(source.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let found = ReferenceMatch {
+            path: reference.to_string_lossy().into_owned(),
+            reason: "exact file hash",
+        };
+
+        remove_input_duplicate(&pool, track_id, &source, &found)
+            .await
+            .unwrap();
+
+        assert!(!source.exists());
+        assert!(reference.exists());
+        let row: (bool, String) =
+            sqlx::query_as("SELECT is_missing,stage_message FROM tracks WHERE id=?")
+                .bind(track_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(row.0);
+        assert!(row.1.contains("Removed input duplicate"));
+    }
+
+    #[tokio::test]
+    async fn same_file_can_never_be_removed_as_its_own_reference() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("same-file.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let source = directory.path().join("song.mp3");
+        tokio::fs::write(&source, b"audio").await.unwrap();
+        let found = ReferenceMatch {
+            path: source.to_string_lossy().into_owned(),
+            reason: "audio fingerprint",
+        };
+
+        assert!(
+            remove_input_duplicate(&pool, 1, &source, &found)
+                .await
+                .is_err()
+        );
+        assert!(source.exists());
     }
 }

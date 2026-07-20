@@ -183,6 +183,13 @@ export function App() {
   };
 
   const identify = async () => {
+    if (
+      setup.delete_source_after_write &&
+      !confirm(
+        "Confirmed duplicates already present in a read-only reference library will be permanently removed from the input folder during this scan. Continue?",
+      )
+    )
+      return;
     setNotice("");
     try {
       await saveSetup();
@@ -931,7 +938,7 @@ function TrackInspector({
         </div>
       </header>
 
-      {!track.is_missing && !corrupt && (
+      {!track.is_missing && !corrupt && track.stage !== "skipped" && (
         <audio
           className="audio-player"
           controls
@@ -1599,12 +1606,12 @@ function SettingsDrawer({
               <span>
                 <b>
                   {setup.delete_source_after_write
-                    ? "Remove after successful output"
+                    ? "Remove processed inputs and duplicates"
                     : "Preserve originals"}
                 </b>
                 <small>
                   {setup.delete_source_after_write
-                    ? "Each source is deleted only after its corrected copy is written successfully."
+                    ? "Sources are removed after a corrected output succeeds. Confirmed inputs already present in a reference library are removed during scanning."
                     : "Recommended. Corrected files are written as separate copies."}
                 </small>
               </span>
@@ -2164,6 +2171,7 @@ function isCompleted(track: Track) {
   return track.status === "applied";
 }
 function isProblem(track: Track) {
+  if (track.stage === "skipped") return false;
   return (
     track.status === "corrupt" ||
     track.is_missing ||
@@ -2179,6 +2187,7 @@ function selectedCandidate(track: Track) {
 function statusFor(track: Track): { label: string; tone: string; icon: IconName } {
   if (isCompleted(track)) return { label: "Cleaned", tone: "success", icon: "check" };
   if (track.status === "corrupt") return { label: "Damaged", tone: "error", icon: "alert" };
+  if (track.stage === "skipped") return { label: "Skipped", tone: "muted", icon: "skip" };
   if (track.is_missing) return { label: "File missing", tone: "error", icon: "alert" };
   if (track.stage === "failed" || track.status === "failed" || track.status === "provider_error")
     return { label: "Failed", tone: "error", icon: "alert" };
@@ -2194,7 +2203,6 @@ function statusFor(track: Track): { label: string; tone: string; icon: IconName 
       icon: "info",
     };
   if (isReady(track)) return { label: "Ready", tone: "success", icon: "check" };
-  if (track.stage === "skipped") return { label: "Skipped", tone: "muted", icon: "skip" };
   return { label: "Processing", tone: "processing", icon: "waveform" };
 }
 
