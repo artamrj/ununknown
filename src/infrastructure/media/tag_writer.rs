@@ -19,6 +19,8 @@ pub fn write(
     artwork: Option<Vec<u8>>,
     replay_gain: Option<ReplayGain>,
 ) -> Result<()> {
+    let mut candidate = candidate.clone();
+    crate::application::metadata_completion::normalize_release_fields(&mut candidate);
     let ext = path
         .extension()
         .and_then(|v| v.to_str())

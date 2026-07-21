@@ -185,6 +185,14 @@ pub fn complete(
         enriched.push("cover".into());
     }
 
+    let (album_defaulted, album_artist_defaulted) = normalize_release_fields(selected);
+    if album_defaulted {
+        enriched.push("album".into());
+    }
+    if album_artist_defaulted {
+        enriched.push("album artist".into());
+    }
+
     enriched.sort();
     enriched.dedup();
     let report = audit(selected, embedded_cover, enriched);
@@ -290,6 +298,7 @@ pub async fn ensure_usable_cover(
 }
 
 pub fn reassess(candidate: &mut Candidate, embedded_cover: bool) -> CompletionReport {
+    normalize_release_fields(candidate);
     let enriched_fields = candidate
         .score_breakdown
         .as_deref()
@@ -309,6 +318,32 @@ pub fn reassess(candidate: &mut Candidate, embedded_cover: bool) -> CompletionRe
     let report = audit(candidate, embedded_cover, enriched_fields);
     record_report(candidate, &[], &report, embedded_cover);
     report
+}
+
+/// Apply the canonical fallback tags used for standalone singles.
+///
+/// Returns which fields were changed so metadata-completion reports can include
+/// the generated values.
+pub fn normalize_release_fields(candidate: &mut Candidate) -> (bool, bool) {
+    let album_defaulted = candidate.album.as_deref().is_none_or(|album| {
+        album.trim().is_empty()
+            || album
+                .split(|character: char| !character.is_alphanumeric())
+                .any(|word| word.eq_ignore_ascii_case("single"))
+    });
+    if album_defaulted {
+        candidate.album = Some("Single".to_owned());
+    }
+
+    let album_artist_defaulted = candidate
+        .album_artist
+        .as_deref()
+        .is_none_or(|album_artist| album_artist.trim().is_empty());
+    if album_artist_defaulted {
+        candidate.album_artist = Some(candidate.artist.clone());
+    }
+
+    (album_defaulted, album_artist_defaulted)
 }
 
 fn mark_cover_verified(candidate: &mut Candidate, verified: bool, source: &str) {
@@ -709,6 +744,30 @@ mod tests {
         let report = complete(&mut selected, &[], None, true);
         assert!(report.core_complete);
         assert!(!report.missing_fields.contains(&"cover".to_owned()));
+    }
+
+    #[test]
+    fn defaults_missing_release_fields_for_a_single() {
+        let mut selected = candidate("manual", None);
+
+        let report = complete(&mut selected, &[], None, false);
+
+        assert_eq!(selected.album.as_deref(), Some("Single"));
+        assert_eq!(selected.album_artist.as_deref(), Some("Siavash Ghomayshi"));
+        assert!(report.enriched_fields.contains(&"album".to_owned()));
+        assert!(report.enriched_fields.contains(&"album artist".to_owned()));
+    }
+
+    #[test]
+    fn normalizes_single_release_names_but_preserves_one_word_albums() {
+        let mut single = candidate("itunes", Some("Farangis - Single"));
+        let mut album = candidate("musicbrainz", Some("Thriller"));
+
+        normalize_release_fields(&mut single);
+        normalize_release_fields(&mut album);
+
+        assert_eq!(single.album.as_deref(), Some("Single"));
+        assert_eq!(album.album.as_deref(), Some("Thriller"));
     }
 
     #[tokio::test]

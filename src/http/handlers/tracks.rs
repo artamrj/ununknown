@@ -490,6 +490,15 @@ pub async fn manual_candidate(
     let credits = crate::domain::credits::normalize_featured(&value.artist, &value.title);
     value.artist = credits.artist;
     value.title = credits.title;
+    let mut release_fields = Candidate {
+        artist: value.artist.clone(),
+        album: value.album.take(),
+        album_artist: value.album_artist.take(),
+        ..Default::default()
+    };
+    crate::application::metadata_completion::normalize_release_fields(&mut release_fields);
+    value.album = release_fields.album;
+    value.album_artist = release_fields.album_artist;
     let track: Option<(String, String)> =
         sqlx::query_as("SELECT status,path FROM tracks WHERE id=?")
             .bind(id.0)
