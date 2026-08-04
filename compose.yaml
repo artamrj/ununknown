@@ -30,7 +30,6 @@ services:
       UNUNKNOWN_THEAUDIODB_KEY: "${UNUNKNOWN_THEAUDIODB_KEY:-}"
     volumes:
       - "${UNUNKNOWN_INPUT_PATH:-./music}:/data/input:${UNUNKNOWN_INPUT_MODE:-ro}"
-      - "${UNUNKNOWN_REFERENCE_PATH:-./reference}:/data/reference:ro"
       - type: bind
         source: "${UNUNKNOWN_OUTPUT_PATH:-./output}"
         target: /data/output

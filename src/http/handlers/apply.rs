@@ -1,21 +1,12 @@
 use super::*;
 use crate::app::ActivityLogEntry;
-use crate::application::reference_library;
+use crate::application::input_dedup::{self, RecordingEvidence};
 use crate::infrastructure::fingerprint_cache;
 use crate::infrastructure::media::{fingerprint, replaygain};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use tokio::io::AsyncReadExt;
-
-#[derive(Clone, Debug)]
-struct DuplicateSignature {
-    isrc: Option<String>,
-    title_artist: String,
-    duration: Option<f64>,
-    fingerprint: Option<String>,
-    file_hash: Option<String>,
-}
 
 struct PreparedApply {
     items: Vec<PreviewItem>,
@@ -56,93 +47,135 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
 }
 
 async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
-    let tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+    let ready_tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0 AND status!='corrupt' AND stage='ready'",
         queries::TRACK_FIELDS
     )))
     .fetch_all(&s.pool)
     .await?;
     let cfg = s.config.read().await.clone();
-    reference_library::validate_layout(&cfg).await?;
-    let selected = queries::selected_for_tracks(&s.pool, tracks).await?;
-    let selected_count = selected.len();
-    let mut items: Vec<PreviewItem> = Vec::new();
-    let mut signatures = Vec::new();
-    for (track, candidate) in selected {
-        let signature = duplicate_signature(&s.pool, &track, &candidate).await?;
-        if let Some(found) = reference_library::find_duplicate(
-            &s.pool,
-            std::path::Path::new(&track.path),
-            signature.fingerprint.as_deref(),
-            signature.duration.unwrap_or_default(),
-        )
-        .await?
-        {
-            reference_library::mark_existing_track(&s.pool, track.id.0, &found).await?;
-            let source_removed = if cfg.delete_source_after_write {
-                match reference_library::remove_input_duplicate(
-                    &s.pool,
-                    track.id.0,
-                    std::path::Path::new(&track.path),
-                    &found,
-                )
-                .await
-                {
-                    Ok(()) => true,
-                    Err(error) => {
-                        reference_library::mark_removal_failed(&s.pool, track.id.0, &found, &error)
-                            .await?;
-                        s.log_entry(
-                            ActivityLogEntry::new(
-                                "warn",
-                                "deduplicate",
-                                "Duplicate was skipped but could not be removed from input",
-                            )
-                            .file(track.filename.clone())
-                            .error(error.as_ref()),
-                        )
-                        .await;
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            s.log_entry(
-                ActivityLogEntry::new(
-                    "ok",
-                    "deduplicate",
-                    "Skipped output; recording already exists in a read-only library",
-                )
-                .file(track.filename)
-                .detail(format!(
-                    "{} match: {}; input removed: {}",
-                    found.reason, found.path, source_removed
-                )),
+    let selected = queries::selected_for_tracks(&s.pool, ready_tracks).await?;
+    let skipped_tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {} FROM tracks
+         WHERE status='duplicate' AND stage='skipped' AND is_missing=0
+           AND content_fingerprint IS NOT NULL
+         ORDER BY path",
+        queries::TRACK_FIELDS
+    )))
+    .fetch_all(&s.pool)
+    .await?;
+
+    struct PlannedSource {
+        track: Track,
+        candidate: Option<Candidate>,
+        available: bool,
+    }
+    let mut sources = selected
+        .into_iter()
+        .map(|(track, candidate)| PlannedSource {
+            track,
+            candidate: Some(candidate),
+            available: false,
+        })
+        .collect::<Vec<_>>();
+    sources.extend(skipped_tracks.into_iter().map(|track| PlannedSource {
+        track,
+        candidate: None,
+        available: false,
+    }));
+
+    let mut evidence = Vec::with_capacity(sources.len());
+    for source in &mut sources {
+        source.available = tokio::fs::metadata(&source.track.path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file());
+        if !source.available {
+            sqlx::query(
+                "UPDATE tracks SET is_missing=1,status='failed',stage='failed',
+                 stage_message='Source file is missing; restore it and scan again',updated_at=?
+                 WHERE id=?",
             )
-            .await;
-            continue;
+            .bind(Utc::now().to_rfc3339())
+            .bind(source.track.id.0)
+            .execute(&s.pool)
+            .await?;
         }
-        if let Some(index) = signatures
-            .iter()
-            .position(|existing| recordings_are_duplicates(existing, &signature))
-        {
-            items[index].duplicates.push(DuplicateSource {
-                track_id: track.id,
-                filename: track.filename,
-                current_path: track.path,
+        if source.available {
+            evidence
+                .push(recording_evidence(&s.pool, &source.track, source.candidate.as_ref()).await?);
+        } else {
+            evidence.push(RecordingEvidence {
+                path: source.track.path.clone().into(),
+                format: source.track.format.clone().unwrap_or_default(),
+                bitrate: source
+                    .track
+                    .bitrate
+                    .and_then(|value| u32::try_from(value).ok()),
+                duration: source.track.duration,
+                content_key: source.track.content_fingerprint.clone(),
+                isrc: source
+                    .candidate
+                    .as_ref()
+                    .and_then(|candidate| candidate.isrc.clone()),
             });
-            continue;
         }
-        let dest = PathBuf::from(destination(&cfg, &track, &candidate)?);
+    }
+
+    let mut items: Vec<PreviewItem> = Vec::new();
+    let mut selected_count = 0;
+    for group in input_dedup::group_recordings(&evidence) {
+        let Some((candidate_owner, candidate)) = group.members.iter().find_map(|index| {
+            sources[*index]
+                .candidate
+                .clone()
+                .map(|candidate| (*index, candidate))
+        }) else {
+            continue;
+        };
+        let Some(representative) = group
+            .members
+            .iter()
+            .copied()
+            .find(|index| sources[*index].available)
+        else {
+            continue;
+        };
+        if representative != candidate_owner {
+            promote_apply_representative(
+                &s.pool,
+                &sources[candidate_owner].track,
+                &sources[representative].track,
+                sources[candidate_owner].available,
+            )
+            .await?;
+        }
+        selected_count += group
+            .members
+            .iter()
+            .filter(|index| sources[**index].available)
+            .count();
+        let source = &sources[representative];
+        let track = &source.track;
+        let dest = PathBuf::from(destination(&cfg, track, &candidate)?);
+        let duplicates = group
+            .members
+            .into_iter()
+            .filter(|index| *index != representative)
+            .map(|index| DuplicateSource {
+                track_id: sources[index].track.id,
+                filename: sources[index].track.filename.clone(),
+                current_path: sources[index].track.path.clone(),
+                source_missing: !sources[index].available,
+            })
+            .collect();
         items.push(PreviewItem {
             track_id: track.id,
             filename: track.filename.clone(),
             current_path: track.path.clone(),
             destination_path: dest.to_string_lossy().into_owned(),
-            duplicates: Vec::new(),
+            candidate,
+            duplicates,
         });
-        signatures.push(signature);
     }
     let outputs = items.len();
     let duplicates_skipped = selected_count.saturating_sub(outputs);
@@ -154,6 +187,58 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
         duplicates_skipped,
         delete_source_after_write,
     })
+}
+
+async fn promote_apply_representative(
+    pool: &sqlx::SqlitePool,
+    candidate_owner: &Track,
+    representative: &Track,
+    owner_available: bool,
+) -> Result<()> {
+    let candidate_id = candidate_owner
+        .selected_candidate_id
+        .ok_or_else(|| anyhow!("duplicate representative has no selected candidate"))?;
+    let now = Utc::now().to_rfc3339();
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM candidates WHERE track_id=?")
+        .bind(representative.id.0)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("UPDATE candidates SET track_id=? WHERE track_id=?")
+        .bind(representative.id.0)
+        .bind(candidate_owner.id.0)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "UPDATE tracks SET output_path=NULL,selected_candidate_id=?,status='selected',stage='ready',
+         is_missing=0,error=NULL,stage_message='Promoted as the best available duplicate input',
+         updated_at=? WHERE id=?",
+    )
+    .bind(candidate_id.0)
+    .bind(&now)
+    .bind(representative.id.0)
+    .execute(&mut *transaction)
+    .await?;
+    if owner_available {
+        sqlx::query(
+            "UPDATE tracks SET output_path=?,selected_candidate_id=NULL,status='duplicate',
+             stage='skipped',error=NULL,stage_message=?,updated_at=? WHERE id=?",
+        )
+        .bind(&representative.path)
+        .bind(format!("Duplicate of input file: {}", representative.path))
+        .bind(&now)
+        .bind(candidate_owner.id.0)
+        .execute(&mut *transaction)
+        .await?;
+    } else {
+        sqlx::query("UPDATE tracks SET selected_candidate_id=NULL,updated_at=? WHERE id=?")
+            .bind(&now)
+            .bind(candidate_owner.id.0)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize> {
@@ -223,82 +308,29 @@ async fn finish_apply_workflow(
     }
 }
 
-async fn duplicate_signature(
+async fn recording_evidence(
     pool: &sqlx::SqlitePool,
     track: &Track,
-    candidate: &Candidate,
-) -> Result<DuplicateSignature> {
+    candidate: Option<&Candidate>,
+) -> Result<RecordingEvidence> {
     let path = std::path::Path::new(&track.path);
-    let fingerprint = fingerprint_cache::cached(pool, path)
-        .await?
-        .map(|value| value.fingerprint);
-    let file_hash = if fingerprint.is_none() {
-        Some(file_sha256(path).await?)
+    let content_key = if track.content_fingerprint.is_some() {
+        track.content_fingerprint.clone()
+    } else if let Some(value) = fingerprint_cache::cached(pool, path).await? {
+        input_dedup::fingerprint_key(&value.fingerprint)
     } else {
-        None
+        Some(input_dedup::hash_key(
+            &input_dedup::sha256_cached(pool, path).await?,
+        ))
     };
-    Ok(DuplicateSignature {
-        isrc: candidate
-            .isrc
-            .as_deref()
-            .map(normalize_isrc)
-            .filter(|value| !value.is_empty()),
-        title_artist: format!(
-            "{}:{}",
-            normalize_identity(&candidate.artist),
-            normalize_identity(&candidate.title)
-        ),
+    Ok(RecordingEvidence {
+        path: path.to_path_buf(),
+        format: track.format.clone().unwrap_or_default(),
+        bitrate: track.bitrate.and_then(|value| u32::try_from(value).ok()),
         duration: track.duration,
-        fingerprint,
-        file_hash,
+        content_key,
+        isrc: candidate.and_then(|candidate| candidate.isrc.clone()),
     })
-}
-
-fn recordings_are_duplicates(left: &DuplicateSignature, right: &DuplicateSignature) -> bool {
-    let duration_close = left
-        .duration
-        .zip(right.duration)
-        .is_none_or(|(left, right)| (left - right).abs() <= 3.0);
-    if !duration_close {
-        return false;
-    }
-    let same_isrc = left
-        .isrc
-        .as_deref()
-        .zip(right.isrc.as_deref())
-        .is_some_and(|(left, right)| left == right);
-    if same_isrc {
-        return true;
-    }
-    let same_audio = left
-        .fingerprint
-        .as_deref()
-        .zip(right.fingerprint.as_deref())
-        .is_some_and(|(left, right)| left == right)
-        || left
-            .file_hash
-            .as_deref()
-            .zip(right.file_hash.as_deref())
-            .is_some_and(|(left, right)| left == right);
-    same_audio
-        && (left.title_artist == right.title_artist
-            || left.fingerprint.is_some() && right.fingerprint.is_some())
-}
-
-fn normalize_isrc(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(char::to_uppercase)
-        .collect()
-}
-
-fn normalize_identity(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(char::to_lowercase)
-        .filter(|character| character.is_alphanumeric())
-        .collect()
 }
 
 async fn file_sha256(path: &std::path::Path) -> Result<String> {
@@ -560,7 +592,7 @@ pub async fn apply(
                 })),
         )
         .await;
-        let (_, candidate) = queries::selected(&s.pool, item.track_id).await?;
+        let candidate = item.candidate.clone();
         s.set_workflow(
             WorkflowPhase::Apply,
             "replaygain",
@@ -814,7 +846,7 @@ async fn finish_duplicate(
     delete_source_after_write: bool,
 ) -> Result<()> {
     let source = std::path::Path::new(&duplicate.current_path);
-    if delete_source_after_write {
+    if delete_source_after_write && !duplicate.source_missing {
         if paths_resolve_to_same_target(source, output).await? {
             anyhow::bail!(
                 "refusing to remove duplicate source because it is the corrected output: {}",
@@ -838,7 +870,8 @@ async fn finish_duplicate(
             .context(serde_json::json!({
                 "source": duplicate.current_path,
                 "output": output.display().to_string(),
-                "source_removed": delete_source_after_write
+                "source_removed": delete_source_after_write && !duplicate.source_missing,
+                "source_missing": duplicate.source_missing
             })),
         )
         .await;
@@ -1008,6 +1041,154 @@ mod tests {
 
         assert_eq!(prepared.selected_count, 0);
         assert!(prepared.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepared_write_includes_early_input_duplicates_in_one_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("input-duplicates.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        tokio::fs::create_dir_all(&input).await.unwrap();
+        tokio::fs::create_dir_all(&output).await.unwrap();
+        let kept_path = input.join("kept.flac");
+        let duplicate_path = input.join("duplicate.mp3");
+        tokio::fs::write(&kept_path, b"kept").await.unwrap();
+        tokio::fs::write(&duplicate_path, b"duplicate")
+            .await
+            .unwrap();
+        let kept_id = sqlx::query(
+            "INSERT INTO tracks(path,filename,format,bitrate,duration,content_fingerprint,status,
+             is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES(?,'kept.flac','flac',900,180.0,'fp:same','selected',0,'now','now','now','ready')",
+        )
+        .bind(kept_path.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let candidate_id = sqlx::query(
+            "INSERT INTO candidates(track_id,provider,title,artist,isrc,score)
+             VALUES(?,'deezer','Song','Artist',NULL,100)",
+        )
+        .bind(kept_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
+            .bind(candidate_id)
+            .bind(kept_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tracks(path,filename,format,bitrate,duration,content_fingerprint,status,
+             is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES(?,'duplicate.mp3','mp3',320,181.0,'fp:same','duplicate',0,'now','now','now','skipped')",
+        )
+        .bind(duplicate_path.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let state = Arc::new(AppState::new(
+            crate::config::Config {
+                input_dir: input.to_string_lossy().into_owned(),
+                output_dir: output.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            pool,
+        ));
+
+        let prepared = prepare_apply(&state).await.unwrap();
+
+        assert_eq!(prepared.selected_count, 2);
+        assert_eq!(prepared.outputs, 1);
+        assert_eq!(prepared.duplicates_skipped, 1);
+        assert_eq!(prepared.items[0].current_path, kept_path.to_string_lossy());
+        assert_eq!(prepared.items[0].duplicates.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_write_promotes_an_available_duplicate_when_the_selected_source_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("missing-representative.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let input = directory.path().join("input");
+        let output = directory.path().join("output");
+        tokio::fs::create_dir_all(&input).await.unwrap();
+        tokio::fs::create_dir_all(&output).await.unwrap();
+        let missing_path = input.join("missing.flac");
+        let promoted_path = input.join("available.mp3");
+        tokio::fs::write(&promoted_path, b"available")
+            .await
+            .unwrap();
+        let missing_id = sqlx::query(
+            "INSERT INTO tracks(path,filename,format,bitrate,duration,content_fingerprint,status,
+             is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES(?,'missing.flac','flac',900,180.0,'fp:same','selected',0,'now','now','now','ready')",
+        )
+        .bind(missing_path.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let candidate_id = sqlx::query(
+            "INSERT INTO candidates(track_id,provider,title,artist,score)
+             VALUES(?,'deezer','Song','Artist',100)",
+        )
+        .bind(missing_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
+            .bind(candidate_id)
+            .bind(missing_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let promoted_id = sqlx::query(
+            "INSERT INTO tracks(path,filename,format,bitrate,duration,content_fingerprint,status,
+             is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES(?,'available.mp3','mp3',320,180.0,'fp:same','duplicate',0,'now','now','now','skipped')",
+        )
+        .bind(promoted_path.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let state = Arc::new(AppState::new(
+            crate::config::Config {
+                input_dir: input.to_string_lossy().into_owned(),
+                output_dir: output.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            pool.clone(),
+        ));
+
+        let prepared = prepare_apply(&state).await.unwrap();
+
+        assert_eq!(prepared.outputs, 1);
+        assert_eq!(prepared.items[0].track_id.0, promoted_id);
+        assert_eq!(
+            prepared.items[0].current_path,
+            promoted_path.to_string_lossy()
+        );
+        assert!(prepared.items[0].duplicates[0].source_missing);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT track_id FROM candidates WHERE id=?")
+                .bind(candidate_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            promoted_id
+        );
     }
 
     #[test]
@@ -1185,56 +1366,6 @@ mod tests {
         assert!(!temporary.exists());
     }
 
-    fn signature(
-        isrc: Option<&str>,
-        identity: &str,
-        duration: f64,
-        fingerprint: Option<&str>,
-        file_hash: Option<&str>,
-    ) -> DuplicateSignature {
-        DuplicateSignature {
-            isrc: isrc.map(normalize_isrc),
-            title_artist: identity.into(),
-            duration: Some(duration),
-            fingerprint: fingerprint.map(str::to_owned),
-            file_hash: file_hash.map(str::to_owned),
-        }
-    }
-
-    #[test]
-    fn same_isrc_with_close_duration_is_one_output() {
-        let first = signature(
-            Some("QZ-DA5-20-82376"),
-            "twenty7:eyesonyou",
-            148.0,
-            None,
-            None,
-        );
-        let second = signature(Some("qzda52082376"), "twenty7:eyesonyou", 149.0, None, None);
-        assert!(recordings_are_duplicates(&first, &second));
-    }
-
-    #[test]
-    fn audio_fingerprint_detects_duplicate_with_different_tags() {
-        let first = signature(None, "bad:tags", 238.0, Some("audio-fp"), None);
-        let second = signature(None, "hoomaan:darling", 238.4, Some("audio-fp"), None);
-        assert!(recordings_are_duplicates(&first, &second));
-    }
-
-    #[test]
-    fn same_title_does_not_hide_a_different_recording() {
-        let first = signature(None, "artist:song", 180.0, Some("first"), None);
-        let second = signature(None, "artist:song", 180.0, Some("second"), None);
-        assert!(!recordings_are_duplicates(&first, &second));
-    }
-
-    #[test]
-    fn large_duration_difference_is_not_deduplicated() {
-        let first = signature(Some("US1234567890"), "artist:song", 180.0, None, None);
-        let second = signature(Some("US1234567890"), "artist:song", 240.0, None, None);
-        assert!(!recordings_are_duplicates(&first, &second));
-    }
-
     #[test]
     fn temporary_destination_keeps_audio_extension() {
         assert_eq!(
@@ -1284,6 +1415,7 @@ mod tests {
             track_id: TrackId(track_id),
             filename: "duplicate.mp3".into(),
             current_path: source.to_string_lossy().into_owned(),
+            source_missing: false,
         };
 
         finish_duplicate(&state, &duplicate, &output, true)

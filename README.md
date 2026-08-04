@@ -51,8 +51,7 @@ Extract the archive from `dist/`, then run `bin/ununknown-run`. Application data
 `UNUNKNOWN_DATA_DIR`. FFmpeg and Chromaprint remain recommended runtime dependencies.
 
 The server supports `UNUNKNOWN_DB`, `UNUNKNOWN_INPUT_DIR`, `UNUNKNOWN_OUTPUT_DIR`,
-`UNUNKNOWN_REFERENCE_DIRS` (an optional OS path-list), `UNUNKNOWN_STATIC_DIR`, and a loopback-only
-`UNUNKNOWN_BIND`. Provider credentials can be supplied
+`UNUNKNOWN_STATIC_DIR`, and a loopback-only `UNUNKNOWN_BIND`. Provider credentials can be supplied
 without persisting them in SQLite through `UNUNKNOWN_ACOUSTID_KEY`, `UNUNKNOWN_AUDD_TOKEN`,
 `UNUNKNOWN_SPOTIFY_CLIENT_ID`, `UNUNKNOWN_SPOTIFY_CLIENT_SECRET`,
 `UNUNKNOWN_SOUNDCLOUD_CLIENT_ID`, `UNUNKNOWN_SOUNDCLOUD_CLIENT_SECRET`,
@@ -76,9 +75,7 @@ docker compose ps
 ```
 
 Then open <http://127.0.0.1:7331>. Put input files in `music/`; corrected copies are written to
-`output/`; existing music for duplicate checks goes in `reference/`; SQLite and caches are stored
-in `data/`. The `/data/reference` folder is detected automatically and its mount is read-only, so
-no extra container environment setting is needed. On startup, the container creates the writable
+`output/`; SQLite and caches are stored in `data/`. On startup, the container creates the writable
 mounts when necessary, assigns them to `PUID:PGID`, and drops root privileges before starting the
 application. These locations, the image tag, port, log level, and optional provider credentials are
 documented in `.env.example`. The input mount is read-only, so **Remove input after successful
@@ -184,7 +181,6 @@ credentials they continue to provide title and cover through Spotify oEmbed.
 ## Product flow
 
 1. Enter an input and output folder.
-   Optionally add one or more read-only reference libraries containing music you already own.
 2. Optionally add source API keys.
 3. Select **Scan and identify**.
 4. Resolve files that need help individually, or use **Smart auto-select** to analyze review
@@ -201,21 +197,16 @@ Steps 3 and 5 can run automatically at the configured interval. Automatic runs n
 Review candidate; they only write tracks that passed the normal strict matching and completeness
 checks.
 
-Before writing, the output planner removes duplicate recordings from the batch. It uses a
-compatible ISRC first, then cached Chromaprint audio fingerprints, with a whole-file SHA-256
-fallback. Only one corrected output is written for a duplicate recording. Different audio,
+Before online catalog lookup, Ununknown groups duplicate recordings found in the input folder. It
+uses cached Chromaprint audio fingerprints, with an exact whole-file SHA-256 fallback when
+fingerprinting is unavailable. After identification, a compatible ISRC provides additional proof.
+Only the best-quality input in each group is used to create one corrected output. Different audio,
 remixes, live versions, and materially different durations remain separate and receive numbered
-filenames when their corrected names collide. Existing output files are never bulk-deleted.
+filenames when their corrected names collide. An identical corrected output from an earlier run is
+reused instead of creating a numbered copy, and existing output files are never bulk-deleted.
 
-Reference libraries are indexed locally and are never modified. On the first scan, Ununknown
-stores each reference file's size, modification time, duration, and Chromaprint fingerprint in
-SQLite. Later scans fingerprint only new or changed files. Input recordings already present in a
-reference library are marked **Skipped** with the matching path before any online catalog lookup or
-output write. When fingerprinting is unavailable, an exact SHA-256 file hash is used as a safe
-fallback. Reference folders may not overlap the input or output folder. When **Remove processed
-inputs and duplicates** is enabled, a matched input duplicate is removed only after Ununknown
-rechecks that its reference copy is accessible and resolves to a different file. The input mount
-must be writable; reference mounts remain read-only.
+When **Remove processed inputs and duplicates** is enabled, duplicate inputs are removed only after
+the shared corrected output exists. The input mount must be writable for source removal.
 
 The browser uses a deliberately small local API: `/api/setup`, `/api/status`,
 `/api/identify`, `/api/tracks`, and `/api/write`. Production packages keep that API on loopback,

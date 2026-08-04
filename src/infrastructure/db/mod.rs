@@ -11,6 +11,16 @@ const DAILY_CACHE_CLEANUP_KEY: &str = "last_disposable_cache_cleanup";
 const MEDIA_CACHE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+const PRE_CONSOLIDATION_MIGRATIONS: &[(i64, &str)] = &[
+    (1, "init"),
+    (2, "v020"),
+    (3, "v030"),
+    (4, "previews"),
+    (5, "fingerprint cache"),
+    (6, "candidate release metadata"),
+    (7, "candidate sources"),
+];
+
 pub async fn connect(path: &str) -> Result<SqlitePool> {
     if let Some(parent) = Path::new(path).parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -27,6 +37,7 @@ pub async fn connect(path: &str) -> Result<SqlitePool> {
         .acquire_timeout(Duration::from_secs(30))
         .connect_with(options)
         .await?;
+    adopt_pre_consolidation_migration_history(&pool).await?;
     MIGRATOR
         .run(&pool)
         .await
@@ -36,6 +47,67 @@ pub async fn connect(path: &str) -> Result<SqlitePool> {
     debug_assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS tracks"));
     restrict_database_permissions(path).await?;
     Ok(pool)
+}
+
+/// Older releases used migrations 1 through 7 before the schema was
+/// consolidated into the current idempotent baseline. SQLx correctly refuses
+/// to mix those two histories, so recognize that exact released lineage and
+/// let the baseline adopt its already-compatible schema. Unknown histories are
+/// deliberately left untouched for SQLx to reject.
+async fn adopt_pre_consolidation_migration_history(pool: &SqlitePool) -> Result<()> {
+    let migration_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if migration_table_exists == 0 {
+        return Ok(());
+    }
+
+    let applied: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT version, description, success FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
+    let is_known_history = applied.len() == PRE_CONSOLIDATION_MIGRATIONS.len()
+        && applied.iter().zip(PRE_CONSOLIDATION_MIGRATIONS).all(
+            |((version, description, success), (expected_version, expected_description))| {
+                version == expected_version && description == expected_description && *success == 1
+            },
+        );
+    if !is_known_history {
+        return Ok(());
+    }
+
+    for required_table in [
+        "settings",
+        "tracks",
+        "candidates",
+        "provider_cache",
+        "fingerprint_cache",
+        "candidate_sources",
+    ] {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(required_table)
+                .fetch_one(pool)
+                .await?;
+        if exists == 0 {
+            anyhow::bail!(
+                "legacy migration history is present but required table {required_table} is missing"
+            );
+        }
+    }
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM _sqlx_migrations")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    tracing::info!(
+        "adopted pre-consolidation database migration history without deleting user data"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -305,6 +377,11 @@ async fn enforce_media_cache_limit_with_limit(pool: &SqlitePool, limit_bytes: u6
            SELECT 'replaygain',path,updated_at,
              length(CAST(path AS BLOB)) + length(CAST(updated_at AS BLOB)) + 48
            FROM replaygain_cache
+           UNION ALL
+           SELECT 'content_hash',path,updated_at,
+             length(CAST(path AS BLOB)) + length(CAST(sha256 AS BLOB))
+             + length(CAST(updated_at AS BLOB)) + 32
+           FROM content_hash_cache
          ) ORDER BY cached_at ASC",
     )
     .fetch_all(pool)
@@ -323,6 +400,7 @@ async fn enforce_media_cache_limit_with_limit(pool: &SqlitePool, limit_bytes: u6
             "fingerprint" => "DELETE FROM fingerprint_cache WHERE path=?",
             "integrity" => "DELETE FROM integrity_cache WHERE path=?",
             "replaygain" => "DELETE FROM replaygain_cache WHERE path=?",
+            "content_hash" => "DELETE FROM content_hash_cache WHERE path=?",
             _ => continue,
         };
         removed += sqlx::query(query)
@@ -472,7 +550,25 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reference_files'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='content_hash_cache'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -490,12 +586,145 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(versions, vec![1, 2, 3]);
+        assert_eq!(versions, vec![1, 2, 3, 4]);
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks")
                 .fetch_one(&pool)
                 .await
                 .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_consolidation_migration_history_is_adopted_without_data_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pre-consolidation.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let legacy = SqlitePoolOptions::new().connect(&url).await.unwrap();
+        sqlx::raw_sql(SCHEMA).execute(&legacy).await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+             );
+             INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time)
+             VALUES
+                (1,'init',1,X'00',0),
+                (2,'v020',1,X'00',0),
+                (3,'v030',1,X'00',0),
+                (4,'previews',1,X'00',0),
+                (5,'fingerprint cache',1,X'00',0),
+                (6,'candidate release metadata',1,X'00',0),
+                (7,'candidate sources',1,X'00',0);",
+        )
+        .execute(&legacy)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,
+             last_scanned_at,stage) VALUES('/input/keep.mp3','keep.mp3','ready',0,
+             'now','now','now','ready')",
+        )
+        .execute(&legacy)
+        .await
+        .unwrap();
+        legacy.close().await;
+
+        let pool = connect(path.to_str().unwrap()).await.unwrap();
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(versions, vec![1, 2, 3, 4]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM tracks WHERE path='/input/keep.mp3'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type='table' AND name='content_hash_cache'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn input_only_upgrade_removes_reference_index_and_requeues_stale_duplicates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reference-upgrade.sqlite");
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let legacy = SqlitePoolOptions::new().connect(&url).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0001_initial.sql"))
+            .execute(&legacy)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0002_automatic_scan_files.sql"
+        ))
+        .execute(&legacy)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0003_reference_library.sql"
+        ))
+        .execute(&legacy)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,
+             last_scanned_at,stage) VALUES('/input/song.mp3','song.mp3','duplicate',0,
+             'now','now','now','skipped')",
+        )
+        .execute(&legacy)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO automatic_scan_files(path,file_size,file_mtime_ns,checked_at)
+             VALUES('/input/song.mp3',1,1,'now')",
+        )
+        .execute(&legacy)
+        .await
+        .unwrap();
+        legacy.close().await;
+
+        let pool = connect(path.to_str().unwrap()).await.unwrap();
+
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM tracks")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM automatic_scan_files")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='reference_files'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
             0
         );
     }

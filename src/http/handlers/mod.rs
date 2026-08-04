@@ -39,7 +39,11 @@ pub struct Track {
     output_path: Option<String>,
     filename: String,
     format: Option<String>,
+    #[serde(skip_serializing)]
+    bitrate: Option<i64>,
     duration: Option<f64>,
+    #[serde(skip_serializing)]
+    content_fingerprint: Option<String>,
     current_title: Option<String>,
     current_artist: Option<String>,
     current_album: Option<String>,
@@ -150,6 +154,7 @@ pub struct PreviewItem {
     filename: String,
     current_path: String,
     destination_path: String,
+    candidate: Candidate,
     duplicates: Vec<DuplicateSource>,
 }
 
@@ -158,6 +163,7 @@ pub struct DuplicateSource {
     track_id: TrackId,
     filename: String,
     current_path: String,
+    source_missing: bool,
 }
 
 #[derive(Deserialize)]
@@ -198,7 +204,6 @@ pub struct SourceLookupRequest {
 pub struct SetupRequest {
     input_dir: String,
     output_dir: String,
-    reference_dirs: Option<Vec<String>>,
     delete_source_after_write: Option<bool>,
     automatic_scan_enabled: Option<bool>,
     automatic_scan_interval_minutes: Option<u64>,

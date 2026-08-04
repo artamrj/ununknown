@@ -1,5 +1,6 @@
 use crate::{
     app::{ActivityLogEntry, AppState},
+    application::input_dedup::{self, RecordingEvidence},
     domain::audio,
     infrastructure::{fingerprint_cache, media::fingerprint, providers},
     types::WorkflowPhase,
@@ -28,7 +29,14 @@ struct PipelineLimits {
 
 #[derive(Clone)]
 struct FileJob {
+    members: Vec<PreparedInput>,
+}
+
+#[derive(Clone)]
+struct PreparedInput {
     path: PathBuf,
+    info: Option<audio::AudioInfo>,
+    content_key: Option<String>,
 }
 
 struct PersistJob {
@@ -44,7 +52,6 @@ enum ProcessOutcome {
     Matched,
     NeedsReview,
     Corrupt,
-    Duplicate,
 }
 
 #[derive(Clone, Copy)]
@@ -55,16 +62,6 @@ struct FingerprintEvidence<'a> {
 
 pub async fn run(state: Arc<AppState>) -> Result<()> {
     let cfg = state.config.read().await.clone();
-    state
-        .set_workflow(WorkflowPhase::Scan, "scan", "Discovering music", 0, 0, None)
-        .await;
-    crate::application::reference_library::refresh(&state).await?;
-    if state.workflow_cancelled().await {
-        state
-            .finish_workflow(WorkflowPhase::Idle, "idle", "Scan stopped")
-            .await;
-        return Ok(());
-    }
     state
         .set_workflow(WorkflowPhase::Scan, "scan", "Discovering music", 0, 0, None)
         .await;
@@ -143,9 +140,8 @@ async fn discover_files_in_background(input_dir: String) -> Result<(Vec<PathBuf>
 
 pub async fn run_automatic(state: Arc<AppState>) -> Result<usize> {
     state
-        .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan: checking libraries")
+        .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan: checking input folder")
         .await;
-    crate::application::reference_library::refresh(&state).await?;
     if state.workflow_cancelled().await || state.frontend_active_until().await.is_some() {
         state
             .finish_workflow(
@@ -323,6 +319,30 @@ async fn run_files(
         songrec: Arc::new(Semaphore::new(2)),
         disabled_providers: Arc::new(Mutex::new(HashSet::new())),
     });
+    state
+        .set_workflow(
+            WorkflowPhase::Fetch,
+            "deduplicate",
+            "Analyzing input recordings for duplicates",
+            0,
+            total,
+            None,
+        )
+        .await;
+    let jobs = prepare_input_jobs(&state, &limits, files).await?;
+    if state.workflow_cancelled().await {
+        return Ok(true);
+    }
+    state
+        .set_workflow(
+            WorkflowPhase::Fetch,
+            "fetch",
+            starting_message,
+            0,
+            total,
+            None,
+        )
+        .await;
     let (persist_tx, persist_rx) = mpsc::channel(25);
     let writer = tokio::spawn(db_writer(state.clone(), persist_rx, 25));
     let scan_workers = cfg.scan_workers.max(1).min(total.max(1));
@@ -354,11 +374,11 @@ async fn run_files(
             }
         });
     }
-    for path in files {
+    for job in jobs {
         if state.workflow_cancelled().await {
             break;
         }
-        file_tx.send(FileJob { path }).await?;
+        file_tx.send(job).await?;
     }
     drop(file_tx);
     drop(persist_tx);
@@ -393,6 +413,128 @@ async fn run_files(
     Ok(cancelled)
 }
 
+async fn prepare_input_jobs(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    files: Vec<PathBuf>,
+) -> Result<Vec<FileJob>> {
+    let total = files.len();
+    let mut tasks = JoinSet::new();
+    let mut files = files.into_iter();
+    let workers = limits.metadata.available_permits().max(1);
+    let mut prepared = Vec::new();
+    loop {
+        while tasks.len() < workers {
+            let Some(path) = files.next() else {
+                break;
+            };
+            let state = state.clone();
+            let limits = limits.clone();
+            tasks.spawn(async move { prepare_input(&state, &limits, path).await });
+        }
+        let Some(result) = tasks.join_next().await else {
+            break;
+        };
+        prepared.push(result.context("input duplicate-analysis worker failed")?);
+        state
+            .set_workflow(
+                WorkflowPhase::Fetch,
+                "deduplicate",
+                "Analyzing input recordings for duplicates",
+                prepared.len(),
+                total,
+                prepared
+                    .last()
+                    .map(|input| input.path.to_string_lossy().into_owned()),
+            )
+            .await;
+        if state.workflow_cancelled().await {
+            tasks.abort_all();
+            break;
+        }
+    }
+
+    let evidence = prepared
+        .iter()
+        .map(|input| RecordingEvidence {
+            path: input.path.clone(),
+            format: input
+                .info
+                .as_ref()
+                .map(|info| info.format.clone())
+                .unwrap_or_default(),
+            bitrate: input.info.as_ref().and_then(|info| info.bitrate),
+            duration: input.info.as_ref().map(|info| info.duration),
+            content_key: input.content_key.clone(),
+            isrc: None,
+        })
+        .collect::<Vec<_>>();
+    Ok(input_dedup::group_recordings(&evidence)
+        .into_iter()
+        .map(|group| FileJob {
+            members: group
+                .members
+                .into_iter()
+                .map(|index| prepared[index].clone())
+                .collect(),
+        })
+        .collect())
+}
+
+async fn prepare_input(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    path: PathBuf,
+) -> PreparedInput {
+    let info = {
+        let permit = limits.metadata.acquire().await;
+        match permit {
+            Ok(_permit) => tokio::task::spawn_blocking({
+                let path = path.clone();
+                move || audio::read(&path)
+            })
+            .await
+            .ok()
+            .and_then(Result::ok),
+            Err(_) => None,
+        }
+    };
+    let healthy = if info.is_some() {
+        !matches!(
+            crate::infrastructure::media::integrity::check(&state.pool, &path).await,
+            Ok(crate::infrastructure::media::integrity::Integrity::Corrupt(
+                _
+            ))
+        )
+    } else {
+        false
+    };
+    let content_key = if healthy {
+        let permit = limits.fingerprint.acquire().await;
+        match permit {
+            Ok(_permit) => match fingerprint_cache::get_or_calculate(&state.pool, &path, || async {
+                fingerprint::calculate(&path).await
+            })
+            .await
+            {
+                Ok(value) => input_dedup::fingerprint_key(&value.fingerprint),
+                Err(_) => input_dedup::sha256_cached(&state.pool, &path)
+                    .await
+                    .ok()
+                    .map(|hash| input_dedup::hash_key(&hash)),
+            },
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    PreparedInput {
+        path,
+        info,
+        content_key,
+    }
+}
+
 async fn process_file(
     state: Arc<AppState>,
     limits: Arc<PipelineLimits>,
@@ -400,29 +542,95 @@ async fn process_file(
     job: FileJob,
     total: usize,
 ) {
-    if state.workflow_cancelled().await {
-        return;
-    }
-    let filename = job
-        .path
-        .file_name()
-        .and_then(|v| v.to_str())
-        .unwrap_or("audio")
-        .to_owned();
-    const ATTEMPTS: usize = 2;
-    for attempt in 1..=ATTEMPTS {
+    let mut members = job.members.into_iter();
+    while let Some(member) = members.next() {
         if state.workflow_cancelled().await {
             return;
         }
-        state
-            .start_track(
-                total,
-                filename.clone(),
-                format!("Matching {filename} · attempt {attempt}/{}", ATTEMPTS),
-            )
-            .await;
-        match process(&state, &limits, &persist_tx, &job.path).await {
-            Ok(ProcessOutcome::Matched) => {
+        let filename = member
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("audio")
+            .to_owned();
+        const ATTEMPTS: usize = 2;
+        let mut outcome = None;
+        for attempt in 1..=ATTEMPTS {
+            if state.workflow_cancelled().await {
+                return;
+            }
+            state
+                .start_track(
+                    total,
+                    filename.clone(),
+                    format!("Matching {filename} · attempt {attempt}/{ATTEMPTS}"),
+                )
+                .await;
+            match process(&state, &limits, &persist_tx, &member.path).await {
+                Ok(result) => {
+                    outcome = Some(result);
+                    break;
+                }
+                Err(error) if attempt < ATTEMPTS => {
+                    tracing::warn!(path=%member.path.display(), attempt, "track attempt failed: {error:#}");
+                    state
+                        .log_entry(
+                            ActivityLogEntry::new(
+                                "warn",
+                                "fetch",
+                                "Track attempt failed; retrying",
+                            )
+                            .file(filename.clone())
+                            .attempt(attempt as i64)
+                            .error_text(format!("{error:#}"))
+                            .context(serde_json::json!({
+                                "path": member.path.display().to_string(),
+                                "max_attempts": ATTEMPTS
+                            })),
+                        )
+                        .await;
+                    tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
+                }
+                Err(error) => {
+                    tracing::warn!(path=%member.path.display(), "track failed after retries: {error:#}");
+                    state.increment_failed().await;
+                    let error_text = format!("{error:#}");
+                    if let Err(persist_error) =
+                        persist_failed(&state.pool, &member.path, &error_text).await
+                    {
+                        tracing::warn!(path=%member.path.display(), "failed to persist failed track: {persist_error:#}");
+                        state
+                            .log_entry(
+                                ActivityLogEntry::new(
+                                    "error",
+                                    "db",
+                                    "Failed to persist failed track",
+                                )
+                                .file(filename.clone())
+                                .error_text(format!("{persist_error:#}")),
+                            )
+                            .await;
+                    }
+                    state
+                        .log_entry(
+                            ActivityLogEntry::new("error", "fetch", "Track failed after retries")
+                                .file(filename.clone())
+                                .attempt(attempt as i64)
+                                .error_text(error_text)
+                                .context(serde_json::json!({
+                                    "path": member.path.display().to_string(),
+                                    "max_attempts": ATTEMPTS
+                                })),
+                        )
+                        .await;
+                }
+            }
+        }
+        if let Err(error) = persist_analysis_identity(&state.pool, &member).await {
+            tracing::warn!(path=%member.path.display(), "could not persist input identity: {error:#}");
+        }
+        match outcome {
+            Some(ProcessOutcome::Matched) => {
                 state
                     .log(
                         "ok",
@@ -431,9 +639,12 @@ async fn process_file(
                         "Matched and stored for Preview",
                     )
                     .await;
-                break;
+                finish_scan_progress(&state, total).await;
+                let duplicates = members.collect::<Vec<_>>();
+                persist_duplicate_members(&state, &member, duplicates, total).await;
+                return;
             }
-            Ok(ProcessOutcome::NeedsReview) => {
+            Some(ProcessOutcome::NeedsReview) => {
                 state
                     .log(
                         "warn",
@@ -442,9 +653,12 @@ async fn process_file(
                         "No selected match; moving to next file",
                     )
                     .await;
-                break;
+                finish_scan_progress(&state, total).await;
+                let duplicates = members.collect::<Vec<_>>();
+                persist_duplicate_members(&state, &member, duplicates, total).await;
+                return;
             }
-            Ok(ProcessOutcome::Corrupt) => {
+            Some(ProcessOutcome::Corrupt) => {
                 state
                     .log(
                         "error",
@@ -453,66 +667,14 @@ async fn process_file(
                         "Damaged audio was blocked from metadata writing",
                     )
                     .await;
-                break;
             }
-            Ok(ProcessOutcome::Duplicate) => {
-                state
-                    .log(
-                        "ok",
-                        "deduplicate",
-                        Some(&filename),
-                        "Skipped because this recording is already in a read-only library",
-                    )
-                    .await;
-                break;
-            }
-            Err(error) if attempt < ATTEMPTS => {
-                tracing::warn!(path=%job.path.display(), attempt, "track attempt failed: {error:#}");
-                state
-                    .log_entry(
-                        ActivityLogEntry::new("warn", "fetch", "Track attempt failed; retrying")
-                            .file(filename.clone())
-                            .attempt(attempt as i64)
-                            .error_text(format!("{error:#}"))
-                            .context(serde_json::json!({
-                                "path": job.path.display().to_string(),
-                                "max_attempts": ATTEMPTS
-                            })),
-                    )
-                    .await;
-                tokio::time::sleep(Duration::from_millis(400 * attempt as u64)).await;
-            }
-            Err(error) => {
-                tracing::warn!(path=%job.path.display(), "track failed after retries: {error:#}");
-                state.increment_failed().await;
-                let error_text = format!("{error:#}");
-                if let Err(persist_error) =
-                    persist_failed(&state.pool, &job.path, &error_text).await
-                {
-                    tracing::warn!(path=%job.path.display(), "failed to persist failed track: {persist_error:#}");
-                    state
-                        .log_entry(
-                            ActivityLogEntry::new("error", "db", "Failed to persist failed track")
-                                .file(filename.clone())
-                                .error_text(format!("{persist_error:#}")),
-                        )
-                        .await;
-                }
-                state
-                    .log_entry(
-                        ActivityLogEntry::new("error", "fetch", "Track failed after retries")
-                            .file(filename.clone())
-                            .attempt(attempt as i64)
-                            .error_text(error_text)
-                            .context(serde_json::json!({
-                                "path": job.path.display().to_string(),
-                                "max_attempts": ATTEMPTS
-                            })),
-                    )
-                    .await;
-            }
+            None => {}
         }
+        finish_scan_progress(&state, total).await;
     }
+}
+
+async fn finish_scan_progress(state: &Arc<AppState>, total: usize) {
     let processed = state.finish_track(total).await;
     state
         .set_workflow(
@@ -524,6 +686,59 @@ async fn process_file(
             None,
         )
         .await;
+}
+
+async fn persist_duplicate_members(
+    state: &Arc<AppState>,
+    representative: &PreparedInput,
+    duplicates: Vec<PreparedInput>,
+    total: usize,
+) {
+    for duplicate in duplicates {
+        if state.workflow_cancelled().await {
+            return;
+        }
+        let filename = duplicate
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("audio")
+            .to_owned();
+        let result = persist_input_duplicate(&state.pool, &duplicate, &representative.path).await;
+        match result {
+            Ok(()) => {
+                state
+                    .log_entry(
+                        ActivityLogEntry::new(
+                            "ok",
+                            "deduplicate",
+                            "Skipped duplicate input before online lookup",
+                        )
+                        .file(filename)
+                        .detail(format!(
+                            "Best input kept: {}",
+                            representative.path.display()
+                        )),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                state.increment_failed().await;
+                state
+                    .log_entry(
+                        ActivityLogEntry::new(
+                            "error",
+                            "deduplicate",
+                            "Could not store duplicate input result",
+                        )
+                        .file(filename)
+                        .error(error.as_ref()),
+                    )
+                    .await;
+            }
+        }
+        finish_scan_progress(state, total).await;
+    }
 }
 
 async fn process(
@@ -665,101 +880,6 @@ async fn process(
             (String::new(), info.duration)
         }
     };
-    match crate::application::reference_library::find_duplicate(
-        &state.pool,
-        path,
-        (!fp.is_empty()).then_some(fp.as_str()),
-        duration,
-    )
-    .await
-    {
-        Ok(Some(found)) => {
-            let message = format!(
-                "Already exists in read-only library ({}): {}",
-                found.reason, found.path
-            );
-            let mut transaction = state.pool.begin().await?;
-            let track_id = upsert_track_outcome(
-                &mut transaction,
-                path,
-                Some(&info),
-                "duplicate",
-                "skipped",
-                Some(&message),
-                None,
-            )
-            .await?;
-            sqlx::query("UPDATE tracks SET output_path=? WHERE id=?")
-                .bind(&found.path)
-                .bind(track_id)
-                .execute(&mut *transaction)
-                .await?;
-            sqlx::query("DELETE FROM candidates WHERE track_id=?")
-                .bind(track_id)
-                .execute(&mut *transaction)
-                .await?;
-            transaction.commit().await?;
-            if state.config.read().await.delete_source_after_write {
-                match crate::application::reference_library::remove_input_duplicate(
-                    &state.pool,
-                    track_id,
-                    path,
-                    &found,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        state
-                            .log(
-                                "ok",
-                                "deduplicate",
-                                Some(filename),
-                                "Removed input duplicate after verifying the read-only reference copy",
-                            )
-                            .await;
-                    }
-                    Err(error) => {
-                        crate::application::reference_library::mark_removal_failed(
-                            &state.pool,
-                            track_id,
-                            &found,
-                            &error,
-                        )
-                        .await?;
-                        state
-                            .log_entry(
-                                ActivityLogEntry::new(
-                                    "warn",
-                                    "deduplicate",
-                                    "Duplicate was skipped but could not be removed from input",
-                                )
-                                .file(filename.to_owned())
-                                .error(error.as_ref()),
-                            )
-                            .await;
-                    }
-                }
-            }
-            state
-                .log("ok", "deduplicate", Some(filename), &message)
-                .await;
-            return Ok(ProcessOutcome::Duplicate);
-        }
-        Ok(None) => {}
-        Err(error) => {
-            state
-                .log_entry(
-                    ActivityLogEntry::new(
-                        "warn",
-                        "deduplicate",
-                        "Reference-library comparison failed; continuing identification",
-                    )
-                    .file(filename.to_owned())
-                    .error_text(format!("{error:#}")),
-                )
-                .await;
-        }
-    }
     let cfg = state.config.read().await.clone();
     if cfg.acoustid_key.is_empty() {
         state
@@ -2825,6 +2945,73 @@ async fn persist_corrupt(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn persist_analysis_identity(pool: &sqlx::SqlitePool, input: &PreparedInput) -> Result<()> {
+    let snapshot = file_snapshot(&input.path).await;
+    sqlx::query(
+        "UPDATE tracks SET bitrate=?,file_size=?,file_mtime=?,content_fingerprint=?,updated_at=?
+         WHERE path=?",
+    )
+    .bind(
+        input
+            .info
+            .as_ref()
+            .and_then(|info| info.bitrate)
+            .map(i64::from),
+    )
+    .bind(snapshot.map(|value| value.0))
+    .bind(snapshot.map(|value| value.1))
+    .bind(&input.content_key)
+    .bind(Utc::now().to_rfc3339())
+    .bind(input.path.to_string_lossy().as_ref())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn persist_input_duplicate(
+    pool: &sqlx::SqlitePool,
+    input: &PreparedInput,
+    representative: &Path,
+) -> Result<()> {
+    let message = format!("Duplicate of input file: {}", representative.display());
+    let mut transaction = pool.begin().await?;
+    let id = upsert_track_outcome(
+        &mut transaction,
+        &input.path,
+        input.info.as_ref(),
+        "duplicate",
+        "skipped",
+        Some(&message),
+        None,
+    )
+    .await?;
+    let snapshot = file_snapshot(&input.path).await;
+    sqlx::query(
+        "UPDATE tracks SET output_path=?,bitrate=?,file_size=?,file_mtime=?,content_fingerprint=?
+         WHERE id=?",
+    )
+    .bind(representative.to_string_lossy().as_ref())
+    .bind(
+        input
+            .info
+            .as_ref()
+            .and_then(|info| info.bitrate)
+            .map(i64::from),
+    )
+    .bind(snapshot.map(|value| value.0))
+    .bind(snapshot.map(|value| value.1))
+    .bind(&input.content_key)
+    .bind(id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("DELETE FROM candidates WHERE track_id=?")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
     Ok(())
 }
 

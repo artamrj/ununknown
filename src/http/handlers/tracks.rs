@@ -70,6 +70,7 @@ pub async fn remove_track(
     let mut transaction = s.pool.begin().await?;
     for table in [
         "fingerprint_cache",
+        "content_hash_cache",
         "replaygain_cache",
         "integrity_cache",
         "artwork_overrides",
@@ -81,6 +82,73 @@ pub async fn remove_track(
         .bind(&canonical_path)
         .execute(&mut *transaction)
         .await?;
+    }
+    if let Some(content_key) = track.content_fingerprint.as_deref() {
+        let duplicate_tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {} FROM tracks
+             WHERE id!=? AND status='duplicate' AND stage='skipped'
+               AND content_fingerprint=? AND is_missing=0
+               AND (? LIKE 'sha256:%' OR (duration IS NOT NULL AND ABS(duration - ?) <= 3.0))",
+            queries::TRACK_FIELDS
+        )))
+        .bind(track.id.0)
+        .bind(content_key)
+        .bind(content_key)
+        .bind(track.duration)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let evidence = duplicate_tracks
+            .iter()
+            .map(
+                |duplicate| crate::application::input_dedup::RecordingEvidence {
+                    path: duplicate.path.clone().into(),
+                    format: duplicate.format.clone().unwrap_or_default(),
+                    bitrate: duplicate
+                        .bitrate
+                        .and_then(|value| u32::try_from(value).ok()),
+                    duration: duplicate.duration,
+                    content_key: duplicate.content_fingerprint.clone(),
+                    isrc: None,
+                },
+            )
+            .collect::<Vec<_>>();
+        if let Some(group) = crate::application::input_dedup::group_recordings(&evidence).first() {
+            let promoted = &duplicate_tracks[group.representative];
+            sqlx::query("DELETE FROM candidates WHERE track_id=?")
+                .bind(promoted.id.0)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query("UPDATE candidates SET track_id=? WHERE track_id=?")
+                .bind(promoted.id.0)
+                .bind(track.id.0)
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(
+                "UPDATE tracks SET output_path=NULL,status='review',stage='review',
+                 selected_candidate_id=NULL,error=NULL,
+                 stage_message='Promoted after the previous duplicate representative was removed',
+                 updated_at=? WHERE id=?",
+            )
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(promoted.id.0)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE tracks SET output_path=?,stage_message=?,updated_at=?
+                 WHERE id!=? AND status='duplicate' AND stage='skipped'
+                   AND content_fingerprint=?
+                   AND (? LIKE 'sha256:%' OR (duration IS NOT NULL AND ABS(duration - ?) <= 3.0))",
+            )
+            .bind(&promoted.path)
+            .bind(format!("Duplicate of input file: {}", promoted.path))
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(promoted.id.0)
+            .bind(content_key)
+            .bind(content_key)
+            .bind(track.duration)
+            .execute(&mut *transaction)
+            .await?;
+        }
     }
     sqlx::query("DELETE FROM tracks WHERE id=?")
         .bind(id.0)
@@ -963,6 +1031,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tracks, 1);
+    }
+
+    #[tokio::test]
+    async fn removing_a_duplicate_representative_promotes_the_best_remaining_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("music");
+        tokio::fs::create_dir(&input).await.unwrap();
+        let representative = input.join("representative.mp3");
+        let promoted = input.join("promoted.mp3");
+        tokio::fs::write(&representative, b"audio").await.unwrap();
+        tokio::fs::write(&promoted, b"audio").await.unwrap();
+        let database = directory.path().join("promote-duplicate.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(
+            Config {
+                input_dir: input.to_string_lossy().into_owned(),
+                ..Config::default()
+            },
+            pool.clone(),
+        ));
+        let representative_id = sqlx::query(
+            "INSERT INTO tracks(path,filename,format,bitrate,duration,content_fingerprint,status,
+             is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES(?,'representative.mp3','mp3',192,180.0,'fp:same','needs_review',0,
+             'now','now','now','review')",
+        )
+        .bind(representative.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let candidate_id = insert_test_candidate(&pool, representative_id, "Candidate", 70.0).await;
+        let promoted_id = sqlx::query(
+            "INSERT INTO tracks(path,filename,format,bitrate,duration,content_fingerprint,status,
+             is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES(?,'promoted.mp3','mp3',320,180.0,'fp:same','duplicate',0,
+             'now','now','now','skipped')",
+        )
+        .bind(promoted.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+
+        let _ = remove_track(State(state), Path(TrackId(representative_id)))
+            .await
+            .unwrap();
+
+        let row: (String, String, Option<i64>) =
+            sqlx::query_as("SELECT status,stage,selected_candidate_id FROM tracks WHERE id=?")
+                .bind(promoted_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row, ("review".into(), "review".into(), None));
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT track_id FROM candidates WHERE id=?")
+                .bind(candidate_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            promoted_id
+        );
+        assert!(!representative.exists());
+        assert!(promoted.exists());
     }
 
     #[tokio::test]

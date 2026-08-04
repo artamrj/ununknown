@@ -14,8 +14,6 @@ import { Icon, type IconName } from "./Icons";
 const emptySetup: Setup = {
   input_dir: "",
   output_dir: "",
-  reference_dirs: [],
-  reference_index: { files: 0, updated: 0, reused: 0, failed: 0 },
   delete_source_after_write: false,
   automatic_scan_enabled: true,
   automatic_scan_interval_minutes: 5,
@@ -158,7 +156,6 @@ export function App() {
         body: JSON.stringify({
           input_dir: setup.input_dir,
           output_dir: setup.output_dir,
-          reference_dirs: setup.reference_dirs,
           delete_source_after_write: setup.delete_source_after_write,
           automatic_scan_enabled: setup.automatic_scan_enabled,
           automatic_scan_interval_minutes: setup.automatic_scan_interval_minutes,
@@ -183,13 +180,6 @@ export function App() {
   };
 
   const identify = async () => {
-    if (
-      setup.delete_source_after_write &&
-      !confirm(
-        "Confirmed duplicates already present in a read-only reference library will be permanently removed from the input folder during this scan. Continue?",
-      )
-    )
-      return;
     setNotice("");
     try {
       await saveSetup();
@@ -956,7 +946,7 @@ function TrackInspector({
               {isProblem(track)
                 ? problemTitle(track)
                 : track.stage === "skipped"
-                  ? "Already in a reference library"
+                  ? "Duplicate input"
                   : "Your review is needed"}
             </b>
             <p>
@@ -1569,28 +1559,6 @@ function SettingsDrawer({
                 onChange={(event) => setSetup({ ...setup, output_dir: event.target.value })}
               />
             </label>
-            <label>
-              <span>Read-only reference libraries</span>
-              <textarea
-                rows={4}
-                placeholder={"/Music/Archive\n/Volumes/NAS/Collection"}
-                value={setup.reference_dirs.join("\n")}
-                onChange={(event) =>
-                  setSetup({ ...setup, reference_dirs: event.target.value.split("\n") })
-                }
-              />
-              <small>
-                One folder per line. These files are indexed for duplicate detection and are never
-                changed or removed.
-                {setup.reference_index.files
-                  ? ` ${setup.reference_index.files.toLocaleString()} files currently cached${
-                      setup.reference_index.failed
-                        ? `; ${setup.reference_index.failed.toLocaleString()} could not be fingerprinted.`
-                        : "."
-                    }`
-                  : " The first music scan builds the index."}
-              </small>
-            </label>
           </section>
           <section>
             <h3>Original files</h3>
@@ -1611,7 +1579,7 @@ function SettingsDrawer({
                 </b>
                 <small>
                   {setup.delete_source_after_write
-                    ? "Sources are removed after a corrected output succeeds. Confirmed inputs already present in a reference library are removed during scanning."
+                    ? "Sources, including duplicate inputs, are removed only after one corrected output succeeds."
                     : "Recommended. Corrected files are written as separate copies."}
                 </small>
               </span>
