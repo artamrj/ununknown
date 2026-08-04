@@ -1,4 +1,4 @@
-use crate::infrastructure::providers::Candidate;
+use crate::infrastructure::providers::{ArtworkCandidate, ArtworkStatus, Candidate};
 use reqwest::Client;
 use serde_json::Value;
 use sqlx::SqlitePool;
@@ -202,10 +202,10 @@ pub fn complete(
 
 pub fn audit(
     candidate: &Candidate,
-    embedded_cover: bool,
+    _embedded_cover: bool,
     enriched_fields: Vec<String>,
 ) -> CompletionReport {
-    let cover = nonempty(candidate.cover_url.as_deref()).is_some() || embedded_cover;
+    let cover = candidate.artwork_status == ArtworkStatus::Verified;
     let fields = [
         ("title", nonempty(Some(&candidate.title)).is_some(), 18_u8),
         ("artist", nonempty(Some(&candidate.artist)).is_some(), 18),
@@ -252,13 +252,24 @@ pub async fn ensure_usable_cover(
     pool: &SqlitePool,
     client: &Client,
     candidate: &mut Candidate,
-    embedded_cover: bool,
+    _embedded_cover: bool,
 ) -> bool {
-    if embedded_cover && candidate.cover_url.is_none() {
-        mark_cover_verified(candidate, true, "embedded");
-        return true;
+    candidate.artwork_status = ArtworkStatus::Searching;
+    candidate.artwork_message = Some("Checking matching catalog artwork".into());
+    let mut artwork = candidate.artwork_candidates.clone();
+    if let Some(url) = candidate.cover_url.as_deref()
+        && !artwork.iter().any(|item| item.url == url)
+    {
+        artwork.push(ArtworkCandidate {
+            provider: candidate.provider.clone(),
+            url: url.to_owned(),
+            release_id: candidate.release_id.clone(),
+            isrc: candidate.isrc.clone(),
+            album: candidate.album.clone(),
+            artist: Some(candidate.artist.clone()),
+            ..Default::default()
+        });
     }
-    let mut urls = candidate.cover_url.clone().into_iter().collect::<Vec<_>>();
     if let Some(breakdown) = candidate
         .score_breakdown
         .as_deref()
@@ -270,31 +281,241 @@ pub async fn ensure_usable_cover(
             .flatten()
         {
             if let Some(url) = item["url"].as_str()
-                && !urls.iter().any(|existing| existing == url)
+                && !artwork.iter().any(|existing| existing.url == url)
             {
-                urls.push(url.to_owned());
+                artwork.push(ArtworkCandidate {
+                    provider: item["provider"].as_str().unwrap_or("catalog").to_owned(),
+                    url: url.to_owned(),
+                    release_id: candidate.release_id.clone(),
+                    isrc: candidate.isrc.clone(),
+                    album: candidate.album.clone(),
+                    artist: Some(candidate.artist.clone()),
+                    ..Default::default()
+                });
             }
         }
     }
-    for url in urls {
-        if let Ok(bytes) = crate::infrastructure::providers::cover_art_archive::fetch_url_cached(
-            pool, client, &url,
-        )
-        .await
-            && crate::infrastructure::media::tag_writer::validate_artwork(&bytes).is_ok()
-        {
-            candidate.cover_url = Some(url);
-            mark_cover_verified(candidate, true, "catalog");
-            return true;
-        }
-    }
-    candidate.cover_url = None;
-    if embedded_cover {
-        mark_cover_verified(candidate, true, "embedded");
+    let (verified, mut saw_retryable, mut failures) =
+        verify_artwork_candidates(pool, client, candidate, &artwork).await;
+    if let Some((item, info)) = verified {
+        accept_verified_artwork(candidate, artwork, &item, &info);
         return true;
     }
-    mark_cover_verified(candidate, false, "missing");
+    let initial_count = artwork.len();
+
+    // Existing release-backed URLs were unusable. Refresh only now, using the
+    // selected recording identity, so healthy cached artwork stays instant.
+    let (deezer_isrc, itunes, deezer) = tokio::join!(
+        async {
+            if let Some(isrc) = candidate.isrc.as_deref() {
+                crate::infrastructure::providers::deezer::lookup_isrc(pool, client, isrc).await
+            } else {
+                Ok(None)
+            }
+        },
+        crate::infrastructure::providers::itunes::search(
+            pool,
+            client,
+            &candidate.title,
+            Some(&candidate.artist),
+            candidate.album.as_deref(),
+        ),
+        crate::infrastructure::providers::deezer::search(
+            pool,
+            client,
+            &candidate.title,
+            Some(&candidate.artist),
+        )
+    );
+    match deezer_isrc {
+        Ok(Some(source)) => {
+            if let Some(url) = source.cover_url.clone()
+                && !artwork.iter().any(|existing| existing.url == url)
+            {
+                artwork.push(ArtworkCandidate {
+                    provider: source.provider,
+                    url,
+                    release_id: source.release_id,
+                    isrc: source.isrc,
+                    album: source.album,
+                    artist: Some(source.artist),
+                    ..Default::default()
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(error) => saw_retryable |= is_retryable_artwork_error(&error),
+    }
+    for result in [itunes, deezer] {
+        match result {
+            Ok(found) => {
+                for source in found.into_iter().filter(|source| {
+                    source.cover_url.is_some()
+                        && same_recording(candidate, source)
+                        && albums_compatible(candidate.album.as_deref(), source.album.as_deref())
+                }) {
+                    let url = source.cover_url.expect("filtered cover URL");
+                    if artwork.iter().any(|existing| existing.url == url) {
+                        continue;
+                    }
+                    artwork.push(ArtworkCandidate {
+                        provider: source.provider,
+                        url,
+                        release_id: source.release_id,
+                        isrc: source.isrc,
+                        album: source.album,
+                        artist: Some(source.artist),
+                        ..Default::default()
+                    });
+                }
+            }
+            Err(error) => saw_retryable |= is_retryable_artwork_error(&error),
+        }
+    }
+    let (verified, retryable, recovery_failures) =
+        verify_artwork_candidates(pool, client, candidate, &artwork[initial_count..]).await;
+    saw_retryable |= retryable;
+    failures.extend(recovery_failures);
+    if let Some((item, info)) = verified {
+        accept_verified_artwork(candidate, artwork, &item, &info);
+        return true;
+    }
+    candidate.cover_url = None;
+    candidate.artwork_candidates = artwork;
+    candidate.artwork_status = if saw_retryable {
+        ArtworkStatus::RetryableError
+    } else {
+        ArtworkStatus::CoverRequired
+    };
+    candidate.artwork_message = Some(if failures.is_empty() {
+        "No matching catalog artwork was found; provide a cover URL".into()
+    } else {
+        format!("No usable matching cover: {}", failures.join("; "))
+    });
+    mark_cover_verified(
+        candidate,
+        false,
+        if saw_retryable {
+            "retryable_error"
+        } else {
+            "cover_required"
+        },
+    );
     false
+}
+
+async fn verify_artwork_candidates(
+    pool: &SqlitePool,
+    client: &Client,
+    candidate: &Candidate,
+    artwork: &[ArtworkCandidate],
+) -> (
+    Option<(
+        ArtworkCandidate,
+        crate::infrastructure::media::tag_writer::ArtworkInfo,
+    )>,
+    bool,
+    Vec<String>,
+) {
+    let mut saw_retryable = false;
+    let mut failures = Vec::new();
+    for item in artwork {
+        if !artwork_matches_candidate(candidate, item) {
+            failures.push(format!(
+                "{} did not match the selected release",
+                item.provider
+            ));
+            continue;
+        }
+        let trusted_exact = item.user_confirmed
+            || item
+                .release_id
+                .as_deref()
+                .zip(candidate.release_id.as_deref())
+                .is_some_and(|(artwork_release, selected_release)| {
+                    artwork_release == selected_release
+                });
+        match crate::infrastructure::providers::cover_art_archive::fetch_verified_url_cached(
+            pool,
+            client,
+            &item.url,
+            trusted_exact,
+        )
+        .await
+        {
+            Ok((_, info)) => {
+                return (Some((item.clone(), info)), saw_retryable, failures);
+            }
+            Err(error) => {
+                saw_retryable |= is_retryable_artwork_error(&error);
+                failures.push(format!("{}: {error:#}", item.provider));
+            }
+        }
+    }
+    (None, saw_retryable, failures)
+}
+
+fn accept_verified_artwork(
+    candidate: &mut Candidate,
+    artwork: Vec<ArtworkCandidate>,
+    selected: &ArtworkCandidate,
+    info: &crate::infrastructure::media::tag_writer::ArtworkInfo,
+) {
+    candidate.cover_url = Some(selected.url.clone());
+    candidate.artwork_candidates = artwork;
+    candidate.artwork_status = ArtworkStatus::Verified;
+    candidate.artwork_message = Some(format!(
+        "Verified {}x{} {} cover from {}",
+        info.width, info.height, info.mime, selected.provider
+    ));
+    mark_cover_verified(candidate, true, &selected.provider);
+}
+
+fn artwork_matches_candidate(candidate: &Candidate, artwork: &ArtworkCandidate) -> bool {
+    if artwork.user_confirmed {
+        return true;
+    }
+    if artwork
+        .release_id
+        .as_deref()
+        .zip(candidate.release_id.as_deref())
+        .is_some_and(|(left, right)| left == right)
+    {
+        return true;
+    }
+    if artwork
+        .isrc
+        .as_deref()
+        .zip(candidate.isrc.as_deref())
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
+    {
+        return albums_compatible(artwork.album.as_deref(), candidate.album.as_deref())
+            && artwork
+                .artist
+                .as_deref()
+                .is_none_or(|artist| text_similarity(artist, &candidate.artist) >= 0.82);
+    }
+    artwork.album.as_deref().is_some_and(|album| {
+        albums_compatible(Some(album), candidate.album.as_deref())
+            && artwork
+                .artist
+                .as_deref()
+                .is_some_and(|artist| text_similarity(artist, &candidate.artist) >= 0.82)
+    })
+}
+
+fn is_retryable_artwork_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(|error| {
+                error.is_timeout()
+                    || error.is_connect()
+                    || error
+                        .status()
+                        .is_some_and(|status| status.as_u16() == 429 || status.is_server_error())
+            })
+    })
 }
 
 pub fn reassess(candidate: &mut Candidate, embedded_cover: bool) -> CompletionReport {
@@ -340,7 +561,22 @@ pub fn normalize_release_fields(candidate: &mut Candidate) -> (bool, bool) {
         .as_deref()
         .is_none_or(|album_artist| album_artist.trim().is_empty());
     if album_artist_defaulted {
-        candidate.album_artist = Some(candidate.artist.clone());
+        if candidate.is_compilation {
+            candidate.album_artist = Some("Various Artists".into());
+            candidate.album_artist_credits = vec![crate::domain::credits::ArtistCredit::new(
+                "Various Artists",
+                "",
+            )];
+        } else {
+            candidate.album_artist = Some(candidate.artist.clone());
+            candidate.album_artist_credits = candidate.artist_credits.clone();
+        }
+    } else if candidate.album_artist_credits.is_empty()
+        && let Some(album_artist) = candidate.album_artist.as_deref()
+    {
+        let credits = crate::domain::credits::normalize_featured(album_artist, "");
+        candidate.album_artist = Some(credits.artist);
+        candidate.album_artist_credits = credits.artists;
     }
 
     (album_defaulted, album_artist_defaulted)
@@ -711,7 +947,7 @@ mod tests {
 
         let report = complete(&mut selected, &[deezer], None, false);
 
-        assert!(report.core_complete);
+        assert!(!report.core_complete);
         assert_eq!(selected.year.as_deref(), Some("1993"));
         assert_eq!(selected.genre.as_deref(), Some("Pop"));
         assert_eq!(selected.track_number, Some(3));
@@ -739,11 +975,11 @@ mod tests {
     }
 
     #[test]
-    fn embedded_artwork_satisfies_the_cover_audit() {
+    fn embedded_artwork_does_not_bypass_catalog_verification() {
         let mut selected = candidate("musicbrainz", Some("Khabe Baroon"));
         let report = complete(&mut selected, &[], None, true);
-        assert!(report.core_complete);
-        assert!(!report.missing_fields.contains(&"cover".to_owned()));
+        assert!(!report.core_complete);
+        assert!(report.missing_fields.contains(&"cover".to_owned()));
     }
 
     #[test]
@@ -777,18 +1013,18 @@ mod tests {
         let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
             .await
             .unwrap();
-        for (url, encoded) in [
-            ("https://example.test/broken.jpg", "AA=="),
+        for (url, data) in [
+            ("https://example.test/broken.jpg", vec![0]),
             (
                 "https://example.test/valid.png",
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                crate::infrastructure::media::tag_writer::test_artwork_png(),
             ),
         ] {
             crate::infrastructure::provider_cache::ProviderCache::put(
                 &pool,
                 "artwork-url",
                 &crate::infrastructure::provider_cache::search_key(url),
-                &serde_json::json!({"data_base64": encoded}),
+                &serde_json::json!({"data_base64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data)}),
                 chrono::Utc::now() + chrono::Duration::days(1),
             )
             .await

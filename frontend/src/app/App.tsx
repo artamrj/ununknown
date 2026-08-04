@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/api/client";
 import type {
+  ArtistCredit,
   AutoApproveResult,
   Candidate,
   RetryIssuesResult,
@@ -750,7 +751,7 @@ function TrackRow({
   active: boolean;
   onClick: () => void;
 }) {
-  const chosen = isReady(track) || isCompleted(track) ? selectedCandidate(track) : undefined;
+  const chosen = selectedCandidate(track);
   const displayTitle = chosen?.title || track.current_title || fileStem(track.filename);
   const artist = chosen?.artist || track.current_artist || "Unknown artist";
   const album = chosen?.album || track.current_album || "Album not set";
@@ -804,7 +805,7 @@ function TrackInspector({
   const [actionError, setActionError] = useState("");
   const candidate = selectedCandidate(track);
   const corrupt = track.status === "corrupt";
-  const showChosenOverview = Boolean(candidate && (isReady(track) || isCompleted(track)));
+  const showChosenOverview = Boolean(candidate);
   const overviewTitle = showChosenOverview ? candidate?.title : track.current_title;
   const overviewArtist = showChosenOverview ? candidate?.artist : track.current_artist;
   const overviewAlbum = showChosenOverview ? candidate?.album : track.current_album;
@@ -1092,7 +1093,7 @@ function TrackInspector({
             <QualityItem
               icon="album"
               label="Artwork"
-              value={candidate.cover_url ? "Catalog cover" : "Embedded / missing"}
+              value={artworkStatusLabel(candidate)}
             />
             <QualityItem icon="waveform" label="ReplayGain" value="Added on write" />
           </section>
@@ -1287,7 +1288,7 @@ function CandidateRow({
         <i>·</i>
         <span>{audit.coreComplete ? "Complete metadata" : `${audit.score}% metadata`}</span>
         <i>·</i>
-        <span>{candidate.cover_url ? "Catalog cover" : "No catalog cover"}</span>
+        <span title={candidate.artwork_message}>{artworkStatusLabel(candidate)}</span>
         {candidate.isrc && (
           <>
             <i>·</i>
@@ -1387,6 +1388,16 @@ function ManualEditor({
     cover_url: candidate?.cover_url || "",
   });
   const [sourceUrl, setSourceUrl] = useState("");
+  const [artistCredits, setArtistCredits] = useState<ArtistCredit[]>(
+    candidate?.artist_credits?.length
+      ? candidate.artist_credits
+      : [{ name: candidate?.artist || track.current_artist || "", join_phrase: "" }],
+  );
+  const [albumArtistCredits, setAlbumArtistCredits] = useState<ArtistCredit[]>(
+    candidate?.album_artist_credits?.length
+      ? candidate.album_artist_credits
+      : [{ name: candidate?.album_artist || track.current_album_artist || "", join_phrase: "" }],
+  );
   const [feedback, setFeedback] = useState<{ error?: boolean; text: string }>();
   const [resolving, setResolving] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1413,6 +1424,9 @@ function ManualEditor({
         isrc: found.isrc || current.isrc,
         cover_url: found.cover_url || current.cover_url,
       }));
+      if (found.artist_credits?.length) setArtistCredits(found.artist_credits);
+      if (found.album_artist_credits?.length)
+        setAlbumArtistCredits(found.album_artist_credits);
       setFeedback({ text: `Loaded metadata and artwork for ${found.artist || "this track"}.` });
     } catch (reason) {
       setFeedback({ error: true, text: (reason as Error).message });
@@ -1428,6 +1442,8 @@ function ManualEditor({
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          artist_credits: artistCredits.filter((credit) => credit.name.trim()),
+          album_artist_credits: albumArtistCredits.filter((credit) => credit.name.trim()),
           track_number: form.track_number ? Number(form.track_number) : null,
         }),
       });
@@ -1496,6 +1512,18 @@ function ManualEditor({
           </label>
         ))}
       </div>
+      <div className="editor-grid">
+        <ArtistCreditsEditor
+          label="Individual track artists"
+          credits={artistCredits}
+          onChange={setArtistCredits}
+        />
+        <ArtistCreditsEditor
+          label="Individual album artists"
+          credits={albumArtistCredits}
+          onChange={setAlbumArtistCredits}
+        />
+      </div>
       <button
         className="primary-action editor-save"
         disabled={saving || !String(form.title).trim() || !String(form.artist).trim()}
@@ -1504,6 +1532,52 @@ function ManualEditor({
         {saving ? <span className="spinner" /> : <Icon name="check" />}Use this metadata
       </button>
     </section>
+  );
+}
+
+function ArtistCreditsEditor({
+  label,
+  credits,
+  onChange,
+}: {
+  label: string;
+  credits: ArtistCredit[];
+  onChange: (credits: ArtistCredit[]) => void;
+}) {
+  const update = (index: number, name: string) =>
+    onChange(credits.map((credit, position) => (position === index ? { ...credit, name } : credit)));
+  const remove = (index: number) => {
+    const next = credits.filter((_, position) => position !== index);
+    if (next.length) next[next.length - 1] = { ...next[next.length - 1], join_phrase: "" };
+    onChange(next);
+  };
+  const add = () => {
+    const next = credits.map((credit, index) =>
+      index + 1 === credits.length ? { ...credit, join_phrase: " / " } : credit,
+    );
+    onChange([...next, { name: "", join_phrase: "" }]);
+  };
+  return (
+    <fieldset className="credit-editor wide">
+      <legend>{label}</legend>
+      <div className="credit-chips">
+        {credits.map((credit, index) => (
+          <span className="credit-chip" key={`${index}-${credit.musicbrainz_id || "manual"}`}>
+            <input
+              aria-label={`${label} ${index + 1}`}
+              value={credit.name}
+              onChange={(event) => update(index, event.target.value)}
+            />
+            <button type="button" aria-label={`Remove ${credit.name}`} onClick={() => remove(index)}>
+              ×
+            </button>
+          </span>
+        ))}
+        <button type="button" className="compact-button" onClick={add}>
+          Add artist
+        </button>
+      </div>
+    </fieldset>
   );
 }
 
@@ -2121,6 +2195,21 @@ function normalizeText(value: string) {
     .replace(/[^\p{L}\p{N}]+/gu, "")
     .trim();
 }
+
+function artworkStatusLabel(candidate: Candidate) {
+  switch (candidate.artwork_status) {
+    case "verified":
+      return "Verified cover";
+    case "searching":
+      return "Checking cover";
+    case "retryable_error":
+      return "Cover source unavailable";
+    case "cover_required":
+      return "Cover required";
+    default:
+      return candidate.cover_url ? "Catalog cover" : "No catalog cover";
+  }
+}
 function formatDuration(seconds?: number) {
   if (!seconds || !Number.isFinite(seconds)) return undefined;
   const minutes = Math.floor(seconds / 60);
@@ -2162,7 +2251,9 @@ function statusFor(track: Track): { label: string; tone: string; icon: IconName 
   if (track.stage === "review")
     return {
       label:
-        track.candidates.length > 1
+        selectedCandidate(track)?.artwork_status === "cover_required"
+          ? "Cover required"
+          : track.candidates.length > 1
           ? "Needs review"
           : track.candidates.length
             ? "Uncertain"

@@ -1207,6 +1207,7 @@ async fn identify(
     for candidate in &mut out {
         normalize_candidate_credits(candidate);
     }
+    crate::application::canonical_names::canonicalize_candidates(&state.pool, &mut out).await?;
     apply_source_agreement(&mut out)?;
     enrich_artwork_fallbacks(&mut out)?;
     apply_artwork_override(&state.pool, path, &mut out).await?;
@@ -2154,14 +2155,26 @@ fn apply_source_agreement(candidates: &mut [providers::Candidate]) -> Result<()>
 }
 
 fn normalize_candidate_credits(candidate: &mut providers::Candidate) {
-    candidate.artist = crate::domain::credits::prefer_latin_alias(&candidate.artist);
-    candidate.album_artist = candidate
-        .album_artist
-        .as_deref()
-        .map(crate::domain::credits::prefer_latin_alias);
-    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    let artist = crate::domain::credits::prefer_latin_alias(&candidate.artist);
+    let credits = crate::domain::credits::normalize_structured(
+        &artist,
+        &candidate.title,
+        std::mem::take(&mut candidate.artist_credits),
+    );
     candidate.artist = credits.artist;
     candidate.title = credits.title;
+    candidate.artist_credits = credits.artists;
+
+    if let Some(album_artist) = candidate.album_artist.as_deref() {
+        let album_artist = crate::domain::credits::prefer_latin_alias(album_artist);
+        let credits = crate::domain::credits::normalize_structured(
+            &album_artist,
+            "",
+            std::mem::take(&mut candidate.album_artist_credits),
+        );
+        candidate.album_artist = Some(credits.artist);
+        candidate.album_artist_credits = credits.artists;
+    }
 }
 
 fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<()> {
@@ -2177,6 +2190,7 @@ fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<(
                         other.score,
                         other.provider.clone(),
                         url.to_owned(),
+                        other.clone(),
                     )
                 })
             })
@@ -2192,6 +2206,20 @@ fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<(
             .first()
             .map(|item| item.3.clone())
             .or_else(|| candidate.cover_url.clone());
+        candidate.artwork_candidates = artwork
+            .iter()
+            .map(
+                |(_, _, provider, url, source)| providers::ArtworkCandidate {
+                    provider: provider_display_name(provider).to_owned(),
+                    url: url.clone(),
+                    release_id: source.release_id.clone(),
+                    isrc: source.isrc.clone(),
+                    album: source.album.clone(),
+                    artist: Some(source.artist.clone()),
+                    ..Default::default()
+                },
+            )
+            .collect();
         if artwork.is_empty() {
             continue;
         }
@@ -2203,7 +2231,7 @@ fn enrich_artwork_fallbacks(candidates: &mut [providers::Candidate]) -> Result<(
         breakdown["artwork_candidates"] = serde_json::Value::Array(
             artwork
                 .into_iter()
-                .map(|(_, _, provider, url)| {
+                .map(|(_, _, provider, url, _)| {
                     serde_json::json!({
                         "provider": provider_display_name(&provider),
                         "url": url
@@ -2272,6 +2300,18 @@ async fn apply_artwork_override(
         .filter(|candidate| candidate_agrees(candidate, &reference))
     {
         candidate.cover_url = Some(cover_url.clone());
+        candidate.artwork_candidates.insert(
+            0,
+            providers::ArtworkCandidate {
+                provider: "User verified".into(),
+                url: cover_url.clone(),
+                user_confirmed: true,
+                release_id: candidate.release_id.clone(),
+                isrc: candidate.isrc.clone(),
+                album: candidate.album.clone(),
+                artist: Some(candidate.artist.clone()),
+            },
+        );
         let mut breakdown = candidate
             .score_breakdown
             .as_deref()
@@ -2741,6 +2781,22 @@ async fn insert_candidate(
         .execute(&mut **tx)
         .await?
         .last_insert_rowid();
+    sqlx::query(
+        "UPDATE candidates SET artist_credits_json=?,album_artist_credits_json=?,
+         artwork_candidates_json=?,artwork_status=?,artwork_message=? WHERE id=?",
+    )
+    .bind(serde_json::to_string(&c.artist_credits)?)
+    .bind(serde_json::to_string(&c.album_artist_credits)?)
+    .bind(serde_json::to_string(&c.artwork_candidates)?)
+    .bind(
+        serde_json::to_value(&c.artwork_status)?
+            .as_str()
+            .unwrap_or("searching"),
+    )
+    .bind(&c.artwork_message)
+    .bind(candidate_id)
+    .execute(&mut **tx)
+    .await?;
     insert_candidate_source(
         tx,
         candidate_id,

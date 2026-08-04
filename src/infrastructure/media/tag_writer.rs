@@ -1,13 +1,15 @@
 use crate::infrastructure::{media::replaygain::ReplayGain, providers::Candidate};
 use anyhow::{Context, Result, bail};
+use image::GenericImageView;
 use lofty::{
     config::WriteOptions,
     file::TaggedFileExt,
     picture::{Picture, PictureType},
     prelude::*,
     probe::Probe,
-    tag::{ItemKey, Tag},
+    tag::{ItemKey, ItemValue, Tag, TagItem},
 };
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Seek, SeekFrom},
     path::Path,
@@ -35,11 +37,37 @@ pub fn write(
     // contain malformed frames that can be read but cannot be saved again.
     file.insert_tag(Tag::new(file.primary_tag_type()));
     let tag = file.primary_tag_mut().expect("primary tag inserted");
-    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    let credits = crate::domain::credits::normalize_structured(
+        &candidate.artist,
+        &candidate.title,
+        std::mem::take(&mut candidate.artist_credits),
+    );
+    candidate.artist = credits.artist.clone();
+    candidate.title = credits.title.clone();
+    candidate.artist_credits = credits.artists;
+    if let Some(album_artist) = candidate.album_artist.as_deref() {
+        let album_credits = crate::domain::credits::normalize_structured(
+            album_artist,
+            "",
+            std::mem::take(&mut candidate.album_artist_credits),
+        );
+        candidate.album_artist = Some(album_credits.artist);
+        candidate.album_artist_credits = album_credits.artists;
+    }
     set(tag, ItemKey::TrackTitle, &credits.title);
     set(tag, ItemKey::TrackArtist, &credits.artist);
+    push_text_values(
+        tag,
+        ItemKey::TrackArtists,
+        crate::domain::credits::individual_names(&candidate.artist_credits),
+    );
     optional(tag, ItemKey::AlbumTitle, &candidate.album);
     optional(tag, ItemKey::AlbumArtist, &candidate.album_artist);
+    push_text_values(
+        tag,
+        ItemKey::AlbumArtists,
+        crate::domain::credits::individual_names(&candidate.album_artist_credits),
+    );
     optional(tag, ItemKey::Isrc, &candidate.isrc);
     optional(tag, ItemKey::Genre, &candidate.genre);
     if let Some(language_code) = candidate
@@ -62,12 +90,23 @@ pub fn write(
         &candidate.recording_id,
     );
     optional(tag, ItemKey::MusicBrainzReleaseId, &candidate.release_id);
-    optional(tag, ItemKey::MusicBrainzArtistId, &candidate.artist_id);
-    optional(
-        tag,
-        ItemKey::MusicBrainzReleaseArtistId,
-        &candidate.album_artist_id,
-    );
+    let artist_ids = candidate
+        .artist_credits
+        .iter()
+        .filter_map(|credit| credit.musicbrainz_id.clone())
+        .chain(candidate.artist_id.clone())
+        .collect::<Vec<_>>();
+    push_text_values(tag, ItemKey::MusicBrainzArtistId, artist_ids);
+    let album_artist_ids = candidate
+        .album_artist_credits
+        .iter()
+        .filter_map(|credit| credit.musicbrainz_id.clone())
+        .chain(candidate.album_artist_id.clone())
+        .collect::<Vec<_>>();
+    push_text_values(tag, ItemKey::MusicBrainzReleaseArtistId, album_artist_ids);
+    if candidate.is_compilation {
+        set(tag, ItemKey::FlagCompilation, "1");
+    }
     if let Some(v) = candidate.track_number {
         tag.set_track(v as u32);
     }
@@ -87,6 +126,104 @@ pub fn write(
     }
     file.save_to_path(path, WriteOptions::default())?;
     Ok(())
+}
+
+pub fn verify_written_metadata(path: &Path, candidate: &Candidate) -> Result<()> {
+    let file = Probe::open(path)?.guess_file_type()?.read()?;
+    let tag = file
+        .primary_tag()
+        .or_else(|| file.first_tag())
+        .ok_or_else(|| anyhow::anyhow!("written file contains no metadata tag"))?;
+    let credits = crate::domain::credits::normalize_structured(
+        &candidate.artist,
+        &candidate.title,
+        candidate.artist_credits.clone(),
+    );
+    if tag.title().as_deref() != Some(credits.title.as_str()) {
+        bail!("written title does not match the canonical title");
+    }
+    if tag.artist().as_deref() != Some(credits.artist.as_str()) {
+        bail!("written display artist does not match the canonical credit");
+    }
+    verify_multi_values(
+        tag,
+        ItemKey::TrackArtists,
+        &crate::domain::credits::individual_names(&credits.artists),
+        "track artists",
+    )?;
+    if let Some(album_artist) = candidate.album_artist.as_deref() {
+        if tag.get_string(ItemKey::AlbumArtist) != Some(album_artist) {
+            bail!("written display album artist does not match the canonical credit");
+        }
+    }
+    if !candidate.album_artist_credits.is_empty() {
+        verify_multi_values(
+            tag,
+            ItemKey::AlbumArtists,
+            &crate::domain::credits::individual_names(&candidate.album_artist_credits),
+            "album artists",
+        )?;
+    }
+    let artist_ids = candidate
+        .artist_credits
+        .iter()
+        .filter_map(|credit| credit.musicbrainz_id.clone())
+        .chain(candidate.artist_id.clone())
+        .collect::<Vec<_>>();
+    if !artist_ids.is_empty() {
+        verify_multi_values(
+            tag,
+            ItemKey::MusicBrainzArtistId,
+            &dedupe_values(artist_ids),
+            "MusicBrainz artist IDs",
+        )?;
+    }
+    let album_artist_ids = candidate
+        .album_artist_credits
+        .iter()
+        .filter_map(|credit| credit.musicbrainz_id.clone())
+        .chain(candidate.album_artist_id.clone())
+        .collect::<Vec<_>>();
+    if !album_artist_ids.is_empty() {
+        verify_multi_values(
+            tag,
+            ItemKey::MusicBrainzReleaseArtistId,
+            &dedupe_values(album_artist_ids),
+            "MusicBrainz album artist IDs",
+        )?;
+    }
+    let written_compilation = tag.get_string(ItemKey::FlagCompilation) == Some("1");
+    if written_compilation != candidate.is_compilation {
+        bail!("written compilation flag differs from the selected metadata");
+    }
+    Ok(())
+}
+
+fn verify_multi_values(tag: &Tag, key: ItemKey, expected: &[String], label: &str) -> Result<()> {
+    let actual = tag.get_strings(key).map(str::to_owned).collect::<Vec<_>>();
+    if actual != expected {
+        bail!("written {label} differ: expected {expected:?}, found {actual:?}");
+    }
+    Ok(())
+}
+
+fn dedupe_values(values: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        if !out
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&value))
+        {
+            out.push(value);
+        }
+    }
+    out
+}
+
+fn push_text_values(tag: &mut Tag, key: ItemKey, values: Vec<String>) {
+    for value in dedupe_values(values) {
+        let _ = tag.push(TagItem::new(key.clone(), ItemValue::Text(value)));
+    }
 }
 
 pub fn write_resilient(
@@ -345,11 +482,92 @@ fn picture_from_bytes(data: Vec<u8>) -> Result<Picture> {
     Ok(Picture::from_reader(&mut reader)?)
 }
 
-pub fn validate_artwork(data: &[u8]) -> Result<()> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtworkInfo {
+    pub width: u32,
+    pub height: u32,
+    pub mime: &'static str,
+    pub sha256: String,
+}
+
+pub fn inspect_artwork(data: &[u8], trusted_exact_release: bool) -> Result<ArtworkInfo> {
     if data.len() > 20 * 1024 * 1024 {
         bail!("cover image exceeds the 20 MB safety limit");
     }
-    picture_from_bytes(data.to_vec()).map(|_| ())
+    let format = image::guess_format(data).context("cover image format is unsupported")?;
+    let mime = match format {
+        image::ImageFormat::Jpeg => "image/jpeg",
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Gif => "image/gif",
+        image::ImageFormat::WebP => "image/webp",
+        _ => bail!("cover image format is unsupported"),
+    };
+    let decoded = image::load_from_memory_with_format(data, format)
+        .context("cover image could not be fully decoded")?;
+    let (width, height) = decoded.dimensions();
+    if width < 300 || height < 300 {
+        bail!("cover image is too small ({width}x{height}; minimum is 300x300)");
+    }
+    if width > 12_000 || height > 12_000 || u64::from(width) * u64::from(height) > 100_000_000 {
+        bail!("cover image decoded dimensions exceed the safety limit");
+    }
+    let ratio = width as f64 / height as f64;
+    if !(0.75..=1.333_334).contains(&ratio) {
+        bail!("cover image aspect ratio is not credible album artwork");
+    }
+    let rgba = decoded.to_rgba8();
+    let step = ((rgba.len() / 4) / 100_000).max(1);
+    let mut visible = 0_usize;
+    let mut sampled = 0_usize;
+    let mut min = [u8::MAX; 3];
+    let mut max = [u8::MIN; 3];
+    for pixel in rgba.pixels().step_by(step) {
+        sampled += 1;
+        if pixel[3] <= 16 {
+            continue;
+        }
+        visible += 1;
+        for channel in 0..3 {
+            min[channel] = min[channel].min(pixel[channel]);
+            max[channel] = max[channel].max(pixel[channel]);
+        }
+    }
+    if sampled == 0 || visible * 50 < sampled {
+        bail!("cover image is blank or almost fully transparent");
+    }
+    let constant_pixels = (0..3).all(|channel| max[channel].saturating_sub(min[channel]) <= 1);
+    if constant_pixels && !trusted_exact_release {
+        bail!("cover image is a blank constant-color placeholder");
+    }
+    // Lofty must also recognize the bytes because it is responsible for the
+    // actual container-specific embedding operation.
+    picture_from_bytes(data.to_vec())?;
+    Ok(ArtworkInfo {
+        width,
+        height,
+        mime,
+        sha256: hex::encode(Sha256::digest(data)),
+    })
+}
+
+pub fn validate_artwork(data: &[u8]) -> Result<()> {
+    inspect_artwork(data, false).map(|_| ())
+}
+
+#[cfg(test)]
+pub fn test_artwork_png() -> Vec<u8> {
+    let image = image::RgbaImage::from_fn(320, 320, |x, y| {
+        if (x / 20 + y / 20) % 2 == 0 {
+            image::Rgba([32, 96, 180, 255])
+        } else {
+            image::Rgba([230, 180, 48, 255])
+        }
+    });
+    let mut output = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut output, image::ImageFormat::Png)
+        .unwrap();
+    output.into_inner()
 }
 fn set(tag: &mut Tag, key: ItemKey, value: &str) {
     tag.insert_text(key, value.into());
@@ -363,13 +581,10 @@ fn optional(tag: &mut Tag, key: ItemKey, value: &Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::{Engine, engine::general_purpose::STANDARD};
     use lofty::picture::MimeType;
 
     fn one_pixel_png() -> Vec<u8> {
-        STANDARD
-            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
-            .unwrap()
+        test_artwork_png()
     }
 
     #[test]
@@ -552,5 +767,90 @@ mod tests {
             .read()
             .unwrap();
         assert_eq!(file.file_type(), lofty::file::FileType::Mp4);
+    }
+
+    #[test]
+    fn navidrome_artist_fields_survive_supported_format_round_trips() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        for (extension, codec_args) in [
+            ("mp3", vec!["-q:a", "9"]),
+            ("flac", vec!["-c:a", "flac"]),
+            ("m4a", vec!["-c:a", "aac", "-b:a", "64k"]),
+            (
+                "ogg",
+                vec!["-ac", "2", "-c:a", "vorbis", "-strict", "-2", "-q:a", "2"],
+            ),
+            ("opus", vec!["-c:a", "libopus", "-b:a", "64k"]),
+        ] {
+            let path = directory.path().join(format!("artists.{extension}"));
+            let status = std::process::Command::new("ffmpeg")
+                .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg("sine=frequency=440:duration=0.1")
+                .args(codec_args)
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "could not create {extension} fixture");
+
+            let candidate = Candidate {
+                title: "Sunshine".into(),
+                artist: "Alice & Bob".into(),
+                artist_credits: vec![
+                    crate::domain::credits::ArtistCredit {
+                        name: "Alice".into(),
+                        join_phrase: " & ".into(),
+                        musicbrainz_id: Some("mbid-alice".into()),
+                    },
+                    crate::domain::credits::ArtistCredit {
+                        name: "Bob".into(),
+                        join_phrase: String::new(),
+                        musicbrainz_id: Some("mbid-bob".into()),
+                    },
+                ],
+                album: Some("Compilation".into()),
+                album_artist: Some("Various Artists".into()),
+                album_artist_credits: vec![crate::domain::credits::ArtistCredit::new(
+                    "Various Artists",
+                    "",
+                )],
+                is_compilation: true,
+                ..Default::default()
+            };
+            write(&path, &candidate, None, None).unwrap();
+            verify_written_metadata(&path, &candidate)
+                .unwrap_or_else(|error| panic!("{extension}: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn artwork_validation_rejects_tiny_transparent_and_blank_placeholders() {
+        let tiny = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        )
+        .unwrap();
+        assert!(validate_artwork(&tiny).is_err());
+
+        let encode = |pixel| {
+            let image = image::RgbaImage::from_pixel(320, 320, pixel);
+            let mut output = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(&mut output, image::ImageFormat::Png)
+                .unwrap();
+            output.into_inner()
+        };
+        let transparent = encode(image::Rgba([0, 0, 0, 0]));
+        let constant = encode(image::Rgba([255, 255, 255, 255]));
+        assert!(validate_artwork(&transparent).is_err());
+        assert!(validate_artwork(&constant).is_err());
+        assert!(inspect_artwork(&constant, true).is_ok());
+        assert!(validate_artwork(&test_artwork_png()).is_ok());
     }
 }

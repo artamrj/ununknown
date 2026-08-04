@@ -1,4 +1,4 @@
-use super::Candidate;
+use super::{ArtistCredit, Candidate};
 use crate::infrastructure::provider_cache::{ProviderCache, search_key};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
@@ -166,12 +166,34 @@ fn candidate_from_song(song: &Value) -> Option<Candidate> {
             .as_str()
             .or_else(|| song["primary_artist"]["name"].as_str()),
     )?;
+    let primary_artist = nonempty(song["primary_artist"]["name"].as_str()).unwrap_or(artist);
+    let mut artist_credits = vec![ArtistCredit::new(primary_artist, "")];
+    for featured in song["featured_artists"].as_array().into_iter().flatten() {
+        let Some(name) = nonempty(featured["name"].as_str()) else {
+            continue;
+        };
+        if artist_credits
+            .iter()
+            .any(|credit| credit.name.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        if let Some(last) = artist_credits.last_mut() {
+            last.join_phrase = " feat. ".into();
+        }
+        artist_credits.push(ArtistCredit::new(name, ""));
+    }
     let release_date = release_date(song);
     let album = nonempty(song["album"]["name"].as_str()).map(str::to_owned);
     Some(Candidate {
         provider: PROVIDER.into(),
         title: title.to_owned(),
-        artist: artist.to_owned(),
+        artist: if artist_credits.len() > 1 {
+            crate::domain::credits::display_artist(&artist_credits)
+        } else {
+            artist.to_owned()
+        },
+        artist_credits,
         album_artist: nonempty(song["primary_artist"]["name"].as_str()).map(str::to_owned),
         album,
         year: release_date

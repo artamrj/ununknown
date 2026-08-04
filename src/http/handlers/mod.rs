@@ -66,8 +66,12 @@ pub struct CandidateRow {
     provider: String,
     title: Option<String>,
     artist: Option<String>,
+    #[serde(skip_serializing)]
+    artist_credits_json: Option<String>,
     album: Option<String>,
     album_artist: Option<String>,
+    #[serde(skip_serializing)]
+    album_artist_credits_json: Option<String>,
     track_number: Option<i64>,
     track_total: Option<i64>,
     disc_number: Option<i64>,
@@ -78,6 +82,10 @@ pub struct CandidateRow {
     label: Option<String>,
     isrc: Option<String>,
     cover_url: Option<String>,
+    #[serde(skip_serializing)]
+    artwork_candidates_json: Option<String>,
+    artwork_status: String,
+    artwork_message: Option<String>,
     musicbrainz_recording_id: Option<String>,
     musicbrainz_release_id: Option<String>,
     release_country: Option<String>,
@@ -97,30 +105,36 @@ impl CandidateRow {
     fn normalized_credits(&self) -> crate::domain::credits::Credits {
         let artist =
             crate::domain::credits::prefer_latin_alias(self.artist.as_deref().unwrap_or_default());
-        crate::domain::credits::normalize_featured(
+        crate::domain::credits::normalize_structured(
             &artist,
             self.title.as_deref().unwrap_or_default(),
+            self.artist_credits_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default(),
         )
-    }
-
-    pub(super) fn normalize_credits(&mut self) {
-        let credits = self.normalized_credits();
-        self.artist = Some(credits.artist);
-        self.title = Some(credits.title);
     }
 
     pub(super) fn value(&self) -> Candidate {
         let credits = self.normalized_credits();
+        let artist_credits = credits.artists.clone();
+        let album_artist_credits = self
+            .album_artist_credits_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
         Candidate {
             id: Some(self.id.0),
             provider: self.provider.clone(),
             title: credits.title,
             artist: credits.artist,
+            artist_credits,
             album: self.album.clone(),
             album_artist: self
                 .album_artist
                 .as_deref()
                 .map(crate::domain::credits::prefer_latin_alias),
+            album_artist_credits,
             track_number: self.track_number,
             track_total: self.track_total,
             disc_number: self.disc_number,
@@ -131,6 +145,14 @@ impl CandidateRow {
             label: self.label.clone(),
             isrc: self.isrc.clone(),
             cover_url: self.cover_url.clone(),
+            artwork_candidates: self
+                .artwork_candidates_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .unwrap_or_default(),
+            artwork_status: serde_json::from_value(serde_json::json!(self.artwork_status))
+                .unwrap_or_default(),
+            artwork_message: self.artwork_message.clone(),
             recording_id: self.musicbrainz_recording_id.clone(),
             release_id: self.musicbrainz_release_id.clone(),
             release_country: self.release_country.clone(),
@@ -175,8 +197,12 @@ pub struct SelectRequest {
 pub struct CandidateEdit {
     title: String,
     artist: String,
+    #[serde(default)]
+    artist_credits: Vec<crate::domain::credits::ArtistCredit>,
     album: Option<String>,
     album_artist: Option<String>,
+    #[serde(default)]
+    album_artist_credits: Vec<crate::domain::credits::ArtistCredit>,
     track_number: Option<i64>,
     track_total: Option<i64>,
     disc_number: Option<i64>,
@@ -223,7 +249,7 @@ pub struct SetupRequest {
 pub struct WorkspaceTrack {
     #[serde(flatten)]
     track: Track,
-    candidates: Vec<CandidateRow>,
+    candidates: Vec<Candidate>,
 }
 
 #[derive(Serialize)]

@@ -1,4 +1,4 @@
-use super::Candidate;
+use super::{ArtistCredit, Candidate};
 use crate::infrastructure::provider_cache::{ProviderCache, search_key};
 use anyhow::{Result, bail};
 use chrono::{Duration, Utc};
@@ -37,16 +37,61 @@ pub async fn search(
     Ok(parse_results(&raw))
 }
 
+pub async fn lookup_isrc(
+    pool: &SqlitePool,
+    client: &Client,
+    isrc: &str,
+) -> Result<Option<Candidate>> {
+    let isrc = isrc.trim().to_ascii_uppercase();
+    let key = search_key(&format!("isrc:{isrc}"));
+    let raw = if let Some(value) = ProviderCache::get(pool, "deezer", &key).await? {
+        value
+    } else {
+        let value = client
+            .get(format!("https://api.deezer.com/track/isrc:{isrc}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        ProviderCache::put(pool, "deezer", &key, &value, Utc::now() + Duration::days(7)).await?;
+        value
+    };
+    if raw["error"].is_object() {
+        return Ok(None);
+    }
+    Ok(parse_results(&serde_json::json!({"data":[raw]}))
+        .into_iter()
+        .next())
+}
+
 fn parse_results(raw: &Value) -> Vec<Candidate> {
     raw["data"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|track| {
+            let mut artist_credits = track["contributors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|artist| artist["name"].as_str())
+                .map(|name| ArtistCredit::new(name, ""))
+                .collect::<Vec<_>>();
+            if artist_credits.is_empty() {
+                artist_credits.push(ArtistCredit::new(track["artist"]["name"].as_str()?, ""));
+            }
+            if artist_credits.len() > 1 {
+                let last = artist_credits.len() - 1;
+                for credit in &mut artist_credits[..last] {
+                    credit.join_phrase = " & ".into();
+                }
+            }
             Some(Candidate {
                 provider: "deezer".into(),
                 title: track["title"].as_str()?.to_owned(),
-                artist: track["artist"]["name"].as_str()?.to_owned(),
+                artist: crate::domain::credits::display_artist(&artist_credits),
+                artist_credits,
                 album: track["album"]["title"].as_str().map(str::to_owned),
                 isrc: track["isrc"].as_str().map(str::to_owned),
                 cover_url: track["album"]["cover_xl"]

@@ -1941,6 +1941,51 @@ input:focus {
 .editor-grid label.wide {
   grid-column: 1 / -1;
 }
+
+.credit-editor {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  grid-column: 1 / -1;
+  padding: 10px 12px 12px;
+}
+
+.credit-editor legend {
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0 5px;
+}
+
+.credit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.credit-chip {
+  align-items: center;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: inline-flex;
+  overflow: hidden;
+}
+
+.credit-chip input {
+  background: transparent;
+  border: 0;
+  min-width: 110px;
+  padding: 7px 4px 7px 11px;
+  width: 150px;
+}
+
+.credit-chip button {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 6px 10px 6px 5px;
+}
 .inline-feedback {
   padding: 9px 11px;
   margin: -4px 0 12px;

@@ -42,6 +42,7 @@ fn candidate_from_oembed(raw: &Value) -> Option<Candidate> {
         provider: "youtube".into(),
         title: credits.title,
         artist: credits.artist,
+        artist_credits: credits.artists,
         cover_url: raw["thumbnail_url"].as_str().map(str::to_owned),
         score: 92.0,
         score_breakdown: Some(
@@ -133,6 +134,7 @@ fn parse_video(raw: &Value) -> Option<Candidate> {
         provider: "youtube".into(),
         title: credits.title,
         artist: credits.artist,
+        artist_credits: credits.artists,
         year: published.and_then(|date| date.get(..4)).map(str::to_owned),
         release_date: published.and_then(|date| date.get(..10)).map(str::to_owned),
         cover_url,
@@ -236,14 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn oembed_keeps_featured_artist_in_title() {
+    fn oembed_moves_featured_artist_out_of_title() {
         let candidate = candidate_from_oembed(&serde_json::json!({
             "title": "Arta - Mi Amor (feat. Saaren) | OFFICIAL MUSIC VIDEO",
             "author_name": "ARTA", "thumbnail_url": "cover"
         }))
         .unwrap();
-        assert_eq!(candidate.title, "Mi Amor (feat. Saaren)");
-        assert_eq!(candidate.artist, "Arta");
+        assert_eq!(candidate.title, "Mi Amor");
+        assert_eq!(candidate.artist, "Arta feat. Saaren");
         assert_eq!(candidate.cover_url.as_deref(), Some("cover"));
     }
 }

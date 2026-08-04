@@ -1,4 +1,4 @@
-use super::Candidate;
+use super::{ArtistCredit, Candidate};
 use anyhow::{Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::Client;
@@ -226,14 +226,17 @@ fn candidate_from_track(track: &Value) -> Option<Candidate> {
     }
     let release_date = track["album"]["release_date"].as_str().map(str::to_owned);
     let album_type = track["album"]["album_type"].as_str().map(str::to_owned);
+    let artist_credits = spotify_credits(&track["artists"]);
+    let album_artist_credits = spotify_credits(&track["album"]["artists"]);
     Some(Candidate {
         provider: "spotify".into(),
         title: track["name"].as_str()?.to_owned(),
-        artist: track["artists"][0]["name"].as_str()?.to_owned(),
+        artist: crate::domain::credits::display_artist(&artist_credits),
+        artist_credits,
         album: track["album"]["name"].as_str().map(str::to_owned),
-        album_artist: track["album"]["artists"][0]["name"]
-            .as_str()
-            .map(str::to_owned),
+        album_artist: (!album_artist_credits.is_empty())
+            .then(|| crate::domain::credits::display_artist(&album_artist_credits)),
+        album_artist_credits,
         track_number: track["track_number"].as_i64(),
         track_total: track["album"]["total_tracks"].as_i64(),
         disc_number: track["disc_number"].as_i64(),
@@ -256,6 +259,32 @@ fn candidate_from_track(track: &Value) -> Option<Candidate> {
     })
 }
 
+fn spotify_credits(value: &Value) -> Vec<ArtistCredit> {
+    let mut credits = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|artist| {
+            Some(ArtistCredit {
+                name: artist["name"].as_str()?.to_owned(),
+                join_phrase: String::new(),
+                musicbrainz_id: None,
+            })
+        })
+        .collect::<Vec<_>>();
+    let count = credits.len();
+    for (index, credit) in credits.iter_mut().enumerate() {
+        credit.join_phrase = if index + 1 == count {
+            String::new()
+        } else if index + 2 == count {
+            " & ".into()
+        } else {
+            ", ".into()
+        };
+    }
+    credits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,7 +294,7 @@ mod tests {
         let values = parse_results(&serde_json::json!({"tracks": {"items": [{
             "id": "spotify-id", "type": "track", "name": "Song", "duration_ms": 181250,
             "track_number": 3, "disc_number": 1,
-            "artists": [{"name": "Artist"}], "external_ids": {"isrc": "US1234567890"},
+            "artists": [{"name": "Artist"}, {"name": "Guest"}], "external_ids": {"isrc": "US1234567890"},
             "album": {"name": "Album", "album_type": "album", "release_date": "2020-04-03",
                 "total_tracks": 10, "artists": [{"name": "Artist"}],
                 "images": [{"url": "https://example.test/cover.jpg"}]}
@@ -273,6 +302,8 @@ mod tests {
         assert_eq!(values[0].isrc.as_deref(), Some("US1234567890"));
         assert_eq!(values[0].track_total, Some(10));
         assert_eq!(values[0].year.as_deref(), Some("2020"));
+        assert_eq!(values[0].artist, "Artist & Guest");
+        assert_eq!(values[0].artist_credits.len(), 2);
         assert!(values[0].recording_id.is_none());
     }
 

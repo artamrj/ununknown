@@ -1,4 +1,4 @@
-use super::Candidate;
+use super::{ArtistCredit, Candidate};
 use crate::infrastructure::provider_cache::{ProviderCache, recording_key, search_key};
 use anyhow::{Result, bail};
 use chrono::{Duration as ChronoDuration, Utc};
@@ -139,6 +139,7 @@ pub async fn artist_aliases(
 fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     let release = best_recording_release(raw, id);
     let release_group = release.and_then(|v| v.get("release-group"));
+    let artist_credits = parse_artist_credits(&raw["artist-credit"]);
     let artist = raw["artist-credit"].as_array().and_then(|v| v.first());
     let artist_obj = artist.and_then(|v| v.get("artist"));
     let release_id = release.and_then(|v| v["id"].as_str()).map(str::to_owned);
@@ -156,11 +157,19 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     Candidate {
         provider: "musicbrainz".into(),
         title: raw["title"].as_str().unwrap_or("Unknown Title").into(),
-        artist: artist
-            .and_then(|v| v["name"].as_str())
-            .unwrap_or("Unknown Artist")
-            .into(),
+        artist: display_credit(&artist_credits).unwrap_or_else(|| {
+            artist
+                .and_then(|v| v["name"].as_str())
+                .unwrap_or("Unknown Artist")
+                .into()
+        }),
+        artist_credits,
         album: release.and_then(|v| v["title"].as_str()).map(str::to_owned),
+        album_artist: release
+            .and_then(|value| display_credit(&parse_artist_credits(&value["artist-credit"]))),
+        album_artist_credits: release
+            .map(|value| parse_artist_credits(&value["artist-credit"]))
+            .unwrap_or_default(),
         duration_delta: raw["length"].as_f64().map(|millis| millis / 1000.0),
         track_number: media_track
             .and_then(|v| v["number"].as_str())
@@ -264,6 +273,7 @@ async fn request_json(request: RequestBuilder) -> Result<Value> {
 }
 
 fn candidate_from_search(raw: &Value) -> Candidate {
+    let artist_credits = parse_artist_credits(&raw["artist-credit"]);
     let artist = raw["artist-credit"]
         .as_array()
         .and_then(|value| value.first());
@@ -281,13 +291,21 @@ fn candidate_from_search(raw: &Value) -> Candidate {
     Candidate {
         provider: "musicbrainz".into(),
         title: raw["title"].as_str().unwrap_or("Unknown Title").into(),
-        artist: artist
-            .and_then(|value| value["name"].as_str())
-            .unwrap_or("Unknown Artist")
-            .into(),
+        artist: display_credit(&artist_credits).unwrap_or_else(|| {
+            artist
+                .and_then(|value| value["name"].as_str())
+                .unwrap_or("Unknown Artist")
+                .into()
+        }),
+        artist_credits,
         album: release
             .and_then(|value| value["title"].as_str())
             .map(str::to_owned),
+        album_artist: release
+            .and_then(|value| display_credit(&parse_artist_credits(&value["artist-credit"]))),
+        album_artist_credits: release
+            .map(|value| parse_artist_credits(&value["artist-credit"]))
+            .unwrap_or_default(),
         duration_delta: raw["length"].as_f64().map(|millis| millis / 1000.0),
         year: release
             .and_then(|value| value["date"].as_str())
@@ -313,6 +331,28 @@ fn candidate_from_search(raw: &Value) -> Candidate {
         raw_json: raw.to_string(),
         ..Default::default()
     }
+}
+
+fn parse_artist_credits(value: &Value) -> Vec<ArtistCredit> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|credit| {
+            let name = credit["name"]
+                .as_str()
+                .or_else(|| credit["artist"]["name"].as_str())?;
+            Some(ArtistCredit {
+                name: name.to_owned(),
+                join_phrase: credit["joinphrase"].as_str().unwrap_or_default().to_owned(),
+                musicbrainz_id: credit["artist"]["id"].as_str().map(str::to_owned),
+            })
+        })
+        .collect()
+}
+
+fn display_credit(credits: &[ArtistCredit]) -> Option<String> {
+    (!credits.is_empty()).then(|| crate::domain::credits::display_artist(credits))
 }
 
 fn join_values(values: &[Value]) -> String {
@@ -349,7 +389,10 @@ mod tests {
             &serde_json::json!({
                 "length": 180000,
                 "title": "Song",
-                "artist-credit": [{ "name": "Artist", "artist": { "id": "artist-1" } }],
+                "artist-credit": [
+                    { "name": "Artist", "joinphrase": " feat. ", "artist": { "id": "artist-1" } },
+                    { "name": "Guest", "artist": { "id": "artist-2" } }
+                ],
                 "releases": [
                     {
                         "id": "release-without-track",
@@ -392,6 +435,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(candidate.title, "Song");
+        assert_eq!(candidate.artist_credits.len(), 2);
+        assert_eq!(candidate.artist_credits[0].join_phrase, " feat. ");
+        assert_eq!(
+            candidate.artist_credits[1].musicbrainz_id.as_deref(),
+            Some("artist-2")
+        );
         assert_eq!(candidate.release_id.as_deref(), Some("release-1"));
         assert_eq!(candidate.track_number, Some(7));
         assert_eq!(candidate.track_total, Some(10));

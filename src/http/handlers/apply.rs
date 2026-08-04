@@ -633,7 +633,18 @@ pub async fn apply(
                 None
             }
         };
-        let artwork = resolve_artwork(&s, &item.filename, &candidate).await?;
+        let artwork = match resolve_artwork(&s, &item.filename, &candidate).await {
+            Ok(Some(artwork)) => Some(artwork),
+            Ok(None) => {
+                let error = anyhow::anyhow!("verified cover is no longer available");
+                return_track_for_cover(&s, item.track_id, &error).await?;
+                continue;
+            }
+            Err(error) => {
+                return_track_for_cover(&s, item.track_id, &error).await?;
+                continue;
+            }
+        };
         let src = PathBuf::from(&item.current_path);
         let dest = PathBuf::from(&item.destination_path);
         if delete_source_after_write && paths_resolve_to_same_target(&src, &dest).await? {
@@ -679,6 +690,7 @@ pub async fn apply(
                 let expected_artwork = artwork.clone();
                 let sanitized =
                     tag_writer::write_resilient(&write_target, &candidate, artwork, replay_gain)?;
+                tag_writer::verify_written_metadata(&write_target, &candidate)?;
                 if let Some(expected) = expected_artwork {
                     tag_writer::verify_embedded_artwork(&write_target, &expected)?;
                 }
@@ -839,6 +851,28 @@ pub async fn apply(
     Ok(())
 }
 
+async fn return_track_for_cover(
+    state: &Arc<AppState>,
+    track_id: crate::types::TrackId,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let detail = format!("Cover verification failed before writing: {error:#}");
+    sqlx::query(
+        "UPDATE tracks SET status='needs_review',stage='review',stage_message=?,error=NULL,updated_at=? WHERE id=?",
+    )
+    .bind(&detail)
+    .bind(Utc::now().to_rfc3339())
+    .bind(track_id.0)
+    .execute(&state.pool)
+    .await?;
+    state
+        .log_entry(
+            ActivityLogEntry::new("warn", "artwork", "Track returned to Review").detail(detail),
+        )
+        .await;
+    Ok(())
+}
+
 async fn finish_duplicate(
     state: &Arc<AppState>,
     duplicate: &DuplicateSource,
@@ -883,9 +917,28 @@ pub(super) async fn resolve_artwork(
     filename: &str,
     candidate: &crate::infrastructure::providers::Candidate,
 ) -> Result<Option<Vec<u8>>> {
-    let mut urls = Vec::<(String, String)>::new();
+    if candidate.artwork_status != crate::infrastructure::providers::ArtworkStatus::Verified {
+        anyhow::bail!(
+            "candidate artwork is not verified ({:?})",
+            candidate.artwork_status
+        );
+    }
+    let mut urls = Vec::<(String, String, bool)>::new();
+    for artwork in &candidate.artwork_candidates {
+        let trusted = artwork.user_confirmed
+            || artwork
+                .release_id
+                .as_deref()
+                .zip(candidate.release_id.as_deref())
+                .is_some_and(|(left, right)| left == right);
+        urls.push((artwork.provider.clone(), artwork.url.clone(), trusted));
+    }
     if let Some(url) = candidate.cover_url.as_deref() {
-        urls.push((candidate.provider.clone(), url.to_owned()));
+        urls.push((
+            candidate.provider.clone(),
+            url.to_owned(),
+            candidate.release_id.is_some(),
+        ));
     }
     if let Some(value) = candidate
         .score_breakdown
@@ -897,12 +950,13 @@ pub(super) async fn resolve_artwork(
                 urls.push((
                     item["provider"].as_str().unwrap_or("catalog").to_owned(),
                     url.to_owned(),
+                    false,
                 ));
             }
         }
     }
     let mut seen = HashSet::new();
-    urls.retain(|(_, url)| seen.insert(url.clone()));
+    urls.retain(|(_, url, _)| seen.insert(url.clone()));
     if urls.is_empty() {
         state
             .log(
@@ -917,18 +971,17 @@ pub(super) async fn resolve_artwork(
 
     let limiter = state.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await?;
-    for (provider, url) in urls {
-        let result = crate::infrastructure::providers::cover_art_archive::fetch_url_cached(
-            &state.pool,
-            &state.client,
-            &url,
-        )
-        .await;
-        match result.and_then(|bytes| {
-            crate::infrastructure::media::tag_writer::validate_artwork(&bytes)?;
-            Ok(bytes)
-        }) {
-            Ok(bytes) => {
+    for (provider, url, trusted) in urls {
+        let result =
+            crate::infrastructure::providers::cover_art_archive::fetch_verified_url_cached(
+                &state.pool,
+                &state.client,
+                &url,
+                trusted,
+            )
+            .await;
+        match result {
+            Ok((bytes, _)) => {
                 state
                     .log_entry(
                         ActivityLogEntry::new("ok", "artwork", "Downloaded valid cover art")

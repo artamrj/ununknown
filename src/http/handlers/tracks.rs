@@ -12,10 +12,11 @@ pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Track
     let total = tracks.len() as i64;
     let mut items = Vec::with_capacity(tracks.len());
     for track in tracks {
-        let mut candidates = queries::candidates(&s.pool, track.id).await?;
-        for candidate in &mut candidates {
-            candidate.normalize_credits();
-        }
+        let candidates = queries::candidates(&s.pool, track.id)
+            .await?
+            .into_iter()
+            .map(|candidate| candidate.value())
+            .collect();
         items.push(WorkspaceTrack { track, candidates });
     }
     Ok(Json(TrackPage { items, total }))
@@ -456,15 +457,43 @@ pub async fn select_candidate(
         crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
     let mut transaction = s.pool.begin().await?;
     persist_completed_candidate(&mut transaction, &selected).await?;
-    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message=?,updated_at=? WHERE id=?")
+    let (status, stage, message) = readiness_state(&selected, &completion, "Selected by you");
+    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(candidate_id.0)
-        .bind(format!("Selected by you; {}", completion.summary()))
+        .bind(status)
+        .bind(stage)
+        .bind(message)
         .bind(chrono::Utc::now().to_rfc3339())
         .bind(id.0)
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
-    Ok(Json(serde_json::json!({"selected": true})))
+    Ok(Json(
+        serde_json::json!({"selected": true, "ready": completion.core_complete}),
+    ))
+}
+
+fn readiness_state(
+    candidate: &Candidate,
+    completion: &crate::application::metadata_completion::CompletionReport,
+    prefix: &str,
+) -> (&'static str, &'static str, String) {
+    if completion.core_complete {
+        return (
+            "selected",
+            "ready",
+            format!("{prefix}; {}", completion.summary()),
+        );
+    }
+    let detail = candidate
+        .artwork_message
+        .clone()
+        .unwrap_or_else(|| completion.summary());
+    if candidate.artwork_status == crate::infrastructure::providers::ArtworkStatus::RetryableError {
+        ("provider_error", "failed", format!("{prefix}; {detail}"))
+    } else {
+        ("needs_review", "review", format!("{prefix}; {detail}"))
+    }
 }
 
 async fn persist_completed_candidate(
@@ -475,12 +504,18 @@ async fn persist_completed_candidate(
         .id
         .ok_or_else(|| anyhow::anyhow!("completed candidate has no database ID"))?;
     sqlx::query(
-        "UPDATE candidates SET title=?,artist=?,album=?,album_artist=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,genre=?,composer=?,label=?,isrc=?,cover_url=?,release_country=?,release_date=?,release_type=?,release_secondary_types=?,is_compilation=?,score_breakdown=? WHERE id=?",
+        "UPDATE candidates SET title=?,artist=?,artist_credits_json=?,album=?,album_artist=?,
+         album_artist_credits_json=?,track_number=?,track_total=?,disc_number=?,disc_total=?,year=?,
+         genre=?,composer=?,label=?,isrc=?,cover_url=?,artwork_candidates_json=?,artwork_status=?,
+         artwork_message=?,release_country=?,release_date=?,release_type=?,release_secondary_types=?,
+         is_compilation=?,score_breakdown=? WHERE id=?",
     )
     .bind(&candidate.title)
     .bind(&candidate.artist)
+    .bind(serde_json::to_string(&candidate.artist_credits)?)
     .bind(&candidate.album)
     .bind(&candidate.album_artist)
+    .bind(serde_json::to_string(&candidate.album_artist_credits)?)
     .bind(candidate.track_number)
     .bind(candidate.track_total)
     .bind(candidate.disc_number)
@@ -491,6 +526,9 @@ async fn persist_completed_candidate(
     .bind(&candidate.label)
     .bind(&candidate.isrc)
     .bind(&candidate.cover_url)
+    .bind(serde_json::to_string(&candidate.artwork_candidates)?)
+    .bind(serde_json::to_value(&candidate.artwork_status)?.as_str().unwrap_or("searching"))
+    .bind(&candidate.artwork_message)
     .bind(&candidate.release_country)
     .bind(&candidate.release_date)
     .bind(&candidate.release_type)
@@ -555,13 +593,41 @@ pub async fn manual_candidate(
         .album_artist
         .as_deref()
         .map(crate::domain::credits::prefer_latin_alias);
-    let credits = crate::domain::credits::normalize_featured(&value.artist, &value.title);
+    let credits = crate::domain::credits::normalize_structured(
+        &value.artist,
+        &value.title,
+        std::mem::take(&mut value.artist_credits),
+    );
     value.artist = credits.artist;
     value.title = credits.title;
+    value.artist_credits = credits.artists;
+    if let Some(album_artist) = value.album_artist.as_deref() {
+        let credits = crate::domain::credits::normalize_structured(
+            album_artist,
+            "",
+            std::mem::take(&mut value.album_artist_credits),
+        );
+        value.album_artist = Some(credits.artist);
+        value.album_artist_credits = credits.artists;
+    }
     let mut release_fields = Candidate {
+        provider: "manual".into(),
+        title: value.title.clone(),
         artist: value.artist.clone(),
+        artist_credits: value.artist_credits.clone(),
         album: value.album.take(),
         album_artist: value.album_artist.take(),
+        album_artist_credits: value.album_artist_credits.clone(),
+        track_number: value.track_number,
+        track_total: value.track_total,
+        disc_number: value.disc_number,
+        disc_total: value.disc_total,
+        year: value.year.clone(),
+        genre: value.genre.clone(),
+        composer: value.composer.clone(),
+        label: value.label.clone(),
+        isrc: value.isrc.clone(),
+        release_date: value.release_date.clone(),
         ..Default::default()
     };
     crate::application::metadata_completion::normalize_release_fields(&mut release_fields);
@@ -586,29 +652,79 @@ pub async fn manual_candidate(
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .map(str::to_owned);
+    release_fields.album = value.album.clone();
+    release_fields.album_artist = value.album_artist.clone();
+    if let Some(url) = cover_url.as_deref() {
+        release_fields.cover_url = Some(url.to_owned());
+        release_fields.artwork_candidates =
+            vec![crate::infrastructure::providers::ArtworkCandidate {
+                provider: "User verified".into(),
+                url: url.to_owned(),
+                user_confirmed: true,
+                isrc: release_fields.isrc.clone(),
+                album: release_fields.album.clone(),
+                artist: Some(release_fields.artist.clone()),
+                ..Default::default()
+            }];
+    }
+    crate::application::canonical_names::canonicalize_candidates(
+        &s.pool,
+        std::slice::from_mut(&mut release_fields),
+    )
+    .await?;
+    let limiter = s.artwork_downloads.read().await.clone();
+    let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
+    crate::application::metadata_completion::ensure_usable_cover(
+        &s.pool,
+        &s.client,
+        &mut release_fields,
+        false,
+    )
+    .await;
+    let completion = crate::application::metadata_completion::reassess(&mut release_fields, false);
     let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,release_date,cover_url,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-        .bind(id.0).bind("manual").bind(value.title.trim()).bind(value.artist.trim())
-        .bind(value.album).bind(value.album_artist).bind(value.track_number).bind(value.track_total)
-        .bind(value.disc_number).bind(value.disc_total).bind(value.year).bind(value.genre)
-        .bind(value.composer).bind(value.label).bind(value.isrc).bind(value.release_date)
-        .bind(&cover_url)
+        .bind(id.0).bind("manual").bind(&release_fields.title).bind(&release_fields.artist)
+        .bind(&release_fields.album).bind(&release_fields.album_artist).bind(release_fields.track_number).bind(release_fields.track_total)
+        .bind(release_fields.disc_number).bind(release_fields.disc_total).bind(&release_fields.year).bind(&release_fields.genre)
+        .bind(&release_fields.composer).bind(&release_fields.label).bind(&release_fields.isrc).bind(&release_fields.release_date)
+        .bind(&release_fields.cover_url)
         .bind(100.0).bind("{}")
         .execute(&s.pool).await?;
-    if let Some(cover_url) = cover_url {
+    let candidate_id = result.last_insert_rowid();
+    sqlx::query("UPDATE candidates SET artist_credits_json=?,album_artist_credits_json=?,artwork_candidates_json=?,artwork_status=?,artwork_message=? WHERE id=?")
+        .bind(serde_json::to_string(&release_fields.artist_credits)?)
+        .bind(serde_json::to_string(&release_fields.album_artist_credits)?)
+        .bind(serde_json::to_string(&release_fields.artwork_candidates)?)
+        .bind(serde_json::to_value(&release_fields.artwork_status)?.as_str().unwrap_or("searching"))
+        .bind(&release_fields.artwork_message)
+        .bind(candidate_id)
+        .execute(&s.pool).await?;
+    if completion.core_complete
+        && let Some(cover_url) = release_fields.cover_url.as_deref()
+    {
         persist_artwork_override(
             &s.pool,
             &track_path,
-            value.title.trim(),
-            value.artist.trim(),
-            &cover_url,
+            &release_fields.title,
+            &release_fields.artist,
+            cover_url,
         )
         .await?;
     }
-    let candidate_id = result.last_insert_rowid();
-    sqlx::query("UPDATE tracks SET selected_candidate_id=?,status='selected',stage='ready',stage_message='Entered manually' WHERE id=?")
-        .bind(candidate_id).bind(id.0).execute(&s.pool).await?;
+    let (status, stage, message) =
+        readiness_state(&release_fields, &completion, "Entered manually");
+    sqlx::query(
+        "UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=? WHERE id=?",
+    )
+    .bind(candidate_id)
+    .bind(status)
+    .bind(stage)
+    .bind(message)
+    .bind(id.0)
+    .execute(&s.pool)
+    .await?;
     Ok(Json(
-        serde_json::json!({"selected": true, "candidate_id": candidate_id}),
+        serde_json::json!({"selected": true, "ready": completion.core_complete, "candidate_id": candidate_id}),
     ))
 }
 
@@ -672,16 +788,32 @@ pub async fn update_artwork(
     } else {
         supplied.to_owned()
     };
-    let bytes = crate::infrastructure::providers::cover_art_archive::fetch(&s.client, &cover_url)
+    let (bytes, info) =
+        crate::infrastructure::providers::cover_art_archive::fetch_verified_url_cached(
+            &s.pool, &s.client, &cover_url, true,
+        )
         .await
         .map_err(|error| ApiError::validation(format!("Cover download failed: {error:#}")))?;
-    tag_writer::validate_artwork(&bytes).map_err(|error| {
-        ApiError::validation(format!("The URL is not a valid image: {error:#}"))
-    })?;
+    let _ = bytes;
+    let artwork_candidates = vec![crate::infrastructure::providers::ArtworkCandidate {
+        provider: "User verified".into(),
+        url: cover_url.clone(),
+        user_confirmed: true,
+        release_id: selected.release_id.clone(),
+        isrc: selected.isrc.clone(),
+        album: selected.album.clone(),
+        artist: Some(selected.artist.clone()),
+    }];
     let changed = sqlx::query(
-        "UPDATE candidates SET cover_url=? WHERE id=(SELECT selected_candidate_id FROM tracks WHERE id=?)",
+        "UPDATE candidates SET cover_url=?,artwork_candidates_json=?,artwork_status='verified',
+         artwork_message=? WHERE id=(SELECT selected_candidate_id FROM tracks WHERE id=?)",
     )
     .bind(&cover_url)
+    .bind(serde_json::to_string(&artwork_candidates)?)
+    .bind(format!(
+        "Verified {}x{} {} cover supplied by you",
+        info.width, info.height, info.mime
+    ))
     .bind(id.0)
     .execute(&s.pool)
     .await?
@@ -699,6 +831,21 @@ pub async fn update_artwork(
         &cover_url,
     )
     .await?;
+    let mut selected = selected;
+    selected.cover_url = Some(cover_url.clone());
+    selected.artwork_candidates = artwork_candidates;
+    selected.artwork_status = crate::infrastructure::providers::ArtworkStatus::Verified;
+    selected.artwork_message = Some("Verified cover supplied by you".into());
+    let completion = crate::application::metadata_completion::reassess(&mut selected, false);
+    let (status, stage, message) = readiness_state(&selected, &completion, "Artwork updated");
+    sqlx::query("UPDATE tracks SET status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
+        .bind(status)
+        .bind(stage)
+        .bind(message)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(id.0)
+        .execute(&s.pool)
+        .await?;
     Ok(Json(serde_json::json!({"cover_url": cover_url})))
 }
 
@@ -1116,8 +1263,10 @@ mod tests {
             Json(CandidateEdit {
                 title: "Correct title".into(),
                 artist: "Correct artist".into(),
+                artist_credits: Vec::new(),
                 album: Some("Correct album".into()),
                 album_artist: None,
+                album_artist_credits: Vec::new(),
                 track_number: Some(1),
                 track_total: None,
                 disc_number: None,
@@ -1128,7 +1277,7 @@ mod tests {
                 label: None,
                 isrc: None,
                 release_date: None,
-                cover_url: Some("https://example.test/cover.jpg".into()),
+                cover_url: None,
             }),
         )
         .await
@@ -1142,7 +1291,7 @@ mod tests {
         assert_eq!(
             row,
             (
-                "ready".into(),
+                "failed".into(),
                 "Correct title".into(),
                 "Correct artist".into()
             )
@@ -1158,11 +1307,12 @@ mod tests {
         crate::infrastructure::provider_cache::ProviderCache::put(
             &pool,
             "artwork-url",
-            &crate::infrastructure::provider_cache::search_key(
-                "https://example.test/cover.jpg",
-            ),
+            &crate::infrastructure::provider_cache::search_key("https://example.test/cover.jpg"),
             &serde_json::json!({
-                "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                "data_base64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    crate::infrastructure::media::tag_writer::test_artwork_png()
+                )
             }),
             chrono::Utc::now() + chrono::Duration::days(1),
         )

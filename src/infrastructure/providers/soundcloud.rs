@@ -208,13 +208,14 @@ fn candidate_from_track(track: &Value) -> Option<Candidate> {
             _ => year.to_owned(),
         }
     });
-    let album_artist = credits.artist.clone();
+    let album_artist = credits.artists.first().map(|credit| credit.name.clone());
     Some(Candidate {
         provider: "soundcloud".into(),
         title: credits.title,
         artist: credits.artist,
+        artist_credits: credits.artists,
         album: track["release"].as_str().map(str::to_owned),
-        album_artist: Some(album_artist),
+        album_artist,
         year: release_year,
         genre: nonempty(track["genre"].as_str()),
         label: nonempty(track["label_name"].as_str()),
@@ -240,6 +241,7 @@ fn candidate_from_oembed(raw: &Value) -> Option<Candidate> {
         provider: "soundcloud".into(),
         title: credits.title,
         artist: credits.artist,
+        artist_credits: credits.artists,
         cover_url: raw["thumbnail_url"].as_str().map(upgrade_artwork_url),
         score: 94.0,
         score_breakdown: Some(
@@ -321,8 +323,8 @@ mod tests {
             "user": {"username": "Uploader"}
         }]}));
         assert_eq!(candidates[0].provider, "soundcloud");
-        assert_eq!(candidates[0].artist, "Artist");
-        assert_eq!(candidates[0].title, "Song (feat. Guest)");
+        assert_eq!(candidates[0].artist, "Artist feat. Guest");
+        assert_eq!(candidates[0].title, "Song");
         assert_eq!(candidates[0].release_date.as_deref(), Some("2024-03-02"));
         assert_eq!(
             candidates[0].cover_url.as_deref(),
@@ -338,11 +340,8 @@ mod tests {
             "thumbnail_url": "https://i1.sndcdn.com/artworks-id-t500x500.jpg"
         }))
         .unwrap();
-        assert_eq!(candidate.artist, "Arta");
-        assert_eq!(
-            candidate.title,
-            "Hanooz Yadame (feat. Koorosh, Sami Low, & Raha)"
-        );
+        assert_eq!(candidate.artist, "Arta feat. Koorosh, Sami Low, & Raha");
+        assert_eq!(candidate.title, "Hanooz Yadame");
         assert_eq!(candidate.score, 94.0);
     }
 
@@ -355,8 +354,8 @@ mod tests {
             "artwork_url": "https://i1.sndcdn.com/artworks-id-large.jpg"
         }))
         .unwrap();
-        assert_eq!(candidate.artist, "Arta");
-        assert_eq!(candidate.title, "Hanooz Yadame (feat. Koorosh)");
+        assert_eq!(candidate.artist, "Arta feat. Koorosh");
+        assert_eq!(candidate.title, "Hanooz Yadame");
     }
 
     #[test]

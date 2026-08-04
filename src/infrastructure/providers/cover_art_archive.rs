@@ -5,6 +5,8 @@ use chrono::{Duration, Utc};
 use reqwest::Client;
 use sqlx::SqlitePool;
 
+use crate::infrastructure::media::tag_writer::{ArtworkInfo, inspect_artwork};
+
 pub async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
     let response = crate::infrastructure::resilient_http::get(client, url)
         .await?
@@ -23,22 +25,45 @@ pub async fn fetch(client: &Client, url: &str) -> Result<Vec<u8>> {
 }
 
 pub async fn fetch_url_cached(pool: &SqlitePool, client: &Client, url: &str) -> Result<Vec<u8>> {
+    fetch_verified_url_cached(pool, client, url, false)
+        .await
+        .map(|(data, _)| data)
+}
+
+pub async fn fetch_verified_url_cached(
+    pool: &SqlitePool,
+    client: &Client,
+    url: &str,
+    trusted_exact_release: bool,
+) -> Result<(Vec<u8>, ArtworkInfo)> {
     let key = search_key(url);
     if let Some(value) = ProviderCache::get(pool, "artwork-url", &key).await?
         && let Some(encoded) = value["data_base64"].as_str()
     {
-        return Ok(STANDARD.decode(encoded)?);
+        let data = STANDARD.decode(encoded)?;
+        match inspect_artwork(&data, trusted_exact_release) {
+            Ok(info) => return Ok((data, info)),
+            Err(_) => ProviderCache::delete(pool, "artwork-url", &key).await?,
+        }
     }
     let data = fetch(client, url).await?;
+    let info = inspect_artwork(&data, trusted_exact_release)?;
     ProviderCache::put(
         pool,
         "artwork-url",
         &key,
-        &serde_json::json!({"data_base64": STANDARD.encode(&data), "url": url}),
+        &serde_json::json!({
+            "data_base64": STANDARD.encode(&data),
+            "url": url,
+            "sha256": info.sha256,
+            "width": info.width,
+            "height": info.height,
+            "mime": info.mime
+        }),
         Utc::now() + Duration::days(30),
     )
     .await?;
-    Ok(data)
+    Ok((data, info))
 }
 
 #[cfg(test)]
@@ -59,11 +84,12 @@ mod tests {
     #[tokio::test]
     async fn cached_cover_art_by_url_decodes_bytes() {
         let pool = test_pool().await;
+        let expected = crate::infrastructure::media::tag_writer::test_artwork_png();
         ProviderCache::put(
             &pool,
             "artwork-url",
             &search_key("http://127.0.0.1:1/should-not-be-called"),
-            &serde_json::json!({ "data_base64": STANDARD.encode([1_u8, 2, 3]) }),
+            &serde_json::json!({ "data_base64": STANDARD.encode(&expected) }),
             Utc::now() + Duration::days(1),
         )
         .await
@@ -76,6 +102,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(data, vec![1, 2, 3]);
+        assert_eq!(data, expected);
     }
 }

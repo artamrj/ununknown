@@ -7,6 +7,15 @@ use sqlx::SqlitePool;
 pub struct ProviderCache;
 
 impl ProviderCache {
+    pub async fn delete(pool: &SqlitePool, provider: &str, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM provider_cache WHERE provider=? AND cache_key=?")
+            .bind(provider)
+            .bind(key)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get(pool: &SqlitePool, provider: &str, key: &str) -> Result<Option<Value>> {
         let row: Option<(String, String)> = sqlx::query_as(
             "SELECT response_json, expires_at FROM provider_cache WHERE provider=? AND cache_key=?",
