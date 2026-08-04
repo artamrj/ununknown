@@ -1035,6 +1035,11 @@ async fn process(
         info.album.as_deref(),
         embedded_cover,
     );
+    crate::application::canonical_names::canonicalize_candidates(
+        &state.pool,
+        std::slice::from_mut(&mut candidate),
+    )
+    .await?;
     let limiter = state.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await?;
     crate::application::metadata_completion::ensure_usable_cover(

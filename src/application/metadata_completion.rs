@@ -43,6 +43,7 @@ pub fn complete(
     agreeing.sort_by(|left, right| donor_quality(right).total_cmp(&donor_quality(left)));
 
     let mut enriched = Vec::new();
+    complete_release_identity(selected, &agreeing, &mut enriched);
     if selected.album.is_none()
         && let Some(donor) = choose_album_donor(&agreeing, existing_album)
     {
@@ -301,6 +302,10 @@ pub async fn ensure_usable_cover(
         accept_verified_artwork(candidate, artwork, &item, &info);
         return true;
     }
+    if saw_retryable {
+        mark_retryable_artwork(candidate, artwork, failures);
+        return false;
+    }
     let initial_count = artwork.len();
 
     // Existing release-backed URLs were unusable. Refresh only now, using the
@@ -380,28 +385,46 @@ pub async fn ensure_usable_cover(
         accept_verified_artwork(candidate, artwork, &item, &info);
         return true;
     }
+    if saw_retryable {
+        mark_retryable_artwork(candidate, artwork, failures);
+        return false;
+    }
     candidate.cover_url = None;
     candidate.artwork_candidates = artwork;
-    candidate.artwork_status = if saw_retryable {
-        ArtworkStatus::RetryableError
-    } else {
-        ArtworkStatus::CoverRequired
-    };
+    candidate.artwork_status = ArtworkStatus::CoverRequired;
     candidate.artwork_message = Some(if failures.is_empty() {
-        "No matching catalog artwork was found; provide a cover URL".into()
+        "No matching catalog artwork was found; provide a cover URL".to_owned()
     } else {
         format!("No usable matching cover: {}", failures.join("; "))
     });
-    mark_cover_verified(
-        candidate,
-        false,
-        if saw_retryable {
-            "retryable_error"
-        } else {
-            "cover_required"
-        },
-    );
+    mark_cover_verified(candidate, false, "cover_required");
     false
+}
+
+fn mark_retryable_artwork(
+    candidate: &mut Candidate,
+    artwork: Vec<ArtworkCandidate>,
+    failures: Vec<String>,
+) {
+    if candidate.cover_url.is_none() {
+        candidate.cover_url = artwork.first().map(|item| item.url.clone());
+    }
+    candidate.artwork_candidates = artwork;
+    candidate.artwork_status = ArtworkStatus::RetryableError;
+    candidate.artwork_message =
+        Some("Cover download temporarily unavailable; retry will use the selected URL".into());
+    record_artwork_failures(candidate, &failures);
+    mark_cover_verified(candidate, false, "retryable_error");
+}
+
+fn record_artwork_failures(candidate: &mut Candidate, failures: &[String]) {
+    let mut breakdown = candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    breakdown["metadata_completion"]["artwork_failures"] = serde_json::json!(failures);
+    candidate.score_breakdown = Some(breakdown.to_string());
 }
 
 async fn verify_artwork_candidates(
@@ -489,7 +512,12 @@ fn artwork_matches_candidate(candidate: &Candidate, artwork: &ArtworkCandidate) 
         .zip(candidate.isrc.as_deref())
         .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
     {
-        return albums_compatible(artwork.album.as_deref(), candidate.album.as_deref())
+        let release_compatible = candidate
+            .release_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("single"))
+            || albums_compatible(artwork.album.as_deref(), candidate.album.as_deref());
+        return release_compatible
             && artwork
                 .artist
                 .as_deref()
@@ -546,15 +574,27 @@ pub fn reassess(candidate: &mut Candidate, embedded_cover: bool) -> CompletionRe
 /// Returns which fields were changed so metadata-completion reports can include
 /// the generated values.
 pub fn normalize_release_fields(candidate: &mut Candidate) -> (bool, bool) {
-    let album_defaulted = candidate.album.as_deref().is_none_or(|album| {
-        album.trim().is_empty()
-            || album
-                .split(|character: char| !character.is_alphanumeric())
-                .any(|word| word.eq_ignore_ascii_case("single"))
-    });
-    if album_defaulted {
+    let original_album = candidate.album.clone();
+    let confirmed_single = candidate
+        .release_type
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("single"));
+    if confirmed_single
+        || candidate
+            .album
+            .as_deref()
+            .is_none_or(|album| album.trim().is_empty())
+    {
         candidate.album = Some("Single".to_owned());
+    } else if let Some(album) = candidate.album.as_deref() {
+        let cleaned = crate::domain::credits::release_title_without_featured(album);
+        candidate.album = Some(if cleaned.is_empty() {
+            "Single".to_owned()
+        } else {
+            cleaned
+        });
     }
+    let album_defaulted = candidate.album != original_album;
 
     let album_artist_defaulted = candidate
         .album_artist
@@ -580,6 +620,74 @@ pub fn normalize_release_fields(candidate: &mut Candidate) -> (bool, bool) {
     }
 
     (album_defaulted, album_artist_defaulted)
+}
+
+fn complete_release_identity(
+    selected: &mut Candidate,
+    agreeing: &[&Candidate],
+    enriched: &mut Vec<String>,
+) {
+    if selected.release_type.is_none()
+        && let Some(kind) = agreeing
+            .iter()
+            .filter(|candidate| release_evidence_compatible(selected, candidate))
+            .filter_map(|candidate| {
+                inferred_release_type(candidate).map(|kind| {
+                    (
+                        provider_priority(&candidate.provider),
+                        candidate.score as i64,
+                        kind,
+                    )
+                })
+            })
+            .max_by_key(|(authority, score, _)| (*authority, *score))
+            .map(|(_, _, kind)| kind)
+    {
+        selected.release_type = Some(kind);
+        enriched.push("release type".into());
+    }
+}
+
+fn release_evidence_compatible(selected: &Candidate, donor: &Candidate) -> bool {
+    match (selected.album.as_deref(), donor.album.as_deref()) {
+        (None, _) | (_, None) => true,
+        (Some(selected), Some(donor)) => {
+            let selected = comparable_release_title(selected);
+            let donor = comparable_release_title(donor);
+            selected == donor || strsim::normalized_levenshtein(&selected, &donor) >= 0.82
+        }
+    }
+}
+
+fn comparable_release_title(value: &str) -> String {
+    let cleaned = crate::domain::credits::release_title_without_featured(value);
+    let lower = cleaned.to_lowercase();
+    let without_type = [" - single", " - ep"]
+        .into_iter()
+        .find_map(|suffix| lower.strip_suffix(suffix))
+        .unwrap_or(&lower);
+    normalized(without_type)
+}
+
+fn inferred_release_type(candidate: &Candidate) -> Option<String> {
+    if let Some(kind) = candidate
+        .release_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+    {
+        return Some(kind.to_ascii_lowercase());
+    }
+    let album = candidate.album.as_deref()?.trim().to_ascii_lowercase();
+    if (album.ends_with(" - single") || album == "single")
+        && candidate.track_total.is_none_or(|count| count == 1)
+    {
+        Some("single".into())
+    } else if album.ends_with(" - ep") || album == "ep" {
+        Some("ep".into())
+    } else {
+        None
+    }
 }
 
 fn mark_cover_verified(candidate: &mut Candidate, verified: bool, source: &str) {
@@ -789,6 +897,7 @@ fn record_report(
                 "missing".into()
             }
         });
+    let artwork_failures = breakdown["metadata_completion"]["artwork_failures"].clone();
     breakdown["sources"] = serde_json::json!(sources);
     breakdown["metadata_completion"] = serde_json::json!({
         "score": report.score,
@@ -796,7 +905,8 @@ fn record_report(
         "enriched_fields": report.enriched_fields,
         "missing_fields": report.missing_fields,
         "cover_source": cover_source,
-        "cover_verified": cover_verified
+        "cover_verified": cover_verified,
+        "artwork_failures": artwork_failures
     });
     candidate.score_breakdown = Some(breakdown.to_string());
 }
@@ -997,6 +1107,7 @@ mod tests {
     #[test]
     fn normalizes_single_release_names_but_preserves_one_word_albums() {
         let mut single = candidate("itunes", Some("Farangis - Single"));
+        single.release_type = Some("single".into());
         let mut album = candidate("musicbrainz", Some("Thriller"));
 
         normalize_release_fields(&mut single);
@@ -1004,6 +1115,56 @@ mod tests {
 
         assert_eq!(single.album.as_deref(), Some("Single"));
         assert_eq!(album.album.as_deref(), Some("Thriller"));
+    }
+
+    #[test]
+    fn release_type_not_album_text_controls_single_normalization() {
+        let mut named_single = candidate("musicbrainz", Some("Single Ladies"));
+        named_single.release_type = Some("album".into());
+        let mut credited_ep = candidate("musicbrainz", Some("Moorche (feat. Mehrad Hidden) - EP"));
+        credited_ep.release_type = Some("ep".into());
+
+        normalize_release_fields(&mut named_single);
+        normalize_release_fields(&mut credited_ep);
+
+        assert_eq!(named_single.album.as_deref(), Some("Single Ladies"));
+        assert_eq!(credited_ep.album.as_deref(), Some("Moorche - EP"));
+    }
+
+    #[test]
+    fn agreeing_catalog_release_type_turns_a_selected_deezer_release_into_single() {
+        let mut selected = candidate("deezer", Some("Moorche (feat. Mehrad Hidden)"));
+        selected.title = "Moorche".into();
+        selected.artist = "Sepehr Khalse feat. Mehrad Hidden".into();
+        let mut itunes = selected.clone();
+        itunes.provider = "itunes".into();
+        itunes.album = Some("Moorche (feat. Mehrad Hidden) - Single".into());
+        itunes.release_type = Some("single".into());
+        itunes.track_total = Some(1);
+
+        complete(&mut selected, &[itunes], None, false);
+
+        assert_eq!(selected.release_type.as_deref(), Some("single"));
+        assert_eq!(selected.album.as_deref(), Some("Single"));
+    }
+
+    #[test]
+    fn confirmed_single_accepts_its_isrc_matched_catalog_cover_title() {
+        let mut selected = candidate("deezer", Some("Single"));
+        selected.release_type = Some("single".into());
+        selected.isrc = Some("QM-TEST-123".into());
+        let artwork = ArtworkCandidate {
+            provider: "Deezer".into(),
+            url: "https://cdn-images.dzcdn.net/cover.jpg".into(),
+            isrc: Some("qm-test-123".into()),
+            album: Some("Moorche (feat. Mehrad Hidden)".into()),
+            artist: Some("Siavash Ghomayshi".into()),
+            ..Default::default()
+        };
+
+        assert!(artwork_matches_candidate(&selected, &artwork));
+        selected.release_type = Some("album".into());
+        assert!(!artwork_matches_candidate(&selected, &artwork));
     }
 
     #[tokio::test]
@@ -1046,5 +1207,34 @@ mod tests {
             selected.cover_url.as_deref(),
             Some("https://example.test/valid.png")
         );
+    }
+
+    #[tokio::test]
+    async fn temporary_cover_failure_keeps_the_selected_url_for_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("cover-retry.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let url = "http://127.0.0.1:1/temporarily-unavailable.jpg";
+        let mut selected = candidate("manual", Some("Single"));
+        selected.cover_url = Some(url.into());
+        selected.artwork_candidates = vec![ArtworkCandidate {
+            provider: "User verified".into(),
+            url: url.into(),
+            user_confirmed: true,
+            ..Default::default()
+        }];
+
+        let usable = ensure_usable_cover(&pool, &Client::new(), &mut selected, false).await;
+
+        assert!(!usable);
+        assert_eq!(selected.cover_url.as_deref(), Some(url));
+        assert_eq!(selected.artwork_status, ArtworkStatus::RetryableError);
+        assert_eq!(
+            selected.artwork_message.as_deref(),
+            Some("Cover download temporarily unavailable; retry will use the selected URL")
+        );
+        assert!(!audit(&selected, false, Vec::new()).core_complete);
     }
 }

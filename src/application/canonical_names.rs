@@ -17,6 +17,9 @@ pub async fn canonicalize_candidates(
     pool: &SqlitePool,
     candidates: &mut [Candidate],
 ) -> Result<()> {
+    for candidate in candidates.iter_mut() {
+        normalize_candidate_credits(candidate);
+    }
     let mut winners = HashMap::<(String, String), Canonical>::new();
     for candidate in candidates.iter() {
         let authority = provider_authority(&candidate.provider);
@@ -85,6 +88,26 @@ pub async fn canonicalize_candidates(
         }
     }
     Ok(())
+}
+
+fn normalize_candidate_credits(candidate: &mut Candidate) {
+    let credits = crate::domain::credits::normalize_structured(
+        &candidate.artist,
+        &candidate.title,
+        std::mem::take(&mut candidate.artist_credits),
+    );
+    candidate.artist = credits.artist;
+    candidate.title = credits.title;
+    candidate.artist_credits = credits.artists;
+    if let Some(album_artist) = candidate.album_artist.as_deref() {
+        let credits = crate::domain::credits::normalize_structured(
+            album_artist,
+            "",
+            std::mem::take(&mut candidate.album_artist_credits),
+        );
+        candidate.album_artist = Some(credits.artist);
+        candidate.album_artist_credits = credits.artists;
+    }
 }
 
 fn collect_credits(
@@ -194,5 +217,36 @@ mod tests {
                 .all(|candidate| candidate.artist == "Andy")
         );
         assert!(candidates.iter().all(|candidate| candidate.title == "Song"));
+    }
+
+    #[tokio::test]
+    async fn one_band_identity_uses_the_same_catalog_spelling_everywhere() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("band-canonical.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let mut candidates = vec![Candidate {
+            provider: "musicbrainz".into(),
+            title: "Love You Like a Love Song".into(),
+            artist: "Selena Gomez & The Scene".into(),
+            artist_credits: vec![ArtistCredit::new("Selena Gomez & the Scene", "")],
+            album_artist: Some("Selena Gomez & The Scene".into()),
+            album_artist_credits: vec![ArtistCredit::new("Selena Gomez & The Scene", "")],
+            ..Default::default()
+        }];
+
+        canonicalize_candidates(&pool, &mut candidates)
+            .await
+            .unwrap();
+
+        let candidate = &candidates[0];
+        assert_eq!(candidate.artist, "Selena Gomez & the Scene");
+        assert_eq!(
+            candidate.album_artist.as_deref(),
+            Some("Selena Gomez & the Scene")
+        );
+        assert_eq!(candidate.artist_credits.len(), 1);
+        assert_eq!(candidate.album_artist_credits.len(), 1);
     }
 }

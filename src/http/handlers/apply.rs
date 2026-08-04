@@ -84,6 +84,32 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
         available: false,
     }));
 
+    // Reapply release and identity rules at the last mutable boundary. This
+    // also repairs ready-but-unwritten selections created by an older scan.
+    for source in &mut sources {
+        let track_id = source.track.id;
+        let existing_album = source.track.current_album.clone();
+        if let Some(candidate) = source.candidate.as_mut() {
+            let candidates = queries::candidates(&s.pool, track_id)
+                .await?
+                .iter()
+                .map(CandidateRow::value)
+                .collect::<Vec<_>>();
+            crate::application::metadata_completion::complete(
+                candidate,
+                &candidates,
+                existing_album.as_deref(),
+                false,
+            );
+            crate::application::canonical_names::canonicalize_candidates(
+                &s.pool,
+                std::slice::from_mut(candidate),
+            )
+            .await?;
+            persist_apply_normalization(&s.pool, candidate).await?;
+        }
+    }
+
     let mut evidence = Vec::with_capacity(sources.len());
     for source in &mut sources {
         source.available = tokio::fs::metadata(&source.track.path)
@@ -187,6 +213,27 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
         duplicates_skipped,
         delete_source_after_write,
     })
+}
+
+async fn persist_apply_normalization(pool: &sqlx::SqlitePool, candidate: &Candidate) -> Result<()> {
+    let Some(id) = candidate.id else {
+        return Ok(());
+    };
+    sqlx::query(
+        "UPDATE candidates SET title=?,artist=?,artist_credits_json=?,album=?,album_artist=?,
+         album_artist_credits_json=?,release_type=? WHERE id=?",
+    )
+    .bind(&candidate.title)
+    .bind(&candidate.artist)
+    .bind(serde_json::to_string(&candidate.artist_credits)?)
+    .bind(&candidate.album)
+    .bind(&candidate.album_artist)
+    .bind(serde_json::to_string(&candidate.album_artist_credits)?)
+    .bind(&candidate.release_type)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn promote_apply_representative(

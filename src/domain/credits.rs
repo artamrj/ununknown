@@ -208,6 +208,13 @@ pub fn individual_names(artists: &[ArtistCredit]) -> Vec<String> {
     names
 }
 
+/// Remove performer credits from a release title without changing legitimate
+/// title/version text. Release-type policy (for example, mapping a confirmed
+/// standalone single to `Single`) is handled by metadata completion.
+pub fn release_title_without_featured(value: &str) -> String {
+    remove_feature_clause(value).0
+}
+
 fn dedupe_credits(artists: &mut Vec<ArtistCredit>) {
     let mut out: Vec<ArtistCredit> = Vec::new();
     for credit in artists.drain(..) {
@@ -375,5 +382,17 @@ mod tests {
     fn unicode_and_whitespace_are_canonicalized() {
         assert_eq!(clean_text("  Cafe\u{301}   Song "), "Café Song");
         assert_eq!(identity_key(" ANDY "), identity_key("Andy"));
+    }
+
+    #[test]
+    fn removes_featured_credit_from_release_title_but_keeps_version_text() {
+        assert_eq!(
+            release_title_without_featured("Moorche (feat. Mehrad Hidden) - EP"),
+            "Moorche - EP"
+        );
+        assert_eq!(
+            release_title_without_featured("Midnight (Live)"),
+            "Midnight (Live)"
+        );
     }
 }

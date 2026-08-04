@@ -244,6 +244,11 @@ pub async fn auto_approve_review(
                 track.current_album.as_deref(),
                 embedded_cover,
             );
+            crate::application::canonical_names::canonicalize_candidates(
+                &s.pool,
+                std::slice::from_mut(&mut selected),
+            )
+            .await?;
             let limiter = s.artwork_downloads.read().await.clone();
             let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
             crate::application::metadata_completion::ensure_usable_cover(
@@ -444,6 +449,11 @@ pub async fn select_candidate(
         track.current_album.as_deref(),
         embedded_cover,
     );
+    crate::application::canonical_names::canonicalize_candidates(
+        &s.pool,
+        std::slice::from_mut(&mut selected),
+    )
+    .await?;
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
     crate::application::metadata_completion::ensure_usable_cover(
@@ -489,11 +499,7 @@ fn readiness_state(
         .artwork_message
         .clone()
         .unwrap_or_else(|| completion.summary());
-    if candidate.artwork_status == crate::infrastructure::providers::ArtworkStatus::RetryableError {
-        ("provider_error", "failed", format!("{prefix}; {detail}"))
-    } else {
-        ("needs_review", "review", format!("{prefix}; {detail}"))
-    }
+    ("needs_review", "review", format!("{prefix}; {detail}"))
 }
 
 async fn persist_completed_candidate(
@@ -1291,7 +1297,7 @@ mod tests {
         assert_eq!(
             row,
             (
-                "failed".into(),
+                "review".into(),
                 "Correct title".into(),
                 "Correct artist".into()
             )

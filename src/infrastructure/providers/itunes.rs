@@ -79,14 +79,17 @@ fn parse_results(raw: &Value) -> Vec<Candidate> {
         .into_iter()
         .flatten()
         .filter_map(|value| {
+            let album = value["collectionName"].as_str().map(str::to_owned);
+            let track_total = value["trackCount"].as_i64();
+            let release_type = infer_release_type(album.as_deref(), track_total);
             Some(Candidate {
                 provider: "itunes".into(),
                 title: value["trackName"].as_str()?.to_owned(),
                 artist: value["artistName"].as_str()?.to_owned(),
-                album: value["collectionName"].as_str().map(str::to_owned),
+                album,
                 album_artist: value["collectionArtistName"].as_str().map(str::to_owned),
                 track_number: value["trackNumber"].as_i64(),
-                track_total: value["trackCount"].as_i64(),
+                track_total,
                 disc_number: value["discNumber"].as_i64(),
                 disc_total: value["discCount"].as_i64(),
                 year: value["releaseDate"]
@@ -106,11 +109,23 @@ fn parse_results(raw: &Value) -> Vec<Candidate> {
                     .map(|value| value / 1000.0),
                 recording_id: value["trackId"].as_i64().map(|id| id.to_string()),
                 release_id: value["collectionId"].as_i64().map(|id| id.to_string()),
+                release_type,
                 raw_json: value.to_string(),
                 ..Default::default()
             })
         })
         .collect()
+}
+
+fn infer_release_type(album: Option<&str>, track_total: Option<i64>) -> Option<String> {
+    let album = album?.trim().to_ascii_lowercase();
+    if (album.ends_with(" - single") || album == "single") && track_total.is_none_or(|n| n == 1) {
+        Some("single".into())
+    } else if album.ends_with(" - ep") || album == "ep" {
+        Some("ep".into())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -136,9 +151,16 @@ mod tests {
         assert_eq!(candidates[0].artist, "Amir Tataloo");
         assert_eq!(candidates[0].release_date.as_deref(), Some("2019-06-23"));
         assert_eq!(candidates[0].duration_delta, Some(427.076));
+        assert_eq!(candidates[0].release_type.as_deref(), Some("single"));
         assert_eq!(
             candidates[0].cover_url.as_deref(),
             Some("https://example.test/1200x1200bb.jpg")
         );
+    }
+
+    #[test]
+    fn does_not_infer_single_from_an_album_name_containing_the_word() {
+        assert_eq!(infer_release_type(Some("Single Ladies"), Some(12)), None);
+        assert_eq!(infer_release_type(Some("Single Collection"), Some(1)), None);
     }
 }

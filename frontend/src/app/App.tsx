@@ -196,12 +196,16 @@ export function App() {
   const choose = async (trackId: number, candidateId: number) => {
     setError("");
     try {
-      await api(`/tracks/${trackId}/choose`, {
+      const result = await api<{ ready: boolean }>(`/tracks/${trackId}/choose`, {
         method: "POST",
         body: JSON.stringify({ candidate_id: candidateId }),
       });
       await loadTracks();
-      setNotice("Match accepted. This track is ready to clean.");
+      setNotice(
+        result.ready
+          ? "Match accepted. This track is ready to clean."
+          : "Match accepted. The cover will be retried before this track becomes ready.",
+      );
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -219,8 +223,17 @@ export function App() {
 
   const autoApprovable = useMemo(
     () =>
-      tracks.filter((track) => isReview(track) && !isProblem(track) && track.candidates.length > 0)
-        .length,
+      tracks.filter(
+        (track) =>
+          isReview(track) &&
+          !isProblem(track) &&
+          !hasRetryableArtwork(track) &&
+          track.candidates.length > 0,
+      ).length,
+    [tracks],
+  );
+  const retryableArtwork = useMemo(
+    () => tracks.filter(hasRetryableArtwork).length,
     [tracks],
   );
   const busy = workflow ? busyPhases.has(workflow.phase) : false;
@@ -590,6 +603,22 @@ export function App() {
                 {autoApproving ? "Checking…" : `Auto-select ${autoApprovable}`}
               </button>
             )}
+            {retryableArtwork > 0 && filter === "review" && (
+              <button
+                className="compact-button accent issue-retry-button"
+                disabled={busy || retryingIssues}
+                onClick={() => void retryIssues()}
+              >
+                {retryingIssues || busy ? (
+                  <span className="spinner" />
+                ) : (
+                  <Icon name="refresh" size={15} />
+                )}
+                {retryingIssues || busy
+                  ? "Retrying…"
+                  : `Retry ${retryableArtwork} ${retryableArtwork === 1 ? "cover" : "covers"}`}
+              </button>
+            )}
             {counts.problems > 0 && filter === "problems" && (
               <button
                 className="compact-button accent issue-retry-button"
@@ -948,6 +977,8 @@ function TrackInspector({
                 ? problemTitle(track)
                 : track.stage === "skipped"
                   ? "Duplicate input"
+                  : hasRetryableArtwork(track)
+                    ? "Cover download temporarily unavailable"
                   : "Your review is needed"}
             </b>
             <p>
@@ -2237,6 +2268,9 @@ function isProblem(track: Track) {
     track.status === "provider_error"
   );
 }
+function hasRetryableArtwork(track: Track) {
+  return selectedCandidate(track)?.artwork_status === "retryable_error";
+}
 function selectedCandidate(track: Track) {
   return track.candidates.find((candidate) => candidate.id === track.selected_candidate_id);
 }
@@ -2251,7 +2285,9 @@ function statusFor(track: Track): { label: string; tone: string; icon: IconName 
   if (track.stage === "review")
     return {
       label:
-        selectedCandidate(track)?.artwork_status === "cover_required"
+        hasRetryableArtwork(track)
+          ? "Retry cover"
+          : selectedCandidate(track)?.artwork_status === "cover_required"
           ? "Cover required"
           : track.candidates.length > 1
           ? "Needs review"

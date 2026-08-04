@@ -826,6 +826,25 @@ mod tests {
             write(&path, &candidate, None, None).unwrap();
             verify_written_metadata(&path, &candidate)
                 .unwrap_or_else(|error| panic!("{extension}: {error:#}"));
+
+            let band = Candidate {
+                title: "Love You Like a Love Song".into(),
+                artist: "Selena Gomez & the Scene".into(),
+                artist_credits: vec![crate::domain::credits::ArtistCredit::new(
+                    "Selena Gomez & the Scene",
+                    "",
+                )],
+                album: Some("When the Sun Goes Down".into()),
+                album_artist: Some("Selena Gomez & the Scene".into()),
+                album_artist_credits: vec![crate::domain::credits::ArtistCredit::new(
+                    "Selena Gomez & the Scene",
+                    "",
+                )],
+                ..Default::default()
+            };
+            write(&path, &band, None, None).unwrap();
+            verify_written_metadata(&path, &band)
+                .unwrap_or_else(|error| panic!("{extension} band identity: {error:#}"));
         }
     }
 

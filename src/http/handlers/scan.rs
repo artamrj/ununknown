@@ -72,6 +72,11 @@ pub async fn retry_issues(State(s): State<Arc<AppState>>) -> ApiResult<Json<Retr
         "SELECT id,path,status FROM tracks
          WHERE status IN ('corrupt','failed','provider_error')
             OR is_missing=1 OR stage='failed'
+            OR EXISTS (
+                SELECT 1 FROM candidates
+                WHERE candidates.id=tracks.selected_candidate_id
+                  AND candidates.artwork_status='retryable_error'
+            )
          ORDER BY path",
     )
     .fetch_all(&s.pool)
@@ -267,5 +272,39 @@ mod tests {
         assert!(row.1.contains("still missing"));
         assert!(row.2);
         assert_eq!(row.3, 1);
+    }
+
+    #[tokio::test]
+    async fn retry_issues_includes_a_selected_retryable_cover() {
+        let state = test_state().await;
+        let track_id = sqlx::query(
+            "INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage)
+             VALUES('/music/retry-cover.mp3','retry-cover.mp3','needs_review',0,'now','now','now','review')",
+        )
+        .execute(&state.pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        let candidate_id = sqlx::query(
+            "INSERT INTO candidates(track_id,provider,title,artist,score,raw_json,artwork_status)
+             VALUES(?,'deezer','Song','Artist',90,'{}','retryable_error')",
+        )
+        .bind(track_id)
+        .execute(&state.pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
+            .bind(candidate_id)
+            .bind(track_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        let Json(result) = retry_issues(State(state)).await.unwrap();
+
+        assert!(!result.started);
+        assert_eq!(result.queued, 0);
+        assert_eq!(result.unavailable, 1);
     }
 }
