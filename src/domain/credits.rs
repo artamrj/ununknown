@@ -85,27 +85,15 @@ fn is_arabic_script(character: char) -> bool {
 }
 
 /// Normalize a display credit while retaining the individual artist identities.
-/// Only separators recognized by Navidrome are parsed. In particular, `&`,
-/// `and`, `x`, commas, and bare slashes are deliberately left inside a name.
+/// Definite separators are always parsed; ambiguous delimiters are only split
+/// when a collaboration is strongly implied.
 pub fn normalize_featured(artist: &str, title: &str) -> Credits {
     let artist = clean_text(artist);
     let (title, featured) = remove_feature_clause(title);
     let mut artists = parse_supported_credit(&artist);
 
     if let Some(featured) = featured {
-        let featured = parse_supported_credit(&featured);
-        for credit in featured {
-            if artists
-                .iter()
-                .any(|existing| same_name(&existing.name, &credit.name))
-            {
-                continue;
-            }
-            if let Some(last) = artists.last_mut() {
-                last.join_phrase = " feat. ".into();
-            }
-            artists.push(ArtistCredit::new(credit.name, ""));
-        }
+        append_featured_artists(&mut artists, parse_supported_credit(&featured));
     }
     if artists.is_empty() && !artist.is_empty() {
         artists.push(ArtistCredit::new(&artist, ""));
@@ -137,18 +125,7 @@ pub fn normalize_structured(display: &str, title: &str, mut artists: Vec<ArtistC
 
     let (title, featured) = remove_feature_clause(title);
     if let Some(featured) = featured {
-        for featured in parse_supported_credit(&featured) {
-            if artists
-                .iter()
-                .any(|existing| same_name(&existing.name, &featured.name))
-            {
-                continue;
-            }
-            if let Some(last) = artists.last_mut() {
-                last.join_phrase = " feat. ".into();
-            }
-            artists.push(ArtistCredit::new(featured.name, ""));
-        }
+        append_featured_artists(&mut artists, parse_supported_credit(&featured));
     }
     if artists.is_empty() {
         return normalize_featured(display, &title);
@@ -254,7 +231,93 @@ fn parse_supported_credit(value: &str) -> Vec<ArtistCredit> {
         rest = rest[index + separator.len()..].trim().to_owned();
     }
     out.retain(|credit| !credit.name.is_empty());
+    if out.len() == 1
+        && let Some(ambiguous) = parse_ambiguous_collaboration(&out[0].name)
+    {
+        return ambiguous;
+    }
     out
+}
+
+fn parse_ambiguous_collaboration(value: &str) -> Option<Vec<ArtistCredit>> {
+    if !value.contains(',') {
+        return None;
+    }
+    let mut names = Vec::new();
+    for chunk in value.split(',') {
+        let chunk = clean_text(chunk);
+        if chunk.is_empty() {
+            continue;
+        }
+        if let Some((left, right)) = chunk.split_once(" & ")
+            && !left.trim().is_empty()
+            && !right.trim().is_empty()
+        {
+            names.push(clean_text(left));
+            names.push(clean_text(right));
+        } else {
+            names.push(chunk);
+        }
+    }
+    if names.len() < 2
+        || names
+            .iter()
+            .all(|name| name.split_whitespace().count() <= 1)
+    {
+        return None;
+    }
+    let total = names.len();
+    Some(
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let join = if index == 0 && total > 1 {
+                    " feat. "
+                } else if index + 1 < total {
+                    "; "
+                } else {
+                    ""
+                };
+                ArtistCredit::new(name, join)
+            })
+            .collect(),
+    )
+}
+
+fn append_featured_artists(artists: &mut Vec<ArtistCredit>, featured: Vec<ArtistCredit>) {
+    let mut additions = Vec::new();
+    for credit in featured {
+        if artists
+            .iter()
+            .any(|existing| same_name(&existing.name, &credit.name))
+            || additions
+                .iter()
+                .any(|existing: &String| same_name(existing, &credit.name))
+        {
+            continue;
+        }
+        additions.push(credit.name);
+    }
+    if additions.is_empty() {
+        return;
+    }
+    if artists.is_empty() {
+        let total = additions.len();
+        for (index, name) in additions.into_iter().enumerate() {
+            let join = if index + 1 < total { "; " } else { "" };
+            artists.push(ArtistCredit::new(name, join));
+        }
+        return;
+    }
+    if let Some(last) = artists.last_mut() {
+        last.join_phrase = " feat. ".into();
+    }
+    let total = additions.len();
+    for (index, name) in additions.into_iter().enumerate() {
+        let join = if index + 1 < total { "; " } else { "" };
+        artists.push(ArtistCredit::new(name, join));
+    }
 }
 
 fn normalize_join_phrase(value: &str) -> String {
@@ -343,6 +406,13 @@ mod tests {
     }
 
     #[test]
+    fn comma_and_ampersand_collaboration_is_split_into_individual_artists() {
+        let credits = normalize_featured("Arta, Koorosh & Sami Low", "Cheshm Beham Bezani");
+        assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low");
+        assert_eq!(individual_names(&credits.artists), ["Arta", "Koorosh", "Sami Low"]);
+    }
+
+    #[test]
     fn preserves_structured_co_primary_join() {
         let credits = normalize_structured(
             "Alice & Bob",
@@ -375,7 +445,11 @@ mod tests {
             "Hanooz Yadame (feat. Koorosh, Sami Low & Raha) feat. Koorosh,Sami Low,Raha",
         );
         assert_eq!(credits.title, "Hanooz Yadame");
-        assert_eq!(credits.artist, "Arta feat. Koorosh, Sami Low & Raha");
+        assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low; Raha");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Arta", "Koorosh", "Sami Low", "Raha"]
+        );
     }
 
     #[test]
