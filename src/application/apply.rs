@@ -73,51 +73,52 @@ fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<Str
         basename.push_str(&extension.to_ascii_lowercase());
     }
 
-    fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::credits::Credits {
-        let candidate_credits = crate::domain::credits::normalize_structured(
-            &candidate.artist,
-            &candidate.title,
-            candidate.artist_credits.clone(),
-        );
-        if !candidate.artist_credits.is_empty() {
-            return candidate_credits;
-        }
-        let Some(source_artist) = track.current_artist.as_deref() else {
-            return candidate_credits;
-        };
-        let Some(source_title) = track.current_title.as_deref() else {
-            return candidate_credits;
-        };
-        let source_credits = crate::domain::credits::normalize_featured(source_artist, source_title);
-        let candidate_names = crate::domain::credits::individual_names(&candidate_credits.artists);
-        let source_names = crate::domain::credits::individual_names(&source_credits.artists);
-        if candidate_names.is_empty() || source_names.len() <= candidate_names.len() {
-            return candidate_credits;
-        }
-        let names_equal = |left: &str, right: &str| {
-            crate::domain::credits::identity_key(left) == crate::domain::credits::identity_key(right)
-        };
-        let candidate_is_subset = candidate_names.iter().all(|candidate_name| {
-            source_names
-                .iter()
-                .any(|source_name| names_equal(candidate_name, source_name))
-        });
-        let source_has_extra_primary = source_names.iter().any(|source_name| {
-            !candidate_names
-                .iter()
-                .any(|candidate_name| names_equal(candidate_name, source_name))
-        });
-        if candidate_is_subset && source_has_extra_primary {
-            source_credits
-        } else {
-            candidate_credits
-        }
-    }
     Ok(std::path::PathBuf::from(&cfg.output_dir)
         .join(parent)
         .join(basename)
         .to_string_lossy()
         .into_owned())
+}
+
+fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::credits::Credits {
+    let candidate_credits = crate::domain::credits::normalize_structured(
+        &candidate.artist,
+        &candidate.title,
+        candidate.artist_credits.clone(),
+    );
+    if !candidate.artist_credits.is_empty() {
+        return candidate_credits;
+    }
+    let Some(source_artist) = track.current_artist.as_deref() else {
+        return candidate_credits;
+    };
+    let Some(source_title) = track.current_title.as_deref() else {
+        return candidate_credits;
+    };
+    let source_credits = crate::domain::credits::normalize_featured(source_artist, source_title);
+    let candidate_names = crate::domain::credits::individual_names(&candidate_credits.artists);
+    let source_names = crate::domain::credits::individual_names(&source_credits.artists);
+    if candidate_names.is_empty() || source_names.len() <= candidate_names.len() {
+        return candidate_credits;
+    }
+    let names_equal = |left: &str, right: &str| {
+        crate::domain::credits::identity_key(left) == crate::domain::credits::identity_key(right)
+    };
+    let candidate_is_subset = candidate_names.iter().all(|candidate_name| {
+        source_names
+            .iter()
+            .any(|source_name| names_equal(candidate_name, source_name))
+    });
+    let source_has_extra_primary = source_names.iter().any(|source_name| {
+        !candidate_names
+            .iter()
+            .any(|candidate_name| names_equal(candidate_name, source_name))
+    });
+    if candidate_is_subset && source_has_extra_primary {
+        source_credits
+    } else {
+        candidate_credits
+    }
 }
 
 fn safe_filename_part(value: &str, fallback: &str) -> String {
