@@ -255,7 +255,7 @@ pub async fn auto_approve_review(
             .await?;
             let limiter = s.artwork_downloads.read().await.clone();
             let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-            crate::application::metadata_completion::ensure_usable_cover(
+            crate::application::artwork::ensure_usable_cover(
                 &s.pool,
                 &s.client,
                 &mut selected,
@@ -457,7 +457,7 @@ pub async fn select_candidate(
     .await?;
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-    crate::application::metadata_completion::ensure_usable_cover(
+    crate::application::artwork::ensure_usable_cover(
         &s.pool,
         &s.client,
         &mut selected,
@@ -468,8 +468,7 @@ pub async fn select_candidate(
         crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
     let mut transaction = s.pool.begin().await?;
     persist_completed_candidate(&mut transaction, &selected).await?;
-    let (status, stage, message) =
-        readiness_state(&selected, &completion, "Selected by you", false);
+    let (status, stage, message) = readiness_state(&selected, &completion, "Selected by you");
     sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(candidate_id.0)
         .bind(status)
@@ -486,19 +485,15 @@ pub async fn select_candidate(
     ))
 }
 
+/// A track becomes Ready only when the whole core set is complete, which
+/// includes a verified matching cover. Tracks without usable artwork stay in
+/// review so a file is never written missing, broken, or wrongly matched art.
 fn readiness_state(
     candidate: &Candidate,
     completion: &crate::application::metadata_completion::CompletionReport,
     prefix: &str,
-    require_cover: bool,
 ) -> (&'static str, &'static str, String) {
-    let complete = if require_cover {
-        completion.core_complete
-    } else {
-        completion.core_complete
-            || crate::application::metadata_completion::identity_complete(candidate)
-    };
-    if complete {
+    if completion.core_complete {
         return (
             "selected",
             "ready",
@@ -690,7 +685,7 @@ pub async fn manual_candidate(
     .await?;
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-    crate::application::metadata_completion::ensure_usable_cover(
+    crate::application::artwork::ensure_usable_cover(
         &s.pool,
         &s.client,
         &mut release_fields,
@@ -728,7 +723,7 @@ pub async fn manual_candidate(
         .await?;
     }
     let (status, stage, message) =
-        readiness_state(&release_fields, &completion, "Entered manually", false);
+        readiness_state(&release_fields, &completion, "Entered manually");
     sqlx::query(
         "UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=? WHERE id=?",
     )
@@ -854,8 +849,7 @@ pub async fn update_artwork(
     selected.artwork_status = crate::infrastructure::providers::ArtworkStatus::Verified;
     selected.artwork_message = Some("Verified cover supplied by you".into());
     let completion = crate::application::metadata_completion::reassess(&mut selected, false);
-    let (status, stage, message) =
-        readiness_state(&selected, &completion, "Artwork updated", false);
+    let (status, stage, message) = readiness_state(&selected, &completion, "Artwork updated");
     sqlx::query("UPDATE tracks SET status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(status)
         .bind(stage)
@@ -865,6 +859,57 @@ pub async fn update_artwork(
         .execute(&s.pool)
         .await?;
     Ok(Json(serde_json::json!({"cover_url": cover_url})))
+}
+
+/// Re-run the cover-art worker for the selected candidate without rescanning
+/// audio. This is the on-demand "find cover art" action: it re-checks every
+/// catalog source plus artwork already verified for the same release, and
+/// either verifies a cover (making the track Ready) or keeps it in Review.
+pub async fn search_artwork(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<TrackId>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let (track, mut candidate) = queries::selected(&s.pool, id).await?;
+    let source_path = std::path::PathBuf::from(&track.path);
+    let embedded_cover = tokio::task::spawn_blocking(move || {
+        tag_writer::read_artwork(&source_path)
+            .ok()
+            .flatten()
+            .is_some()
+    })
+    .await
+    .unwrap_or(false);
+    let limiter = s.artwork_downloads.read().await.clone();
+    let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
+    crate::application::artwork::ensure_usable_cover(
+        &s.pool,
+        &s.client,
+        &mut candidate,
+        embedded_cover,
+    )
+    .await;
+    let completion =
+        crate::application::metadata_completion::reassess(&mut candidate, embedded_cover);
+    let mut transaction = s.pool.begin().await?;
+    persist_completed_candidate(&mut transaction, &candidate).await?;
+    let (status, stage, message) =
+        readiness_state(&candidate, &completion, "Cover search complete");
+    sqlx::query("UPDATE tracks SET status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
+        .bind(status)
+        .bind(stage)
+        .bind(message)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(id.0)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(Json(serde_json::json!({
+        "cover_verified": candidate.artwork_status == ArtworkStatus::Verified,
+        "ready": stage == "ready",
+        "artwork_status": serde_json::to_value(&candidate.artwork_status).ok(),
+        "artwork_message": candidate.artwork_message,
+        "cover_url": candidate.cover_url,
+    })))
 }
 
 async fn persist_artwork_override(
@@ -890,9 +935,9 @@ pub async fn artwork_preview(
     Path(id): Path<TrackId>,
 ) -> ApiResult<axum::response::Response> {
     let (track, candidate) = queries::selected(&s.pool, id).await?;
-    let artwork = match super::apply::resolve_artwork(&s, &track.filename, &candidate).await? {
-        Some(bytes) => Some(bytes),
-        None => tokio::task::spawn_blocking(move || {
+    let artwork = match super::apply::resolve_artwork(&s, &track.filename, &candidate).await {
+        Ok(bytes) => Some(bytes),
+        Err(_) => tokio::task::spawn_blocking(move || {
             tag_writer::read_artwork(std::path::Path::new(&track.path))
         })
         .await
@@ -1264,9 +1309,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_metadata_resolves_a_completely_unmatched_track() {
+    async fn manual_metadata_with_a_verified_cover_becomes_ready() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("manual.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        crate::infrastructure::provider_cache::ProviderCache::put(
+            &pool,
+            "artwork-url",
+            &crate::infrastructure::provider_cache::search_key(
+                "https://example.test/manual-cover.jpg",
+            ),
+            &serde_json::json!({
+                "data_base64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    crate::infrastructure::media::tag_writer::test_artwork_png()
+                )
+            }),
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/unknown.mp3','unknown.mp3','needs_review',0,'now','now','now','review')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+
+        let Json(response) = manual_candidate(
+            State(state),
+            Path(TrackId(track_id)),
+            Json(CandidateEdit {
+                title: "Correct title".into(),
+                artist: "Correct artist".into(),
+                artist_credits: Vec::new(),
+                album: Some("Correct album".into()),
+                album_artist: None,
+                album_artist_credits: Vec::new(),
+                track_number: Some(1),
+                track_total: None,
+                disc_number: None,
+                disc_total: None,
+                year: Some("2026".into()),
+                genre: None,
+                composer: None,
+                label: None,
+                isrc: None,
+                release_date: None,
+                cover_url: Some("https://example.test/manual-cover.jpg".into()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["ready"], true);
+        assert_eq!(response["cover_verified"], true);
+        let row: (String, String, String) = sqlx::query_as("SELECT tracks.stage,candidates.title,candidates.artist FROM tracks JOIN candidates ON candidates.id=tracks.selected_candidate_id WHERE tracks.id=?")
+            .bind(track_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "ready".into(),
+                "Correct title".into(),
+                "Correct artist".into()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_metadata_without_a_cover_stays_in_review() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("manual-no-cover.sqlite");
         let pool = db::connect(database.to_str().unwrap()).await.unwrap();
         let state = Arc::new(AppState::new(Config::default(), pool.clone()));
         let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/unknown.mp3','unknown.mp3','needs_review',0,'now','now','now','review')")
@@ -1275,7 +1391,7 @@ mod tests {
             .unwrap()
             .last_insert_rowid();
 
-        let _ = manual_candidate(
+        let Json(response) = manual_candidate(
             State(state),
             Path(TrackId(track_id)),
             Json(CandidateEdit {
@@ -1301,23 +1417,24 @@ mod tests {
         .await
         .unwrap();
 
-        let row: (String, String, String) = sqlx::query_as("SELECT tracks.stage,candidates.title,candidates.artist FROM tracks JOIN candidates ON candidates.id=tracks.selected_candidate_id WHERE tracks.id=?")
-            .bind(track_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(
-            row,
-            (
-                "ready".into(),
-                "Correct title".into(),
-                "Correct artist".into()
-            )
-        );
+        assert_eq!(response["selected"], true);
+        assert_eq!(response["ready"], false);
+        assert_eq!(response["cover_verified"], false);
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT tracks.stage,tracks.status,(SELECT artwork_status FROM candidates WHERE id=tracks.selected_candidate_id)
+             FROM tracks WHERE id=?",
+        )
+        .bind(track_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "review");
+        assert_eq!(row.1, "needs_review");
+        assert_ne!(row.2, "verified");
     }
 
     #[tokio::test]
-    async fn explicit_choice_accepts_metadata_without_a_verified_cover() {
+    async fn explicit_choice_without_a_verified_cover_stays_in_review() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("choose-cover-pending.sqlite");
         let pool = db::connect(database.to_str().unwrap()).await.unwrap();
@@ -1348,7 +1465,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(response["selected"], true);
-        assert_eq!(response["ready"], true);
+        assert_eq!(response["ready"], false);
         assert_eq!(response["cover_verified"], false);
         let row: (Option<i64>, String, String, String) = sqlx::query_as(
             "SELECT selected_candidate_id,status,stage,
@@ -1360,9 +1477,79 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(row.0, Some(candidate_id));
-        assert_eq!(row.1, "selected");
-        assert_eq!(row.2, "ready");
+        assert_eq!(row.1, "needs_review");
+        assert_eq!(row.2, "review");
         assert_ne!(row.3, "verified");
+    }
+
+    #[tokio::test]
+    async fn artwork_search_uses_a_same_release_cover_to_make_the_track_ready() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("artwork-search.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        crate::infrastructure::provider_cache::ProviderCache::put(
+            &pool,
+            "artwork-url",
+            &crate::infrastructure::provider_cache::search_key(
+                "https://example.test/release-cover.jpg",
+            ),
+            &serde_json::json!({
+                "data_base64": base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    crate::infrastructure::media::tag_writer::test_artwork_png()
+                )
+            }),
+            chrono::Utc::now() + chrono::Duration::days(1),
+        )
+        .await
+        .unwrap();
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/pending-cover.mp3','pending-cover.mp3','needs_review',0,'now','now','now','review')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let candidate_id = sqlx::query(
+            "INSERT INTO candidates(track_id,provider,title,artist,album,musicbrainz_release_id,cover_url,duration_delta,score,score_breakdown,artwork_status)
+             VALUES(?,'deezer','Song','Artist','Album','release-7','http://127.0.0.1:1/broken.jpg',1.0,95.0,'{}','retryable_error')",
+        )
+        .bind(track_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+        sqlx::query("UPDATE tracks SET selected_candidate_id=? WHERE id=?")
+            .bind(candidate_id)
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO candidates(track_id,provider,title,artist,album,musicbrainz_release_id,cover_url,score,artwork_status)
+             VALUES(?,'itunes','Song','Artist','Album','release-7','https://example.test/release-cover.jpg',90,'verified')",
+        )
+        .bind(track_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let Json(response) = search_artwork(State(state), Path(TrackId(track_id)))
+            .await
+            .unwrap();
+
+        assert_eq!(response["cover_verified"], true);
+        assert_eq!(response["ready"], true);
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT tracks.stage,tracks.status,(SELECT artwork_status FROM candidates WHERE id=?) FROM tracks WHERE id=?",
+        )
+        .bind(candidate_id)
+        .bind(track_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "ready");
+        assert_eq!(row.1, "selected");
+        assert_eq!(row.2, "verified");
     }
 
     #[tokio::test]

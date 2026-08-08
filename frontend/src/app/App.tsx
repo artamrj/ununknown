@@ -188,10 +188,8 @@ export function App() {
       await queryClient.invalidateQueries({ queryKey: queryKeys.tracks });
       setNotice(
         !result.ready
-          ? "Match accepted. This track still needs required metadata before it can be cleaned."
-          : result.cover_verified
-            ? "Match accepted. This track is ready to clean."
-            : "Match accepted. This track is ready to clean; a cover will be added when one becomes available.",
+          ? "Match accepted, but this track still needs a verified cover before it can be cleaned."
+          : "Match accepted. This track is ready to clean.",
       );
     } catch (reason) {
       setError((reason as Error).message);

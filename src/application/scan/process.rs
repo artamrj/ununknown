@@ -440,7 +440,7 @@ pub(crate) async fn process(
     .await?;
     let limiter = state.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await?;
-    crate::application::metadata_completion::ensure_usable_cover(
+    crate::application::artwork::ensure_usable_cover(
         &state.pool,
         &state.client,
         &mut candidate,

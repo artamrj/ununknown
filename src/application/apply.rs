@@ -13,7 +13,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use tokio::io::AsyncReadExt;
 
 pub(crate) struct PreparedApply {
@@ -641,10 +641,15 @@ async fn paths_are_same_existing_file(left: &std::path::Path, right: &std::path:
 /// Reuses an equivalent existing output instead of creating another numbered
 /// copy. A genuinely different recording is still published without replacing
 /// anything already present. Hard links keep the final publication atomic.
+///
+/// An existing output is only reused when it also carries the exact artwork we
+/// are about to publish, so a stale file with missing or wrong cover art is
+/// never silently accepted as the "corrected" output.
 async fn publish_no_clobber(
     temporary: &std::path::Path,
     preferred: &std::path::Path,
     excluded_source: Option<&std::path::Path>,
+    expected_artwork: Option<&[u8]>,
 ) -> Result<Publication> {
     tokio::fs::OpenOptions::new()
         .write(true)
@@ -660,7 +665,9 @@ async fn publish_no_clobber(
         {
             continue;
         }
-        if files_are_equivalent_audio(temporary, &existing, &mut equivalence_probe).await? {
+        if files_are_equivalent_audio(temporary, &existing, &mut equivalence_probe).await?
+            && existing_file_has_expected_artwork(&existing, expected_artwork).await?
+        {
             discard_temporary(temporary).await;
             return Ok(Publication::Reused(existing));
         }
@@ -693,6 +700,7 @@ async fn publish_no_clobber(
                 }
                 if files_are_equivalent_audio(temporary, &destination, &mut equivalence_probe)
                     .await?
+                    && existing_file_has_expected_artwork(&destination, expected_artwork).await?
                 {
                     discard_temporary(temporary).await;
                     return Ok(Publication::Reused(destination));
@@ -702,6 +710,28 @@ async fn publish_no_clobber(
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+/// A reusable existing output must already contain the exact cover we are about
+/// to write. When no artwork is expected (defensive path) any existing output
+/// passes this check.
+async fn existing_file_has_expected_artwork(
+    existing: &std::path::Path,
+    expected: Option<&[u8]>,
+) -> Result<bool> {
+    let Some(expected) = expected else {
+        return Ok(true);
+    };
+    let existing = existing.to_path_buf();
+    let expected = expected.to_vec();
+    let matches = tokio::task::spawn_blocking(move || {
+        match crate::infrastructure::media::tag_writer::read_artwork(&existing) {
+            Ok(Some(bytes)) => bytes == expected,
+            _ => false,
+        }
+    })
+    .await?;
+    Ok(matches)
 }
 
 fn temporary_destination(destination: &std::path::Path, track_id: i64) -> PathBuf {
@@ -781,8 +811,7 @@ pub async fn apply(
             }
         };
         let artwork = match resolve_artwork(&s, &item.filename, &candidate).await {
-            Ok(Some(artwork)) => Some(artwork),
-            Ok(None) => None,
+            Ok(artwork) => artwork,
             Err(error) => {
                 return_track_for_cover(&s, item.track_id, &error).await?;
                 continue;
@@ -827,18 +856,18 @@ pub async fn apply(
         let write_target = temporary.clone();
         let write_limiter = s.tag_writes.read().await.clone();
         let write_permit = write_limiter.acquire_owned().await?;
-        let result = tokio::task::spawn_blocking({
-            move || {
-                let _permit = write_permit;
-                let expected_artwork = artwork.clone();
-                let sanitized =
-                    tag_writer::write_resilient(&write_target, &candidate, artwork, replay_gain)?;
-                tag_writer::verify_written_metadata(&write_target, &candidate)?;
-                if let Some(expected) = expected_artwork {
-                    tag_writer::verify_embedded_artwork(&write_target, &expected)?;
-                }
-                Ok::<_, anyhow::Error>(sanitized)
-            }
+        let expected_artwork = artwork.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = write_permit;
+            let sanitized = tag_writer::write_resilient(
+                &write_target,
+                &candidate,
+                Some(artwork.clone()),
+                replay_gain,
+            )?;
+            tag_writer::verify_written_metadata(&write_target, &candidate)?;
+            tag_writer::verify_embedded_artwork(&write_target, &artwork)?;
+            Ok::<_, anyhow::Error>(sanitized)
         })
         .await?;
         if result.as_ref().is_ok_and(|sanitized| *sanitized) {
@@ -853,7 +882,9 @@ pub async fn apply(
             .await;
         }
         let publication = match result {
-            Ok(_) => publish_no_clobber(&temporary, &dest, Some(&src)).await,
+            Ok(_) => {
+                publish_no_clobber(&temporary, &dest, Some(&src), Some(&expected_artwork)).await
+            }
             Err(error) => Err(error),
         };
         let output_available = publication.is_ok();
@@ -1055,106 +1086,48 @@ async fn finish_duplicate(
     Ok(())
 }
 
+/// Fetch the exact verified artwork bytes to embed, or fail so the caller can
+/// return the track to review. Artwork is never optional at write time: a file
+/// is only published when it has valid matching cover art. Only artwork that
+/// matches the selected release is considered.
 pub(crate) async fn resolve_artwork(
     state: &Arc<AppState>,
     filename: &str,
     candidate: &crate::infrastructure::providers::Candidate,
-) -> Result<Option<Vec<u8>>> {
-    // Covers are best-effort. A selected candidate whose cover could not be
-    // verified is still accepted; this is the final retry at write time.
-    let mut urls = Vec::<(String, String, bool)>::new();
-    for artwork in &candidate.artwork_candidates {
-        let trusted = artwork.user_confirmed
-            || artwork
-                .release_id
-                .as_deref()
-                .zip(candidate.release_id.as_deref())
-                .is_some_and(|(left, right)| left == right);
-        urls.push((artwork.provider.clone(), artwork.url.clone(), trusted));
-    }
-    if let Some(url) = candidate.cover_url.as_deref() {
-        urls.push((
-            candidate.provider.clone(),
-            url.to_owned(),
-            candidate.release_id.is_some(),
-        ));
-    }
-    if let Some(value) = candidate
-        .score_breakdown
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-    {
-        for item in value["artwork_candidates"].as_array().into_iter().flatten() {
-            if let Some(url) = item["url"].as_str() {
-                urls.push((
-                    item["provider"].as_str().unwrap_or("catalog").to_owned(),
-                    url.to_owned(),
-                    false,
-                ));
-            }
-        }
-    }
-    let mut seen = HashSet::new();
-    urls.retain(|(_, url, _)| seen.insert(url.clone()));
-    if urls.is_empty() {
-        state
-            .log(
-                "info",
-                "artwork",
-                Some(filename),
-                "No catalog cover was available; preserving a valid embedded cover if present",
-            )
-            .await;
-        return Ok(None);
-    }
-
+) -> Result<Vec<u8>> {
     let limiter = state.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await?;
-    for (provider, url, trusted) in urls {
-        let result =
-            crate::infrastructure::providers::cover_art_archive::fetch_verified_url_cached(
-                &state.pool,
-                &state.client,
-                &url,
-                trusted,
-            )
-            .await;
-        match result {
-            Ok((bytes, _)) => {
-                state
-                    .log_entry(
-                        ActivityLogEntry::new("ok", "artwork", "Downloaded valid cover art")
-                            .file(filename.to_owned())
-                            .context(serde_json::json!({"provider": provider, "url": url})),
-                    )
-                    .await;
-                return Ok(Some(bytes));
-            }
-            Err(error) => {
-                state
-                    .log_entry(
-                        ActivityLogEntry::new(
-                            "warn",
-                            "artwork",
-                            "Artwork source failed; trying the next matching source",
-                        )
+    match crate::application::artwork::resolve_for_write(&state.pool, &state.client, candidate)
+        .await
+    {
+        Ok(bytes) => {
+            state
+                .log_entry(
+                    ActivityLogEntry::new("ok", "artwork", "Downloaded verified cover art")
                         .file(filename.to_owned())
-                        .error(error.as_ref())
-                        .context(serde_json::json!({"provider": provider, "url": url})),
+                        .context(serde_json::json!({
+                            "provider": candidate.provider,
+                            "url": candidate.cover_url,
+                        })),
+                )
+                .await;
+            Ok(bytes)
+        }
+        Err(error) => {
+            state
+                .log_entry(
+                    ActivityLogEntry::new(
+                        "warn",
+                        "artwork",
+                        "No matching cover artwork is available; track returned to review",
                     )
-                    .await;
-            }
+                    .file(filename.to_owned())
+                    .error_text(format!("{error:#}")),
+                )
+                .await;
+            Err(error)
         }
     }
-    state
-        .log(
-            "warn",
-            "artwork",
-            Some(filename),
-            "No catalog artwork could be downloaded; preserving a valid embedded cover if present",
-        )
-        .await;
-    Ok(None)
 }
 
 async fn paths_resolve_to_same_target(
@@ -1199,6 +1172,23 @@ async fn remove_source_after_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn other_artwork_png() -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(320, 320, |x, y| {
+            if (x / 25 + y / 25) % 3 == 0 {
+                image::Rgba([190, 40, 80, 255])
+            } else if (x / 25 + y / 25) % 3 == 1 {
+                image::Rgba([40, 190, 120, 255])
+            } else {
+                image::Rgba([90, 70, 220, 255])
+            }
+        });
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        output.into_inner()
+    }
 
     #[tokio::test]
     async fn automatic_write_excludes_tracks_that_are_still_in_review() {
@@ -1417,7 +1407,7 @@ mod tests {
             .await
             .unwrap();
 
-        let published = publish_no_clobber(&temporary, &preferred, None)
+        let published = publish_no_clobber(&temporary, &preferred, None, None)
             .await
             .unwrap();
 
@@ -1448,7 +1438,7 @@ mod tests {
             .await
             .unwrap();
 
-        let published = publish_no_clobber(&temporary, &preferred, None)
+        let published = publish_no_clobber(&temporary, &preferred, None, None)
             .await
             .unwrap();
 
@@ -1501,13 +1491,77 @@ mod tests {
             file_sha256(&preferred).await.unwrap()
         );
 
-        let published = publish_no_clobber(&temporary, &preferred, None)
+        let published = publish_no_clobber(&temporary, &preferred, None, None)
             .await
             .unwrap();
 
         assert_eq!(published, Publication::Reused(preferred));
         assert!(!temporary.exists());
         assert!(!directory.path().join("Artist - Song (2).mp3").exists());
+    }
+
+    #[tokio::test]
+    async fn existing_output_with_different_artwork_is_not_reused() {
+        if std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.mp3");
+        let existing = directory.path().join("Artist - Song.mp3");
+        let temporary = directory.path().join(".temporary.mp3");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+            .arg("sine=frequency=440:duration=4")
+            .args(["-q:a", "4"])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        tokio::fs::copy(&source, &existing).await.unwrap();
+        tokio::fs::copy(&source, &temporary).await.unwrap();
+        let candidate = crate::infrastructure::providers::Candidate {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            ..Default::default()
+        };
+        let artwork_a = crate::infrastructure::media::tag_writer::test_artwork_png();
+        let artwork_b = other_artwork_png();
+        crate::infrastructure::media::tag_writer::write(
+            &existing,
+            &candidate,
+            Some(artwork_a.clone()),
+            None,
+        )
+        .unwrap();
+        crate::infrastructure::media::tag_writer::write(
+            &temporary,
+            &candidate,
+            Some(artwork_b.clone()),
+            None,
+        )
+        .unwrap();
+
+        let published = publish_no_clobber(&temporary, &existing, None, Some(&artwork_b))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            published,
+            Publication::Written(directory.path().join("Artist - Song (2).mp3"))
+        );
+        assert!(!temporary.exists());
+        assert_eq!(
+            crate::infrastructure::media::tag_writer::read_artwork(published.path()).unwrap(),
+            Some(artwork_b)
+        );
+        assert_eq!(
+            crate::infrastructure::media::tag_writer::read_artwork(&existing).unwrap(),
+            Some(artwork_a)
+        );
     }
 
     #[tokio::test]
@@ -1523,7 +1577,7 @@ mod tests {
             tokio::fs::copy(&source, &temporary).await.unwrap();
             tokio::fs::copy(&source, &preferred).await.unwrap();
 
-            let published = publish_no_clobber(&temporary, &preferred, None)
+            let published = publish_no_clobber(&temporary, &preferred, None, None)
                 .await
                 .unwrap();
             assert!(published.reused_existing());
@@ -1549,7 +1603,7 @@ mod tests {
         tokio::fs::copy(&source, &existing_output).await.unwrap();
         tokio::fs::copy(&source, &temporary).await.unwrap();
 
-        let published = publish_no_clobber(&temporary, &source, Some(&source))
+        let published = publish_no_clobber(&temporary, &source, Some(&source), None)
             .await
             .unwrap();
 

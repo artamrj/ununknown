@@ -192,10 +192,11 @@ The **apply service** (`src/application/apply.rs`, reached from the HTTP endpoin
 2. **Per output** (`apply`, `apply.rs:722`):
    - **ReplayGain** — measure loudness with `replaygain::get_or_analyze` (cached).
      Failure never blocks the write.
-   - **Artwork** — `resolve_artwork` retries the cover download at write time
-     (cached). Covers are best-effort: if none verifies, the write proceeds without
-     replacing artwork and any valid embedded cover is preserved. Only unexpected
-     infrastructure errors return the track to Review.
+   - **Artwork** — `resolve_artwork` fetches the verified cover bytes at write
+     time (cached) via the shared cover-art worker. Artwork is **mandatory**: if no
+     usable matching cover can be fetched, the write is aborted and the track is
+     returned to Review instead of being written with missing or wrong art. Only
+     artwork that matches the selected release is considered.
    - **Copy to a temporary file** in the destination directory
      (`.Name.ununknown-{id}.ext`).
    - **Write tags** — `tag_writer::write_resilient` with ReplayGain tags, then
@@ -334,25 +335,34 @@ All HTTP goes through `resilient_http` (timeouts, retries) and a
    label, country) **only from albums compatible with the chosen release** so a
    compilation can't silently change the original release.
 4. Normalize release fields: `Single`/`EP` naming and album artist defaults.
-5. `audit` produces a weighted completeness score plus two readiness flags:
-   `core_complete` (title, artist, album, **verified cover**) and
-   `identity_complete` (title + artist + album only).
+5. `audit` produces a weighted completeness score plus the readiness flag
+   `core_complete` (title, artist, album, **verified cover**).
 
-**Cover verification** (`ensure_usable_cover`, `metadata_completion.rs:252`):
-- Collect every artwork candidate (catalog URL + breakdown URLs), ordered by
-  provider priority.
-- Each candidate must *match the selected release* (release ID, ISRC+album, or
-  compatible album+artist) unless user-confirmed.
-- Download and validate the actual image (`cover_art_archive`), preferring release
-  ID matches. On temporary failures (timeout/429/5xx) mark `retryable_error` so the
-  retry-issues flow can recover. If nothing verifies, try Deezer-by-ISRC + fresh
-  iTunes/Deezer searches once, then declare the cover missing (`cover_required`).
+**Cover-art worker** (`src/application/artwork.rs`):
 
-Only `core_complete` tracks reach the automatic write queue. An explicit user
-choice (`/choose`, manual entry, artwork update) is accepted on recording identity
-alone, so a track with an unverifiable cover can still become Ready; the cover is
-then best-effort and retried at write time. `core_complete` remains the bar for
-silent auto-approval.
+- `collect_artwork_candidates` gathers every allowed URL for the selected
+  recording: the candidate's own artwork list + `cover_url`, `score_breakdown`
+  artwork alternatives, and **artwork already verified for the same release or
+  ISRC elsewhere in the library** (`library_verified_artwork`). Bytes are shared
+  through the artwork-url provider cache, so the first verified cover of an album
+  becomes available to every other track on the same release.
+- Each candidate image must *match the selected release* (release ID, ISRC+album,
+  or compatible album+artist) unless user-confirmed. It is downloaded and
+  validated (`cover_art_archive` / `inspect_artwork`), rejecting broken, blank,
+  corrupted, or too-small images.
+- `ensure_usable_cover` is the scan/selection worker. On temporary failures
+  (timeout/429/5xx) it marks `retryable_error`; if the stored URLs are unusable it
+  refreshes once from Deezer-by-ISRC + iTunes/Deezer, then checks the library
+  again. Only when nothing verifies does it declare the cover missing
+  (`cover_required`).
+- `resolve_for_write` is the apply-time fetch: it returns the exact bytes to embed
+  or fails, so a file is never written without valid matching artwork.
+
+**Readiness**: `core_complete` — which requires a *verified* cover — is the bar for
+every path to Ready: automatic write, explicit `/choose`, manual entry, artwork
+update, and the on-demand `/tracks/{id}/artwork/search` worker. A track with a
+missing, broken, or merely retryable cover stays in Review; the UI offers a
+"Search for cover art" action that re-runs the worker for that track.
 
 ---
 
@@ -363,8 +373,11 @@ silent auto-approval.
 1. `fsync` the finished temporary file.
 2. List existing destination variants (`Name.ext`, `Name (2).ext`, …).
 3. If an existing output is **equivalent audio** (same file size + SHA-256, or same
-   Chromaprint fingerprint + ≤3s duration), reuse it and delete the temporary —
-   never creating a numbered copy.
+   Chromaprint fingerprint + ≤3s duration) **and already carries the exact artwork
+   that is about to be published**, reuse it and delete the temporary — never
+   creating a numbered copy. A stale output with missing or different cover art is
+   not reused; the fresh temporary is published instead, so reused files always
+   have valid matching artwork.
 4. Otherwise create a **hard link** from the temporary to the next free numbered
    destination. `AlreadyExists` bumps the number. The source of the write is
    excluded from equivalence checks so re-running your own output isn't mistaken for
@@ -436,6 +449,7 @@ are evicted first (checked at startup and hourly while idle).
 | `POST /api/tracks/{id}/review` | Undo identification (back to Review) |
 | `PUT  /api/tracks/{id}/manual` | Save a manually entered candidate |
 | `PUT  /api/tracks/{id}/artwork` | Set + verify a cover URL / song link |
+| `POST /api/tracks/{id}/artwork/search` | Re-run the cover-art worker for a track |
 | `POST /api/source/resolve` | Resolve a Shazam/Spotify/YouTube/… link to metadata |
 | `GET  /api/candidates/{id}/artwork/preview`, etc. | Artwork previews |
 | `POST /api/write` | Write all Ready tracks to the output folder |
@@ -452,7 +466,8 @@ are evicted first (checked at startup and hourly while idle).
 | Catalog runner (provider cascade) | `src/application/scan/providers.rs` |
 | Duplicate detection | `src/application/input_dedup.rs` |
 | Smart auto-selection | `src/application/smart_approval.rs` |
-| Metadata completion + cover worker | `src/application/metadata_completion.rs` |
+| Metadata completion | `src/application/metadata_completion.rs` |
+| Cover-art worker (search, verify, reuse, apply-time fetch) | `src/application/artwork.rs` |
 | Apply service (prepare / write / publish) | `src/application/apply.rs` (+ endpoint `src/http/handlers/apply.rs`) |
 | Review / scan / workspace handlers | `src/http/handlers/tracks.rs`, `scan.rs`, `workspace.rs`, `queries.rs` |
 | Repository (track + candidate types and queries) | `src/infrastructure/db/tracks.rs` |
@@ -475,9 +490,10 @@ Setup → Scan & identify
   │     └─ uncertain/unmatched/corrupt → REVIEW
   └─ (automatic mode: only new/changed files, only strict matches)
 Review → choose / auto-select / manual / source-link / artwork / retry-issues
-  ├─ explicit choice (choose / manual) → identity_complete → READY (cover best-effort)
-  └─ auto-approve → core_complete (verified cover) → READY
-Write → per track: ReplayGain → retry cover (best-effort) → copy to temp
-      → write+verify tags → atomic no-clobber publish
+  ├─ every path to READY requires core_complete, incl. a verified cover
+  ├─ cover-art worker searches catalogs + already-verified same-release covers
+  └─ artwork/search re-runs the worker for a single track
+Write → per track: ReplayGain → fetch verified cover (mandatory) → copy to temp
+      → write+verify tags → atomic no-clobber publish (reuse only if cover matches)
       → (optional) remove original → delete row
 ```

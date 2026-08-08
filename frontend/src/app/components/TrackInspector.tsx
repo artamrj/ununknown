@@ -38,6 +38,9 @@ export function TrackInspector({
   const [advanced, setAdvanced] = useState(false);
   const [undoing, setUndoing] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [searchingCover, setSearchingCover] = useState(false);
+  const [savingCover, setSavingCover] = useState(false);
+  const [coverUrl, setCoverUrl] = useState("");
   const [choosingId, setChoosingId] = useState<number>();
   const [actionError, setActionError] = useState("");
   const candidate = selectedCandidate(track);
@@ -60,7 +63,10 @@ export function TrackInspector({
     setActionError("");
     setChoosingId(undefined);
     setRemoving(false);
-  }, [track.id]);
+    setSearchingCover(false);
+    setSavingCover(false);
+    setCoverUrl(candidate?.cover_url || "");
+  }, [track.id, candidate?.cover_url]);
   const undoIdentification = async () => {
     setUndoing(true);
     setActionError("");
@@ -102,6 +108,39 @@ export function TrackInspector({
       setRemoving(false);
     }
   };
+  const searchCover = async () => {
+    setSearchingCover(true);
+    setActionError("");
+    try {
+      await api(`/tracks/${track.id}/artwork/search`, { method: "POST", body: "{}" });
+      await onSaved();
+    } catch (reason) {
+      setActionError((reason as Error).message);
+    } finally {
+      setSearchingCover(false);
+    }
+  };
+  const saveManualCover = async () => {
+    const url = coverUrl.trim();
+    if (!url) return;
+    setSavingCover(true);
+    setActionError("");
+    try {
+      await api(`/tracks/${track.id}/artwork`, {
+        method: "PUT",
+        body: JSON.stringify({ cover_url: url }),
+      });
+      await onSaved();
+    } catch (reason) {
+      setActionError((reason as Error).message);
+    } finally {
+      setSavingCover(false);
+    }
+  };
+  const coverBusy = searchingCover || savingCover;
+  const coverNeeded = Boolean(
+    candidate && !isCompleted(track) && candidate.artwork_status !== "verified",
+  );
 
   return (
     <div className="inspector-content">
@@ -177,8 +216,20 @@ export function TrackInspector({
       )}
 
       {(isReview(track) || isProblem(track) || track.stage === "skipped") && (
-        <section className={`decision-note ${isProblem(track) ? "problem" : "review"}`}>
-          <Icon name={isProblem(track) ? "alert" : track.stage === "skipped" ? "skip" : "info"} />
+        <section
+          className={`decision-note ${isProblem(track) ? "problem" : "review"} ${coverNeeded ? "cover-needed" : ""}`}
+        >
+          <Icon
+            name={
+              isProblem(track)
+                ? "alert"
+                : track.stage === "skipped"
+                  ? "skip"
+                  : coverNeeded
+                    ? "album"
+                    : "info"
+            }
+          />
           <div>
             <b>
               {isProblem(track)
@@ -187,13 +238,62 @@ export function TrackInspector({
                   ? "Duplicate input"
                   : hasRetryableArtwork(track)
                     ? "Cover download temporarily unavailable"
-                    : "Your review is needed"}
+                    : coverNeeded
+                      ? "A verified cover is required"
+                      : "Your review is needed"}
             </b>
             <p>
               {track.stage_message ||
                 friendlyTrackError(track) ||
                 "The available matches are too close to choose safely."}
             </p>
+            {coverNeeded && (
+              <div className="cover-search-actions">
+                <div className="cover-search-buttons">
+                  <button
+                    className="compact-button accent"
+                    disabled={coverBusy}
+                    onClick={() => void searchCover()}
+                  >
+                    {searchingCover ? (
+                      <span className="spinner" />
+                    ) : (
+                      <Icon name="refresh" size={15} />
+                    )}
+                    {searchingCover ? "Searching…" : "Search for cover art"}
+                  </button>
+                </div>
+                <label className="cover-url-field">
+                  <span>Or paste a cover URL</span>
+                  <span className="cover-url-row">
+                    <input
+                      value={coverUrl}
+                      onChange={(event) => setCoverUrl(event.target.value)}
+                      placeholder="HTTPS image, Shazam, Spotify, Genius, Radio Javan…"
+                      disabled={coverBusy}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void saveManualCover();
+                        }
+                      }}
+                    />
+                    <button
+                      className="compact-button accent"
+                      disabled={coverBusy || !coverUrl.trim()}
+                      onClick={() => void saveManualCover()}
+                    >
+                      {savingCover ? <span className="spinner" /> : <Icon name="check" size={15} />}
+                      {savingCover ? "Saving…" : "Use this cover"}
+                    </button>
+                  </span>
+                </label>
+                <small>
+                  Auto-search checks catalogs and covers already found for the same release. You can
+                  also paste an image or song-link cover URL.
+                </small>
+              </div>
+            )}
             {track.error && track.stage_message && (
               <details className="technical-error">
                 <summary>Technical details</summary>

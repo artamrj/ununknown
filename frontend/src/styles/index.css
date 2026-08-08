@@ -1261,6 +1261,30 @@ input:focus {
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+.cover-search-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.cover-search-actions small {
+  max-width: 46ch;
+  font-size: 10px;
+}
+.cover-search-actions .compact-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.decision-note.cover-needed {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+}
 .technical-error {
   margin-top: 4px;
 }

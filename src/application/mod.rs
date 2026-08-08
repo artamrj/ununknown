@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod artwork;
 pub mod canonical_names;
 pub mod input_dedup;
 pub mod metadata_completion;

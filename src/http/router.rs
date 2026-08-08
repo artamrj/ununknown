@@ -36,6 +36,10 @@ pub fn router() -> Router<Arc<AppState>> {
             axum::routing::put(handlers::update_artwork),
         )
         .route(
+            "/tracks/{id}/artwork/search",
+            post(handlers::search_artwork),
+        )
+        .route(
             "/tracks/{id}/artwork/preview",
             get(handlers::artwork_preview),
         )
