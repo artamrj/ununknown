@@ -10,12 +10,14 @@ pub async fn list_tracks(State(s): State<Arc<AppState>>) -> ApiResult<Json<Track
     .fetch_all(&s.pool)
     .await?;
     let total = tracks.len() as i64;
+    let by_track = queries::candidates_by_track(&s.pool).await?;
     let mut items = Vec::with_capacity(tracks.len());
     for track in tracks {
-        let candidates = queries::candidates(&s.pool, track.id)
-            .await?
+        let candidates = by_track
+            .get(&track.id)
             .into_iter()
-            .map(|candidate| candidate.value())
+            .flat_map(|rows| rows.iter())
+            .map(CandidateRow::value)
             .collect();
         items.push(WorkspaceTrack { track, candidates });
     }
@@ -345,12 +347,11 @@ pub async fn track_audio(
     let (start, end, status) = requested.map_or((0, total - 1, StatusCode::OK), |(start, end)| {
         (start, end, StatusCode::PARTIAL_CONTENT)
     });
-    let length = usize::try_from(end - start + 1)
-        .map_err(|_| ApiError::validation("requested audio range is too large"))?;
-    let mut file = tokio::fs::File::open(path).await?;
+    let length = end - start + 1;
+    let file = tokio::fs::File::open(path).await?;
+    let mut file = file;
     file.seek(std::io::SeekFrom::Start(start)).await?;
-    let mut bytes = vec![0_u8; length];
-    file.read_exact(&mut bytes).await?;
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file.take(length)));
 
     let mut response = axum::response::Response::builder()
         .status(status)
@@ -364,9 +365,7 @@ pub async fn track_audio(
             format!("bytes {start}-{end}/{total}"),
         );
     }
-    Ok(response
-        .body(axum::body::Body::from(bytes))
-        .map_err(anyhow::Error::from)?)
+    Ok(response.body(body).map_err(anyhow::Error::from)?)
 }
 
 fn parse_byte_range(

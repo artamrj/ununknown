@@ -17,11 +17,21 @@ struct PreparedApply {
 }
 
 pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    if s.workflow_running().await {
+    if !s
+        .try_claim_workflow(WorkflowPhase::Apply, "Writing corrected copies", false)
+        .await
+    {
         return Err(ApiError::conflict("workflow is already running"));
     }
-    let prepared = prepare_apply(&s).await?;
+    let prepared = match prepare_apply(&s).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            s.reset_workflow(WorkflowPhase::Idle, "Ready").await;
+            return Err(error);
+        }
+    };
     if prepared.selected_count == 0 {
+        s.reset_workflow(WorkflowPhase::Idle, "Ready").await;
         return Err(ApiError::validation(
             "No identified tracks are ready to write",
         ));
@@ -33,7 +43,6 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         duplicates_skipped,
         delete_source_after_write,
     } = prepared;
-    s.start_apply_workflow().await;
     let state = s.clone();
     tokio::spawn(async move {
         finish_apply_workflow(state, items, delete_source_after_write).await;
@@ -86,13 +95,15 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
 
     // Reapply release and identity rules at the last mutable boundary. This
     // also repairs ready-but-unwritten selections created by an older scan.
+    let by_track = queries::candidates_by_track(&s.pool).await?;
     for source in &mut sources {
         let track_id = source.track.id;
         let existing_album = source.track.current_album.clone();
         if let Some(candidate) = source.candidate.as_mut() {
-            let candidates = queries::candidates(&s.pool, track_id)
-                .await?
-                .iter()
+            let candidates = by_track
+                .get(&track_id)
+                .into_iter()
+                .flat_map(|rows| rows.iter())
                 .map(CandidateRow::value)
                 .collect::<Vec<_>>();
             crate::application::metadata_completion::complete(
@@ -297,7 +308,16 @@ pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize>
         return Ok(0);
     }
     let count = prepared.outputs;
-    s.start_automatic_apply_workflow().await;
+    if !s
+        .try_claim_workflow(
+            WorkflowPhase::Apply,
+            "Writing corrected copies automatically",
+            true,
+        )
+        .await
+    {
+        return Ok(0);
+    }
     if s.frontend_active_until().await.is_some() || s.workflow_cancelled().await {
         s.finish_workflow(
             WorkflowPhase::Idle,

@@ -62,3 +62,17 @@ pub(super) async fn candidates(pool: &sqlx::SqlitePool, id: TrackId) -> Result<V
             .await?,
     )
 }
+
+pub(super) async fn candidates_by_track(
+    pool: &sqlx::SqlitePool,
+) -> Result<std::collections::HashMap<TrackId, Vec<CandidateRow>>> {
+    let rows: Vec<CandidateRow> =
+        sqlx::query_as("SELECT * FROM candidates ORDER BY track_id, score DESC")
+            .fetch_all(pool)
+            .await?;
+    let mut by_track = std::collections::HashMap::<TrackId, Vec<CandidateRow>>::new();
+    for row in rows {
+        by_track.entry(row.track_id).or_default().push(row);
+    }
+    Ok(by_track)
+}

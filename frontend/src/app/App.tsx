@@ -57,6 +57,8 @@ export function App() {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   });
   const pollCount = useRef(0);
+  const lastPhaseRef = useRef<string>("");
+  const busy = workflow ? busyPhases.has(workflow.phase) : false;
 
   const loadTracks = useCallback(async () => {
     const page = await api<TrackPage>("/tracks?page_size=10000");
@@ -94,8 +96,15 @@ export function App() {
       const status = await api<Workflow>("/status");
       setWorkflow(status);
       setConnected(true);
-      pollCount.current += 1;
-      if (!busyPhases.has(status.phase) || pollCount.current % 3 === 0) await loadTracks();
+      const phase = status.phase;
+      const phaseChanged = lastPhaseRef.current !== phase;
+      lastPhaseRef.current = phase;
+      if (phaseChanged || !busyPhases.has(phase)) {
+        await loadTracks();
+      } else {
+        pollCount.current += 1;
+        if (pollCount.current % 6 === 0) await loadTracks();
+      }
     } catch (reason) {
       setConnected(false);
       setError((reason as Error).message);
@@ -127,10 +136,10 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (!workflow || !busyPhases.has(workflow.phase)) return;
+    if (!busy) return;
     const timer = window.setInterval(() => void refresh(), 900);
     return () => window.clearInterval(timer);
-  }, [workflow, refresh]);
+  }, [busy, refresh]);
 
   useEffect(() => {
     if (!notice) return;
@@ -175,6 +184,9 @@ export function App() {
       setKeys({});
       setSetup(await api<Setup>("/setup"));
       setConnected(true);
+    } catch (reason) {
+      setError((reason as Error).message);
+      throw reason;
     } finally {
       setSaving(false);
     }
@@ -241,7 +253,6 @@ export function App() {
     () => tracks.filter(hasRetryableArtwork).length,
     [tracks],
   );
-  const busy = workflow ? busyPhases.has(workflow.phase) : false;
 
   const autoApprove = async () => {
     setAutoApproving(true);

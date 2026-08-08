@@ -11,120 +11,8 @@ const DAILY_CACHE_CLEANUP_KEY: &str = "last_disposable_cache_cleanup";
 const MEDIA_CACHE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-const PRE_CONSOLIDATION_MIGRATIONS: &[(i64, &str)] = &[
-    (1, "init"),
-    (2, "v020"),
-    (3, "v030"),
-    (4, "previews"),
-    (5, "fingerprint cache"),
-    (6, "candidate release metadata"),
-    (7, "candidate sources"),
-];
-
-pub async fn connect(path: &str) -> Result<SqlitePool> {
-    if let Some(parent) = Path::new(path).parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let url = format!("sqlite://{path}?mode=rwc");
-    let options = SqliteConnectOptions::from_str(&url)?
-        .create_if_missing(true)
-        .foreign_keys(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(30));
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(30))
-        .connect_with(options)
-        .await?;
-    adopt_pre_consolidation_migration_history(&pool).await?;
-    MIGRATOR
-        .run(&pool)
-        .await
-        .context("database migration failed")?;
-    // Keep the legacy declaration referenced until the next schema change
-    // removes it; migration files are now the authoritative upgrade path.
-    debug_assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS tracks"));
-    restrict_database_permissions(path).await?;
-    Ok(pool)
-}
-
-/// Older releases used migrations 1 through 7 before the schema was
-/// consolidated into the current idempotent baseline. SQLx correctly refuses
-/// to mix those two histories, so recognize that exact released lineage and
-/// let the baseline adopt its already-compatible schema. Unknown histories are
-/// deliberately left untouched for SQLx to reject.
-async fn adopt_pre_consolidation_migration_history(pool: &SqlitePool) -> Result<()> {
-    let migration_table_exists: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
-    )
-    .fetch_one(pool)
-    .await?;
-    if migration_table_exists == 0 {
-        return Ok(());
-    }
-
-    let applied: Vec<(i64, String, i64)> = sqlx::query_as(
-        "SELECT version, description, success FROM _sqlx_migrations ORDER BY version",
-    )
-    .fetch_all(pool)
-    .await?;
-    let is_known_history = applied.len() == PRE_CONSOLIDATION_MIGRATIONS.len()
-        && applied.iter().zip(PRE_CONSOLIDATION_MIGRATIONS).all(
-            |((version, description, success), (expected_version, expected_description))| {
-                version == expected_version && description == expected_description && *success == 1
-            },
-        );
-    if !is_known_history {
-        return Ok(());
-    }
-
-    for required_table in [
-        "settings",
-        "tracks",
-        "candidates",
-        "provider_cache",
-        "fingerprint_cache",
-        "candidate_sources",
-    ] {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
-                .bind(required_table)
-                .fetch_one(pool)
-                .await?;
-        if exists == 0 {
-            anyhow::bail!(
-                "legacy migration history is present but required table {required_table} is missing"
-            );
-        }
-    }
-
-    let mut transaction = pool.begin().await?;
-    sqlx::query("DELETE FROM _sqlx_migrations")
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    tracing::info!(
-        "adopted pre-consolidation database migration history without deleting user data"
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-async fn restrict_database_permissions(path: &str) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .await
-        .with_context(|| format!("could not protect database file {path}"))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-async fn restrict_database_permissions(_path: &str) -> Result<()> {
-    Ok(())
-}
-
+/// Released pre-consolidation schema used only to build legacy fixtures in tests.
+#[cfg(test)]
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
 
@@ -260,6 +148,117 @@ CREATE INDEX IF NOT EXISTS candidates_track_id ON candidates(track_id);
 CREATE INDEX IF NOT EXISTS tracks_stage ON tracks(stage);
 CREATE INDEX IF NOT EXISTS candidate_sources_candidate_id ON candidate_sources(candidate_id);
 "#;
+
+const PRE_CONSOLIDATION_MIGRATIONS: &[(i64, &str)] = &[
+    (1, "init"),
+    (2, "v020"),
+    (3, "v030"),
+    (4, "previews"),
+    (5, "fingerprint cache"),
+    (6, "candidate release metadata"),
+    (7, "candidate sources"),
+];
+
+pub async fn connect(path: &str) -> Result<SqlitePool> {
+    if let Some(parent) = Path::new(path).parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let url = format!("sqlite://{path}?mode=rwc");
+    let options = SqliteConnectOptions::from_str(&url)?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(30));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect_with(options)
+        .await?;
+    adopt_pre_consolidation_migration_history(&pool).await?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .context("database migration failed")?;
+    restrict_database_permissions(path).await?;
+    Ok(pool)
+}
+
+/// Older releases used migrations 1 through 7 before the schema was
+/// consolidated into the current idempotent baseline. SQLx correctly refuses
+/// to mix those two histories, so recognize that exact released lineage and
+/// let the baseline adopt its already-compatible schema. Unknown histories are
+/// deliberately left untouched for SQLx to reject.
+async fn adopt_pre_consolidation_migration_history(pool: &SqlitePool) -> Result<()> {
+    let migration_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if migration_table_exists == 0 {
+        return Ok(());
+    }
+
+    let applied: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT version, description, success FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await?;
+    let is_known_history = applied.len() == PRE_CONSOLIDATION_MIGRATIONS.len()
+        && applied.iter().zip(PRE_CONSOLIDATION_MIGRATIONS).all(
+            |((version, description, success), (expected_version, expected_description))| {
+                version == expected_version && description == expected_description && *success == 1
+            },
+        );
+    if !is_known_history {
+        return Ok(());
+    }
+
+    for required_table in [
+        "settings",
+        "tracks",
+        "candidates",
+        "provider_cache",
+        "fingerprint_cache",
+        "candidate_sources",
+    ] {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(required_table)
+                .fetch_one(pool)
+                .await?;
+        if exists == 0 {
+            anyhow::bail!(
+                "legacy migration history is present but required table {required_table} is missing"
+            );
+        }
+    }
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("DELETE FROM _sqlx_migrations")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    tracing::info!(
+        "adopted pre-consolidation database migration history without deleting user data"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn restrict_database_permissions(path: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("could not protect database file {path}"))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn restrict_database_permissions(_path: &str) -> Result<()> {
+    Ok(())
+}
 
 pub async fn load_settings(pool: &SqlitePool, defaults: Config) -> Result<Config> {
     let db_path = defaults.db_path.clone();

@@ -33,6 +33,9 @@ pub struct ActivityLogEntry {
     message: String,
     detail: Option<String>,
     error: Option<String>,
+    attempt: Option<i64>,
+    duration_ms: Option<i64>,
+    context_json: Option<serde_json::Value>,
 }
 
 impl ActivityLogEntry {
@@ -48,6 +51,9 @@ impl ActivityLogEntry {
             message: message.into(),
             detail: None,
             error: None,
+            attempt: None,
+            duration_ms: None,
+            context_json: None,
         }
     }
 
@@ -71,15 +77,18 @@ impl ActivityLogEntry {
         self
     }
 
-    pub fn attempt(self, _attempt: i64) -> Self {
+    pub fn attempt(mut self, attempt: i64) -> Self {
+        self.attempt = Some(attempt);
         self
     }
 
-    pub fn duration_ms(self, _duration_ms: i64) -> Self {
+    pub fn duration_ms(mut self, duration_ms: i64) -> Self {
+        self.duration_ms = Some(duration_ms);
         self
     }
 
-    pub fn context(self, _context: serde_json::Value) -> Self {
+    pub fn context(mut self, context: serde_json::Value) -> Self {
+        self.context_json = Some(context);
         self
     }
 }
@@ -130,19 +139,35 @@ impl AppState {
         )
     }
 
+    /// Atomically claims the workflow slot unless one is already running.
+    /// The check and the phase transition share a single write lock, so two
+    /// racing requests can never both start a workflow.
+    pub async fn try_claim_workflow(
+        &self,
+        phase: WorkflowPhase,
+        message: impl Into<String>,
+        automatic: bool,
+    ) -> bool {
+        let mut workflow = self.workflow.write().await;
+        if matches!(
+            workflow.phase,
+            WorkflowPhase::Scan | WorkflowPhase::Fetch | WorkflowPhase::Apply
+        ) {
+            return false;
+        }
+        *workflow = Workflow {
+            phase,
+            message: message.into(),
+            automatic,
+            ..Default::default()
+        };
+        true
+    }
+
     pub async fn reset_workflow(&self, phase: WorkflowPhase, message: impl Into<String>) {
         *self.workflow.write().await = Workflow {
             phase,
             message: message.into(),
-            ..Default::default()
-        };
-    }
-
-    pub async fn reset_automatic_workflow(&self, phase: WorkflowPhase, message: impl Into<String>) {
-        *self.workflow.write().await = Workflow {
-            phase,
-            message: message.into(),
-            automatic: true,
             ..Default::default()
         };
     }
@@ -153,24 +178,6 @@ impl AppState {
 
     pub async fn workflow_cancelled(&self) -> bool {
         self.workflow.read().await.cancelled
-    }
-
-    pub async fn start_apply_workflow(&self) {
-        let mut workflow = self.workflow.write().await;
-        workflow.phase = WorkflowPhase::Apply;
-        workflow.message = "Writing corrected copies".into();
-        workflow.current = 0;
-        workflow.cancelled = false;
-        workflow.automatic = false;
-    }
-
-    pub async fn start_automatic_apply_workflow(&self) {
-        let mut workflow = self.workflow.write().await;
-        workflow.phase = WorkflowPhase::Apply;
-        workflow.message = "Writing corrected copies automatically".into();
-        workflow.current = 0;
-        workflow.cancelled = false;
-        workflow.automatic = true;
     }
 
     pub async fn finish_workflow(
@@ -277,6 +284,9 @@ impl AppState {
             file = entry.file,
             detail = entry.detail,
             error = entry.error,
+            attempt = entry.attempt,
+            duration_ms = entry.duration_ms,
+            context = ?entry.context_json,
             "{}",
             entry.message
         );
@@ -304,9 +314,38 @@ mod tests {
         assert!(state.frontend_active_until().await.is_some());
 
         state
-            .reset_automatic_workflow(WorkflowPhase::Scan, "Automatic scan")
+            .reset_workflow(WorkflowPhase::Scan, "Manual scan")
             .await;
         state.note_frontend_activity().await;
+        assert!(!state.workflow_cancelled().await);
+        assert!(state.frontend_active_until().await.is_some());
+
+        // A later automatic scan claims the workflow only after the manual
+        // scan is released, and frontend activity cancels it.
+        state.finish_workflow(WorkflowPhase::Idle, "idle", "done").await;
+        assert!(state
+            .try_claim_workflow(WorkflowPhase::Scan, "Automatic scan", true)
+            .await);
+        state.note_frontend_activity().await;
         assert!(state.workflow_cancelled().await);
+    }
+
+    #[tokio::test]
+    async fn claim_is_atomic_and_refuses_while_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("claim-atomic.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let state = AppState::new(Config::default(), pool);
+
+        assert!(state
+            .try_claim_workflow(WorkflowPhase::Scan, "First scan", false)
+            .await);
+        assert!(!state
+            .try_claim_workflow(WorkflowPhase::Apply, "Second workflow", false)
+            .await);
+        assert!(!state.try_claim_workflow(WorkflowPhase::Scan, "Third", true).await);
+        assert_eq!(state.workflow.read().await.phase, WorkflowPhase::Scan);
     }
 }

@@ -9,15 +9,24 @@ pub struct RetryIssuesResult {
 }
 
 pub async fn start_scan(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    if s.workflow_running().await {
+    if !s
+        .try_claim_workflow(WorkflowPhase::Scan, "Discovering music", false)
+        .await
+    {
         return Err(ApiError::conflict("identification is already running"));
     }
-    sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
-    sqlx::query("DELETE FROM automatic_scan_files")
-        .execute(&s.pool)
-        .await?;
-    s.reset_workflow(WorkflowPhase::Scan, "Discovering music")
-        .await;
+    if let Err(error) = async {
+        sqlx::query("DELETE FROM tracks").execute(&s.pool).await?;
+        sqlx::query("DELETE FROM automatic_scan_files")
+            .execute(&s.pool)
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await
+    {
+        s.reset_workflow(WorkflowPhase::Idle, "Ready").await;
+        return Err(error.into());
+    }
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(error) = scan_pipeline::run(state.clone()).await {
@@ -62,7 +71,10 @@ pub async fn stop_scan(State(s): State<Arc<AppState>>) -> Json<serde_json::Value
 }
 
 pub async fn retry_issues(State(s): State<Arc<AppState>>) -> ApiResult<Json<RetryIssuesResult>> {
-    if s.workflow_running().await {
+    if !s
+        .try_claim_workflow(WorkflowPhase::Fetch, "Checking files with issues", false)
+        .await
+    {
         return Err(ApiError::conflict(
             "Wait for the current scan or write operation to finish",
         ));
@@ -115,6 +127,7 @@ pub async fn retry_issues(State(s): State<Arc<AppState>>) -> ApiResult<Json<Retr
 
     let queued = available.len();
     if queued == 0 {
+        s.reset_workflow(WorkflowPhase::Idle, "Ready").await;
         return Ok(Json(RetryIssuesResult {
             started: false,
             queued,
@@ -122,8 +135,6 @@ pub async fn retry_issues(State(s): State<Arc<AppState>>) -> ApiResult<Json<Retr
         }));
     }
 
-    s.reset_workflow(WorkflowPhase::Fetch, "Checking files with issues")
-        .await;
     let state = s.clone();
     tokio::spawn(async move {
         if let Err(error) = recover_issue_files(state.clone(), available).await {
