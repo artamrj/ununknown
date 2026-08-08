@@ -1,0 +1,466 @@
+# Ununknown — Technical Overview & End-to-End Algorithm
+
+Ununknown is a single-user, local music metadata correction tool. It takes a folder
+of music, reads every audio file, verifies it can be decoded, identifies it through a
+cascade of online metadata providers, lets the user approve or correct uncertain
+matches, and writes corrected copies (with ReplayGain and verified cover art) into an
+output folder.
+
+This document describes how the whole system works: the components, the data model,
+and the exact algorithm the pipeline runs from first launch to final corrected file.
+
+---
+
+## 1. High-level architecture
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                          Browser (React SPA)                        │
+│   Setup / Scan button / Review queue / Inspector / Write dock       │
+└───────────────────────────────▲────────────────────────────────────┘
+                                │  local HTTP  (127.0.0.1:7331)
+┌───────────────────────────────┴────────────────────────────────────┐
+│                        Rust server (axum)                           │
+│  HTTP router  →  handlers  →  application services                  │
+│                                                                     │
+│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────────────┐  │
+│  │ scan_pipeline│  │ smart_approval│  │ metadata_completion      │  │
+│  │ input_dedup  │  │ canonical_names│  │ (merge + cover worker)   │  │
+│  └──────┬──────┘   └──────────────┘   └─────────────┬───────────┘  │
+│         │                                          │                │
+│  ┌──────┴───────────────────────────────────────────┴────────────┐  │
+│  │                    Infrastructure layer                         │  │
+│  │  media: audio reader · integrity · fingerprint · replaygain ·   │  │
+│  │         tag_writer · repair                                     │  │
+│  │  providers: 20+ metadata/audio sources (see §7)                 │  │
+│  │  db: SQLite + caches (fingerprint/integrity/replaygain/content) │  │
+│  └─────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+- **Frontend** (`frontend/`): a React SPA served by the same Rust process. It polls
+  `/api/status` and `/api/tracks` and renders the review workspace.
+- **Backend** (`src/`): Rust + axum + tokio + SQLite (`sqlx`). All heavy work
+  (audio decoding, fingerprinting, network lookups, tag writing) runs in workers with
+  bounded concurrency.
+- **Storage**: one SQLite database plus audio/tag caches. No external services are
+  required to run; metadata providers are queried over HTTP when configured/enabled.
+
+The API is deliberately small: `setup`, `status`, `identify`, `tracks`, `write`
+(`src/http/router.rs`). Production builds bind only to loopback and refuse
+non-loopback bind addresses because the API has intentional access to local paths
+(`src/main.rs:160`).
+
+---
+
+## 2. Data model
+
+SQLite schema is versioned in `migrations/` and applied at startup.
+
+| Table | Purpose |
+|---|---|
+| `tracks` | One row per input file: current tags, status, stage, content fingerprint, selected candidate, output path |
+| `candidates` | One row per metadata suggestion from a provider; full field set + `score` + `score_breakdown` (JSON) |
+| `candidate_sources` | Per-provider evidence rows for a candidate |
+| `provider_cache` | Keyed HTTP responses from metadata providers (disposable, cleared at midnight) |
+| `fingerprint_cache` | Chromaprint result keyed by path+size+mtime |
+| `integrity_cache` | Healthy/corrupt verdict keyed by path+size+mtime |
+| `replaygain_cache` | Track gain/peak keyed by path+size+mtime |
+| `content_hash_cache` | SHA-256 fallback for duplicate detection |
+| `artwork_overrides` | User-confirmed cover URL per path |
+| `automatic_scan_files` | Size+mtime snapshot so automatic scans only re-process changed files |
+| `settings` / `maintenance` | Key/value configuration |
+
+**Track lifecycle** (the `status`/`stage` columns drive the UI):
+
+```
+new/discovered → needs_review/review ──▶ selected/ready ──▶ applied (row deleted after write)
+                        │                        │
+                        ├─ duplicate/skipped     ├─ needs_review/review (returned, "Undo")
+                        ├─ corrupt/failed        └─ corrupt/failed
+                        └─ unmatched/review
+```
+
+---
+
+## 3. Startup sequence
+
+1. Resolve config (`UNUNKNOWN_*` env vars override saved settings), connect to
+   SQLite, run migrations, apply pending cleanup.
+2. Launch three background tasks (`src/main.rs`):
+   - **Midnight cleanup** — deletes disposable provider responses / downloaded artwork
+     while the app is idle.
+   - **Hourly media-cache limit** — enforces a shared 100 MiB budget on
+     fingerprint/integrity/ReplayGain caches (oldest first).
+   - **Automatic cleaning scheduler** — event-driven sleep until the next interval,
+     pauses while the frontend is open, resumes when the page closes.
+3. Start the HTTP server on loopback, serving `/api/*` and the built SPA.
+
+---
+
+## 4. The end-to-end algorithm (user journey)
+
+### Phase 0 — Setup
+
+The user picks an input folder and an output folder and optionally pastes provider
+credentials. Everything is stored in `settings` (credentials are stored there too,
+but can instead be supplied via environment variables so they never touch disk).
+
+### Phase 1 — Scan / identify (`POST /api/identify`)
+
+`scan_pipeline::run` (`src/application/scan_pipeline.rs:63`):
+
+1. Clear the previous workspace (`DELETE FROM tracks` + `automatic_scan_files`).
+2. Walk the input folder **off the async runtime** (`spawn_blocking`) and collect all
+   supported audio files, sorted by path.
+3. For each file, in parallel (limited by `metadata` + `fingerprint` semaphores):
+   - Read tags/audio properties with `audio::read`.
+   - Check decodability with `integrity::check` (cached).
+   - Compute a Chromaprint fingerprint (cached) or fall back to SHA-256.
+4. **Duplicate detection** runs before any network lookup (see §5).
+
+### Phase 2 — Per-track matching
+
+Each duplicate group is processed as one "file job" (`process_file` →
+`process`, `src/application/scan_pipeline.rs:744`). Two attempts are allowed per
+track; transient provider failures retry with backoff.
+
+For each member of the group:
+
+1. **Read metadata** — title/artist/album/etc. plus format, bitrate, duration.
+2. **Integrity check** — decode the stream. Corrupt files are marked `corrupt`,
+   blocked from writing, and counted as failed. (A later "check & fix" step can
+   salvage them via `media/repair.rs`.)
+3. **Fingerprint** — `fpcalc` via `fingerprint::calculate`, cached by
+   path+size+mtime. Failure is non-fatal; text/web sources still run.
+4. **Identify** — run the provider cascade (§7) and collect candidates.
+5. **Dedupe + sort candidates** by trust tier then score.
+6. **Smart auto-selection** (§6) decides whether to auto-approve.
+   - No candidates → `unmatched`, stays in Review with a human-readable reason.
+   - Candidates exist but fail the strict rules → stays in Review with the exact
+     reason (ambiguous release, conflicting album, duration mismatch, different
+     performer, etc.).
+   - A decision is made → run **metadata completion** (§8).
+7. **Metadata completion worker** merges missing fields only from *agreeing*
+   recordings and *compatible* releases, then verifies the actual cover image by
+   downloading it (§8). If title/artist/album/cover are still missing, the track
+   stays in Review instead of creating an incomplete identification.
+8. Persist the track + candidates + selected candidate. Matched tracks go to
+   **Ready**; everything else stays in **Review**.
+
+The whole scan stream is written through a single DB writer task
+(`db_writer`) so SQLite is only ever touched from one connection at a time.
+
+### Phase 3 — Review loop (human in the loop)
+
+Tracks that auto-selection refused stay in Review (`stage='review'`). The user can:
+
+- **Choose a candidate** (`POST /api/tracks/{id}/choose`) — re-runs completion +
+  cover verification for that candidate; becomes Ready only if core fields complete.
+- **Smart auto-select** (`POST /api/tracks/auto-approve`) — bulk-runs the same
+  `smart_approval::select` + completion + cover pipeline over all Review items.
+  Ambiguous/low-confidence ones stay in Review.
+- **Edit manually** (`PUT /api/tracks/{id}/manual`) — free-form editor; pasting a
+  Shazam/Spotify/YouTube/etc. song link can auto-fill fields via
+  `/api/source/resolve`. Creates a `manual` candidate (score 100).
+- **Update artwork** (`PUT /api/tracks/{id}/artwork`) — accepts a cover URL or a
+  supported song link, verifies the downloaded image, records an `artwork_overrides`
+  row so the choice survives future rescans.
+- **Undo identification** (`POST /api/tracks/{id}/review`) — clears the selected
+  candidate without deleting saved candidates.
+- **Remove the file** (`DELETE /api/tracks/{id}`) — deletes the source file *only if*
+  it resolves inside the configured input folder, and promotes the best remaining
+  duplicate input if one exists.
+- **Check & fix issues** (`POST /api/tracks/retry-issues`) — re-runs the pipeline on
+  `corrupt`/`failed`/`provider_error`/missing/retryable-cover tracks. Corrupt files
+  first go through `repair::repair`, which skips unreadable frames, re-encodes the
+  valid audio, and keeps the damaged original as a `.ununknown-damaged` backup.
+
+### Phase 4 — Write corrected files (`POST /api/write`)
+
+`apply.rs` (`src/http/handlers/apply.rs`):
+
+1. **Prepare** (`prepare_apply`): load every `stage='ready'` track with its selected
+   candidate, re-run completion/canonicalization at this last mutable boundary,
+   re-group by recording evidence, pick one representative per group (promoting the
+   best *available* input if the selected one is missing), and compute each
+   destination filename. Duplicates become `DuplicateSource` entries on the item.
+2. **Per output** (`apply`, `apply.rs:622`):
+   - **ReplayGain** — measure loudness with `replaygain::get_or_analyze` (cached).
+     Failure never blocks the write.
+   - **Artwork** — `resolve_artwork` downloads the verified cover (cached). If it is
+     gone, the track returns to Review (`return_track_for_cover`).
+   - **Copy to a temporary file** in the destination directory
+     (`.Name.ununknown-{id}.ext`).
+   - **Write tags** — `tag_writer::write_resilient` with ReplayGain tags, then
+     `verify_written_metadata` and `verify_embedded_artwork`. Malformed legacy tags
+     are removed with a lossless stream-copy and retried. Bounded by the
+     `tag_writes` semaphore.
+   - **Publish atomically** — `publish_no_clobber` (§9). Existing outputs are never
+     overwritten or bulk-deleted; identical audio reuses an existing file instead of
+     numbering.
+   - **Optional source removal** — when `delete_source_after_write` is on, the
+     original is deleted only *after* the corrected output exists. Safeguards refuse
+     removal if input and output resolve to the same file.
+   - Duplicate sources are finished the same way (`finish_duplicate`).
+   - On success the `tracks` row is deleted (the job is done).
+
+### Phase 5 — Automatic cleaning (optional)
+
+Enabled by default every 5 minutes (`Settings → Automatic cleaning`). The scheduler
+in `main.rs:79` sleeps between deadlines and wakes only on config change or an
+automatic workflow completing. Each cycle:
+
+1. Skips entirely while the frontend is open (`frontend_active_until`) or a workflow
+   is running.
+2. `scan_pipeline::run_automatic` walks the folder and compares each file's
+   size+mtime against `automatic_scan_files` — unchanged files are skipped without
+   decoding audio or touching providers.
+3. Only strictly matched, complete tracks are written
+   (`apply_ready_automatically`). Review candidates are never auto-approved.
+
+---
+
+## 5. Duplicate detection algorithm
+
+`input_dedup::group_recordings` (`src/application/input_dedup.rs:51`) groups input
+files using **proof-only evidence** (never title similarity):
+
+- **Exact SHA-256** (`sha256:` key) — definitive, unioned unconditionally.
+- **Chromaprint fingerprint** (`fp:` key) — unioned only when durations match within
+  ±3 seconds.
+- **ISRC** — unioned only when the 12-character normalized ISRC matches *and*
+  durations are within ±3 seconds.
+
+Group membership is computed with a disjoint-set union; within each group the
+representative is the **best-quality** file: lossless formats first, then higher
+bitrate, then stable path order (`compare_quality`).
+
+Only the representative is matched online and produces one corrected output; the
+others are recorded as `duplicate/skipped` and later collapsed into that single
+output. Different audio, remixes, live versions, and materially different durations
+never union, so they remain separate and receive numbered filenames when corrected
+names collide.
+
+The same grouping is re-run at **apply time** (over `RecordingEvidence` built from
+the DB) so the workspace and the write queue always agree.
+
+---
+
+## 6. Smart auto-selection
+
+`smart_approval::rank` (`src/application/smart_approval.rs:51`) scores every
+candidate instead of blindly trusting the raw provider score:
+
+**Score components** (weighted sum):
+
+| Signal | Weight / effect |
+|---|---|
+| Title similarity (normalized Levenshtein) | ×28 (or 21 if no existing title) |
+| Artist similarity | ×18 (or 15 if no existing artist) |
+| Duration delta | +16 (≤3s), +13 (≤8s), +7 (≤15s), +1 (≤30s), −14 (>30s) |
+| Album match to existing tag | similarity ×18, −8 if conflicting |
+| Metadata completeness | album, cover, year, track no., genre, album artist, ISRC |
+| Multi-source agreement | up to +15 |
+| Provider trust | 0–5 |
+| Audio recognition bonus | +15 |
+| Original album year bonus | +4 |
+| Version tags (live/remix/acoustic/…) | −22 per unexpected, −16 per missing |
+| Compilation penalty | −7 |
+
+**Decision rules** — a candidate is auto-approved only when:
+- It is *supported*: recognized by audio, corroborated by ≥2 sources, or an exact
+  catalog match (credible provider + ≥0.90/≥0.82 title/artist + close duration).
+- Its total is ≥ 68, and no *different* recording is within 12 points (ties with the
+  same recording are tolerated; `same_recording` compares ISRC/version-tags/title).
+- Its version tags match the filename's version tags.
+
+Tracks that fail stay in Review with a specific human reason (this is why "Auto
+approve" never writes a questionable release, a duet over a plain recording, a
+stripped version over an album version, or a wrong album).
+
+---
+
+## 7. Provider cascade (identification)
+
+`scan_pipeline::identify` (`src/application/scan_pipeline.rs:1113`) runs a staged
+cascade. Order matters — cheap/free/authoritative sources run first, expensive or
+optional ones only when needed:
+
+1. **AcoustID** (fingerprint lookup) → returns MusicBrainz recordings.
+2. **YouTube Data API** — only if a filename contains an exact video ID.
+3. **MusicBrainz text search** (title/artist).
+4. **Apple Music (iTunes)**, **Deezer**, **Radio Javan**, **Audiomack**, **Navahang**
+   — free catalogs, good for Persian + international music.
+5. **Genius** — only when enrichment is still needed.
+6. **SongRec / Shazam** (audio recognition) — only when AcoustID found nothing and
+   no ≥90-score candidate exists; recognition is serialized (max 2 concurrent) and
+   cached. Its artist/title is then **fed back through the catalogs** to find album,
+   artwork, credits, release info, ISRC.
+7. **AudD** — only if SongRec also failed (needs a token).
+8. **Spotify** — ISRC cross-check plus release/artwork/track-number enrichment.
+9. **SoundCloud** (needs credentials), then **Discogs**, **Last.fm**,
+   **TheAudioDB**, **Wikidata** (also supplies artist genres).
+
+Post-processing per track:
+- Credits are normalized (`canonical_names`, `domain/credits`).
+- Candidates are canonicalized (alias/prefer-latin names).
+- **Source agreement** (`apply_source_agreement`) boosts corroborating rows.
+- Artwork fallbacks + `artwork_overrides` are applied.
+- Genres are enriched from Wikidata artist lookups when needed.
+- The `score` stored per candidate is the final blended score with a JSON
+  `score_breakdown` (sources, duration delta, audio-recognition flag, artwork list).
+
+All HTTP goes through `resilient_http` (timeouts, retries) and a
+`provider_cache`; MusicBrainz requests are rate-limited to one per second.
+
+---
+
+## 8. Metadata completion & cover verification
+
+`metadata_completion::complete` (`src/application/metadata_completion.rs:32`):
+
+1. Collect **agreeing recordings** (same ISRC, or same version tags + ≥0.90 title +
+   ≥0.82 artist + compatible duration), ranked by donor quality.
+2. **Never replace** a field that already has a value — only fill missing ones.
+3. Copy release-specific fields (album, album artist, track/disc number, dates,
+   label, country) **only from albums compatible with the chosen release** so a
+   compilation can't silently change the original release.
+4. Normalize release fields: `Single`/`EP` naming and album artist defaults.
+5. `audit` produces a weighted completeness score and a `core_complete` flag
+   (title, artist, album, **verified cover**).
+
+**Cover verification** (`ensure_usable_cover`, `metadata_completion.rs:252`):
+- Collect every artwork candidate (catalog URL + breakdown URLs), ordered by
+  provider priority.
+- Each candidate must *match the selected release* (release ID, ISRC+album, or
+  compatible album+artist) unless user-confirmed.
+- Download and validate the actual image (`cover_art_archive`), preferring release
+  ID matches. On temporary failures (timeout/429/5xx) mark `retryable_error` so the
+  retry-issues flow can recover. If nothing verifies, try Deezer-by-ISRC + fresh
+  iTunes/Deezer searches once, then declare the cover missing (`cover_required`).
+
+Only `core_complete` tracks reach the write queue.
+
+---
+
+## 9. Atomic, no-clobber publication
+
+`publish_no_clobber` (`src/http/handlers/apply.rs:544`):
+
+1. `fsync` the finished temporary file.
+2. List existing destination variants (`Name.ext`, `Name (2).ext`, …).
+3. If an existing output is **equivalent audio** (same file size + SHA-256, or same
+   Chromaprint fingerprint + ≤3s duration), reuse it and delete the temporary —
+   never creating a numbered copy.
+4. Otherwise create a **hard link** from the temporary to the next free numbered
+   destination. `AlreadyExists` bumps the number. The source of the write is
+   excluded from equivalence checks so re-running your own output isn't mistaken for
+   a different recording.
+
+This makes publication atomic, never clobbers existing files, and never creates
+needless duplicates.
+
+---
+
+## 10. Concurrency, rate limiting, and lifecycle
+
+Bounded concurrency lives in `AppState` and `PipelineLimits`:
+
+| Resource | Limit |
+|---|---|
+| `scan_workers` (tag readers / scan jobs) | configurable, default 6 |
+| `fingerprint_workers` | default 3 |
+| `lookup_workers` (metadata lookups + artwork downloads) | default 3 |
+| SongRec recognition | hard cap 2 |
+| `write_workers` (tag writes) | default 2 |
+| MusicBrainz HTTP | 1 req/s |
+
+- A single DB **writer task** serializes persistence during scans; apply uses
+  per-operation transactions.
+- **Cancellation**: `POST /api/stop` sets a `cancelled` flag that every worker checks
+  at safe boundaries; SIGTERM/Ctrl+C asks the active workflow to stop, waits up to
+  30 s, drains HTTP, and closes SQLite.
+- **Frontend coordination**: the SPA POSTs `/api/activity` every 30 s. While the
+  page is open, automatic cleaning is suspended and an in-flight automatic cycle is
+  cancelled at its next safe boundary, keeping background work out of active review
+  sessions.
+
+---
+
+## 11. Caching summary
+
+| Cache | Key | Invalidated by |
+|---|---|---|
+| `provider_cache` | provider + search key | expiry (disposable, midnight cleanup) |
+| `fingerprint_cache` | path + size + mtime | file change / cache-limit eviction |
+| `integrity_cache` | path + size + mtime | explicit retry deletes the row |
+| `replaygain_cache` | path + size + mtime(ns) | file change |
+| `content_hash_cache` | path + size + mtime(ns) | file change |
+| `artwork_overrides` | path | overwritten when user confirms new cover |
+
+Fingerprint/integrity/ReplayGain caches share a 100 MiB budget; the oldest entries
+are evicted first (checked at startup and hourly while idle).
+
+---
+
+## 12. API reference
+
+| Method & path | Purpose |
+|---|---|
+| `GET  /api/setup` | Read current config |
+| `PUT  /api/setup` | Save folders, automatic-cleaning settings, provider keys |
+| `GET  /api/status` | Workflow phase/progress + matched/review/failed counts |
+| `POST /api/activity` | Heartbeat; cancels automatic work while UI is open |
+| `POST /api/identify` | Clear workspace, scan + identify everything |
+| `POST /api/stop` | Cancel current scan/write at a safe boundary |
+| `GET  /api/tracks` | All tracks + candidates |
+| `DELETE /api/tracks/{id}` | Remove a review file from disk (input folder only) |
+| `POST /api/tracks/retry-issues` | Repair + re-run failed/corrupt/retryable tracks |
+| `POST /api/tracks/auto-approve` | Bulk smart auto-select over Review |
+| `GET  /api/tracks/{id}/audio` | Range-stream the source file for playback |
+| `POST /api/tracks/{id}/choose` | Accept a candidate |
+| `POST /api/tracks/{id}/review` | Undo identification (back to Review) |
+| `PUT  /api/tracks/{id}/manual` | Save a manually entered candidate |
+| `PUT  /api/tracks/{id}/artwork` | Set + verify a cover URL / song link |
+| `POST /api/source/resolve` | Resolve a Shazam/Spotify/YouTube/… link to metadata |
+| `GET  /api/candidates/{id}/artwork/preview`, etc. | Artwork previews |
+| `POST /api/write` | Write all Ready tracks to the output folder |
+
+---
+
+## 13. Key source files
+
+| Area | File |
+|---|---|
+| Entry point, startup tasks, graceful shutdown | `src/main.rs` |
+| HTTP routes / API contract | `src/http/router.rs`, `src/http/handlers/*` |
+| Scan + identify pipeline | `src/application/scan_pipeline.rs` |
+| Duplicate detection | `src/application/input_dedup.rs` |
+| Smart auto-selection | `src/application/smart_approval.rs` |
+| Metadata completion + cover worker | `src/application/metadata_completion.rs` |
+| Apply / write / publish | `src/http/handlers/apply.rs` |
+| Review handlers | `src/http/handlers/tracks.rs`, `src/http/handlers/scan.rs` |
+| Audio read / integrity / fingerprint / replaygain / tag write / repair | `src/infrastructure/media/*` |
+| Provider integrations | `src/infrastructure/providers/*` |
+| App state, workflow, limits | `src/app/state.rs` |
+| Configuration | `src/config.rs` |
+| SQLite schema | `migrations/*.sql` |
+| React UI | `frontend/src/app/App.tsx` |
+
+---
+
+## 14. Summary flow
+
+```
+Setup → Scan & identify
+  ├─ walk folder → read tags → integrity check → fingerprint → dedup group
+  ├─ provider cascade → candidates → smart auto-select
+  │     ├─ auto-approved → metadata completion → cover verified → READY
+  │     └─ uncertain/unmatched/corrupt → REVIEW
+  └─ (automatic mode: only new/changed files, only strict matches)
+Review → choose / auto-select / manual / source-link / artwork / retry-issues
+  └─ core_complete → READY
+Write → per track: ReplayGain → resolve cover → copy to temp → write+verify tags
+      → atomic no-clobber publish → (optional) remove original → delete row
+```
