@@ -1,7 +1,6 @@
 export type Setup = {
   input_dir: string;
   output_dir: string;
-  delete_source_after_write: boolean;
   automatic_scan_enabled: boolean;
   automatic_scan_interval_minutes: number;
   sources: Record<string, boolean>;

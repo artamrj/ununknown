@@ -31,7 +31,6 @@ import {
 const emptySetup: Setup = {
   input_dir: "",
   output_dir: "",
-  delete_source_after_write: false,
   automatic_scan_enabled: true,
   automatic_scan_interval_minutes: 5,
   sources: {},
@@ -137,7 +136,6 @@ export function App() {
         body: JSON.stringify({
           input_dir: editableSetup.input_dir,
           output_dir: editableSetup.output_dir,
-          delete_source_after_write: editableSetup.delete_source_after_write,
           automatic_scan_enabled: editableSetup.automatic_scan_enabled,
           automatic_scan_interval_minutes: editableSetup.automatic_scan_interval_minutes,
           acoustid_key: keys.acoustid || undefined,
@@ -287,13 +285,6 @@ export function App() {
   };
 
   const write = async () => {
-    if (
-      setup.delete_source_after_write &&
-      !confirm(
-        "Corrected files will be written first. Each original will then be permanently removed only after its output succeeds. Continue?",
-      )
-    )
-      return;
     setError("");
     try {
       await saveSetup();
@@ -707,7 +698,6 @@ export function App() {
         workflow={workflow}
         counts={counts}
         busy={busy}
-        deleteSources={setup.delete_source_after_write}
         onStop={() => void stop()}
         onWrite={() => void write()}
       />

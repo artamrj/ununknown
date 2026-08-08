@@ -5,14 +5,12 @@ export function ProcessingDock({
   workflow,
   counts,
   busy,
-  deleteSources,
   onStop,
   onWrite,
 }: {
   workflow?: Workflow;
   counts: { review: number; ready: number; problems: number; completed: number };
   busy: boolean;
-  deleteSources: boolean;
   onStop: () => void;
   onWrite: () => void;
 }) {
@@ -80,9 +78,9 @@ export function ProcessingDock({
             Write {counts.ready} {counts.ready === 1 ? "file" : "files"}
           </button>
         )}
-        <span className={deleteSources ? "delete-note" : "safe-note"}>
-          <Icon name={deleteSources ? "trash" : "shield"} size={14} />
-          {deleteSources ? "Originals removed after success" : "Originals stay untouched"}
+        <span className="safe-note">
+          <Icon name="shield" size={14} />
+          Originals stay untouched
         </span>
       </div>
     </footer>

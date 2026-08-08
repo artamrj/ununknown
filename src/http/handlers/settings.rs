@@ -11,7 +11,6 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "input_dir": cfg.input_dir,
         "output_dir": cfg.output_dir,
-        "delete_source_after_write": cfg.delete_source_after_write,
         "automatic_scan_enabled": cfg.automatic_scan_enabled,
         "automatic_scan_interval_minutes": cfg.automatic_scan_interval_minutes,
         "sources": {
@@ -59,19 +58,8 @@ pub async fn update_setup(
     tokio::fs::create_dir_all(output_dir).await?;
 
     let mut cfg = s.config.read().await.clone();
-    let input_path = tokio::fs::canonicalize(input_dir).await?;
-    let output_path = tokio::fs::canonicalize(output_dir).await?;
-    let delete_source_after_write = body
-        .delete_source_after_write
-        .unwrap_or(cfg.delete_source_after_write);
-    if delete_source_after_write && input_path == output_path {
-        return Err(ApiError::validation(
-            "Input and output folders must be different when source removal is enabled",
-        ));
-    }
     cfg.input_dir = input_dir.into();
     cfg.output_dir = output_dir.into();
-    cfg.delete_source_after_write = delete_source_after_write;
     cfg.automatic_scan_enabled = body
         .automatic_scan_enabled
         .unwrap_or(cfg.automatic_scan_enabled);

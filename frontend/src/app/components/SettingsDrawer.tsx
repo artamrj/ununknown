@@ -57,31 +57,6 @@ export function SettingsDrawer({
             </label>
           </section>
           <section>
-            <h3>Original files</h3>
-            <label className={`danger-toggle ${setup.delete_source_after_write ? "enabled" : ""}`}>
-              <input
-                type="checkbox"
-                checked={setup.delete_source_after_write}
-                onChange={(event) =>
-                  setSetup({ ...setup, delete_source_after_write: event.target.checked })
-                }
-              />
-              <span className="toggle-ui" />
-              <span>
-                <b>
-                  {setup.delete_source_after_write
-                    ? "Remove processed inputs and duplicates"
-                    : "Preserve originals"}
-                </b>
-                <small>
-                  {setup.delete_source_after_write
-                    ? "Sources, including duplicate inputs, are removed only after one corrected output succeeds."
-                    : "Recommended. Corrected files are written as separate copies."}
-                </small>
-              </span>
-            </label>
-          </section>
-          <section>
             <h3>Automatic cleaning</h3>
             <label className={`automation-toggle ${setup.automatic_scan_enabled ? "enabled" : ""}`}>
               <input
