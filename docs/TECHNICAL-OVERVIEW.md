@@ -14,27 +14,27 @@ and the exact algorithm the pipeline runs from first launch to final corrected f
 ## 1. High-level architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                          Browser (React SPA)                        │
-│   Setup / Scan button / Review queue / Inspector / Write dock       │
-└───────────────────────────────▲────────────────────────────────────┘
-                                │  local HTTP  (127.0.0.1:7331)
-┌───────────────────────────────┴────────────────────────────────────┐
-│                        Rust server (axum)                           │
-│  HTTP router  →  handlers  →  application services                  │
-│                                                                     │
-│  ┌─────────────┐   ┌──────────────┐   ┌─────────────────────────┐  │
-│  │ scan_pipeline│  │ smart_approval│  │ metadata_completion      │  │
-│  │ input_dedup  │  │ canonical_names│  │ (merge + cover worker)   │  │
-│  └──────┬──────┘   └──────────────┘   └─────────────┬───────────┘  │
-│         │                                          │                │
-│  ┌──────┴───────────────────────────────────────────┴────────────┐  │
-│  │                    Infrastructure layer                         │  │
-│  │  media: audio reader · integrity · fingerprint · replaygain ·   │  │
-│  │         tag_writer · repair                                     │  │
-│  │  providers: 20+ metadata/audio sources (see §7)                 │  │
-│  │  db: SQLite + caches (fingerprint/integrity/replaygain/content) │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
+┌──────────────────────────────────────────────────────────────────────┐
+│                         Browser (React SPA)                          │
+│Setup / Scan button / Review queue / Inspector / Write dock           │
+└──────────────────────────────────▲───────────────────────────────────┘
+                                   │  local HTTP  (127.0.0.1:7331)
+┌──────────────────────────────────┴───────────────────────────────────┐
+│                          Rust server (axum)                          │
+│HTTP router  →  handlers  →  application services                     │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────┐     │
+│  │ scan (run · process · providers · persist)                  │     │
+│  │ input_dedup · smart_approval · metadata_completion · apply  │     │
+│  └──────────────────────────────┬──────────────────────────────┘     │
+│                                  │                                   │
+│  ┌──────────────────────────────┴───────────────────────────────┐    │
+│  │  Infrastructure layer                                        │    │
+│  │  media: audio reader · integrity · fingerprint · replaygain ·│    │
+│  │         tag_writer · repair                                  │    │
+│  │  providers: 20+ metadata/audio sources (see §7)              │    │
+│  │  db: SQLite + repository (tracks/candidates) + caches        │    │
+│  └──────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -108,7 +108,7 @@ but can instead be supplied via environment variables so they never touch disk).
 
 ### Phase 1 — Scan / identify (`POST /api/identify`)
 
-`scan_pipeline::run` (`src/application/scan_pipeline.rs:63`):
+`scan::run` (`src/application/scan/mod.rs:39`):
 
 1. Clear the previous workspace (`DELETE FROM tracks` + `automatic_scan_files`).
 2. Walk the input folder **off the async runtime** (`spawn_blocking`) and collect all
@@ -121,8 +121,8 @@ but can instead be supplied via environment variables so they never touch disk).
 
 ### Phase 2 — Per-track matching
 
-Each duplicate group is processed as one "file job" (`process_file` →
-`process`, `src/application/scan_pipeline.rs:744`). Two attempts are allowed per
+Each duplicate group is processed as one "file job" (`scan::process::process_file` →
+`process`, `src/application/scan/process.rs:3`). Two attempts are allowed per
 track; transient provider failures retry with backoff.
 
 For each member of the group:
@@ -149,7 +149,8 @@ For each member of the group:
    **Ready**; everything else stays in **Review**.
 
 The whole scan stream is written through a single DB writer task
-(`db_writer`) so SQLite is only ever touched from one connection at a time.
+(`scan::persist::db_writer`, `src/application/scan/persist.rs:56`) so SQLite is only
+ever touched from one connection at a time.
 
 ### Phase 3 — Review loop (human in the loop)
 
@@ -180,14 +181,15 @@ Tracks that auto-selection refused stay in Review (`stage='review'`). The user c
 
 ### Phase 4 — Write corrected files (`POST /api/write`)
 
-`apply.rs` (`src/http/handlers/apply.rs`):
+The **apply service** (`src/application/apply.rs`, reached from the HTTP endpoint in
+`src/http/handlers/apply.rs`):
 
 1. **Prepare** (`prepare_apply`): load every `stage='ready'` track with its selected
    candidate, re-run completion/canonicalization at this last mutable boundary,
    re-group by recording evidence, pick one representative per group (promoting the
    best *available* input if the selected one is missing), and compute each
    destination filename. Duplicates become `DuplicateSource` entries on the item.
-2. **Per output** (`apply`, `apply.rs:622`):
+2. **Per output** (`apply`, `apply.rs:722`):
    - **ReplayGain** — measure loudness with `replaygain::get_or_analyze` (cached).
      Failure never blocks the write.
    - **Artwork** — `resolve_artwork` retries the cover download at write time
@@ -217,7 +219,8 @@ automatic workflow completing. Each cycle:
 
 1. Skips entirely while the frontend is open (`frontend_active_until`) or a workflow
    is running.
-2. `scan_pipeline::run_automatic` walks the folder and compares each file's
+2. `scan::run_automatic` (`src/application/scan/mod.rs:91`) walks the folder and
+   compares each file's
    size+mtime against `automatic_scan_files` — unchanged files are skipped without
    decoding audio or touching providers.
 3. Only strictly matched, complete tracks are written
@@ -287,9 +290,9 @@ stripped version over an album version, or a wrong album).
 
 ## 7. Provider cascade (identification)
 
-`scan_pipeline::identify` (`src/application/scan_pipeline.rs:1113`) runs a staged
-cascade. Order matters — cheap/free/authoritative sources run first, expensive or
-optional ones only when needed:
+`scan::providers::identify` (`src/application/scan/providers.rs:3`) runs a staged
+cascade — the "catalog runner". Order matters — cheap/free/authoritative sources run
+first, expensive or optional ones only when needed:
 
 1. **AcoustID** (fingerprint lookup) → returns MusicBrainz recordings.
 2. **YouTube Data API** — only if a filename contains an exact video ID.
@@ -355,7 +358,7 @@ silent auto-approval.
 
 ## 9. Atomic, no-clobber publication
 
-`publish_no_clobber` (`src/http/handlers/apply.rs:544`):
+`publish_no_clobber` (`src/application/apply.rs:644`):
 
 1. `fsync` the finished temporary file.
 2. List existing destination variants (`Name.ext`, `Name (2).ext`, …).
@@ -374,7 +377,8 @@ needless duplicates.
 
 ## 10. Concurrency, rate limiting, and lifecycle
 
-Bounded concurrency lives in `AppState` and `PipelineLimits`:
+Bounded concurrency lives in `AppState` (`src/app/state.rs`) and
+`scan::PipelineLimits` (`src/application/scan/mod.rs:532`):
 
 | Resource | Limit |
 |---|---|
@@ -444,15 +448,17 @@ are evicted first (checked at startup and hourly while idle).
 |---|---|
 | Entry point, startup tasks, graceful shutdown | `src/main.rs` |
 | HTTP routes / API contract | `src/http/router.rs`, `src/http/handlers/*` |
-| Scan + identify pipeline | `src/application/scan_pipeline.rs` |
+| Scan + identify pipeline (walk, file jobs, cascade, DB writer) | `src/application/scan/` (`mod.rs`, `process.rs`, `providers.rs`, `persist.rs`, `score.rs`) |
+| Catalog runner (provider cascade) | `src/application/scan/providers.rs` |
 | Duplicate detection | `src/application/input_dedup.rs` |
 | Smart auto-selection | `src/application/smart_approval.rs` |
 | Metadata completion + cover worker | `src/application/metadata_completion.rs` |
-| Apply / write / publish | `src/http/handlers/apply.rs` |
-| Review handlers | `src/http/handlers/tracks.rs`, `src/http/handlers/scan.rs` |
+| Apply service (prepare / write / publish) | `src/application/apply.rs` (+ endpoint `src/http/handlers/apply.rs`) |
+| Review / scan / workspace handlers | `src/http/handlers/tracks.rs`, `scan.rs`, `workspace.rs`, `queries.rs` |
+| Repository (track + candidate types and queries) | `src/infrastructure/db/tracks.rs` |
 | Audio read / integrity / fingerprint / replaygain / tag write / repair | `src/infrastructure/media/*` |
 | Provider integrations | `src/infrastructure/providers/*` |
-| App state, workflow, limits | `src/app/state.rs` |
+| App state, workflow, limits | `src/app/state.rs`, `src/application/scan/mod.rs` |
 | Configuration | `src/config.rs` |
 | SQLite schema | `migrations/*.sql` |
 | React UI | `frontend/src/app/App.tsx` |

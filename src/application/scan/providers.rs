@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) async fn identify(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
@@ -106,7 +105,8 @@ pub(crate) async fn identify(
     apply_artwork_override(&state.pool, path, &mut out).await?;
     let artist_genres = if crate::domain::genre::needs_artist_lookup(&out, catalog_info) {
         if let Some(artist) = catalog_info.artist.as_deref() {
-            match infra_providers::wikidata::artist_genres(&state.pool, &state.client, artist).await {
+            match infra_providers::wikidata::artist_genres(&state.pool, &state.client, artist).await
+            {
                 Ok(genres) => genres,
                 Err(error) => {
                     state
@@ -396,8 +396,13 @@ pub(crate) async fn query_youtube(
         return Vec::new();
     }
     let started = Instant::now();
-    match infra_providers::youtube::lookup_filename_id(&state.pool, &state.client, api_key, filename)
-        .await
+    match infra_providers::youtube::lookup_filename_id(
+        &state.pool,
+        &state.client,
+        api_key,
+        filename,
+    )
+    .await
     {
         Ok(mut candidates) => {
             for candidate in &mut candidates {
@@ -472,8 +477,6 @@ pub(crate) async fn query_spotify(
     }
 }
 
-
-
 pub(crate) async fn query_itunes(
     state: &Arc<AppState>,
     cfg: &crate::config::Config,
@@ -517,7 +520,8 @@ pub(crate) async fn query_itunes(
             let mut alias_info = current.clone();
             alias_info.artist = Some(alias.clone());
             let Ok(mut alias_candidates) =
-                infra_providers::itunes::search(&state.pool, &state.client, "", Some(&alias), None).await
+                infra_providers::itunes::search(&state.pool, &state.client, "", Some(&alias), None)
+                    .await
             else {
                 continue;
             };
@@ -562,7 +566,6 @@ pub(crate) async fn query_deezer(
     .await
 }
 
-
 pub(crate) async fn query_radiojavan(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
@@ -593,7 +596,6 @@ pub(crate) async fn query_radiojavan(
     )
     .await
 }
-
 
 pub(crate) async fn query_audiomack(
     state: &Arc<AppState>,
@@ -626,7 +628,6 @@ pub(crate) async fn query_audiomack(
     .await
 }
 
-
 pub(crate) async fn query_navahang(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
@@ -658,7 +659,6 @@ pub(crate) async fn query_navahang(
     .await
 }
 
-
 pub(crate) async fn query_genius(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
@@ -689,7 +689,6 @@ pub(crate) async fn query_genius(
     )
     .await
 }
-
 
 pub(crate) fn needs_genius_enrichment(candidates: &[infra_providers::Candidate]) -> bool {
     !candidates.iter().any(|candidate| {
@@ -815,7 +814,6 @@ pub(crate) async fn query_musicbrainz_text(
     .await
 }
 
-
 pub(crate) async fn query_discogs(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
@@ -843,12 +841,12 @@ pub(crate) async fn query_discogs(
                 let cfg = state.config.read().await;
                 cfg.discogs_token.trim().to_owned()
             };
-            infra_providers::discogs::search(&state.pool, &state.client, Some(&token), &current).await
+            infra_providers::discogs::search(&state.pool, &state.client, Some(&token), &current)
+                .await
         },
     )
     .await
 }
-
 
 pub(crate) async fn query_lastfm(
     state: &Arc<AppState>,
@@ -883,7 +881,6 @@ pub(crate) async fn query_lastfm(
     .await
 }
 
-
 pub(crate) async fn query_theaudiodb(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
@@ -911,12 +908,12 @@ pub(crate) async fn query_theaudiodb(
                 let cfg = state.config.read().await;
                 cfg.theaudiodb_key.trim().to_owned()
             };
-            infra_providers::theaudiodb::search(&state.pool, &state.client, &api_key, &current).await
+            infra_providers::theaudiodb::search(&state.pool, &state.client, &api_key, &current)
+                .await
         },
     )
     .await
 }
-
 
 pub(crate) async fn query_wikidata(
     state: &Arc<AppState>,
@@ -941,7 +938,6 @@ pub(crate) async fn query_wikidata(
     )
     .await
 }
-
 
 pub(crate) fn preserve_album_context_for_catalog_single(
     candidate: &mut infra_providers::Candidate,
@@ -1033,7 +1029,9 @@ pub(crate) fn normalize_candidate_credits(candidate: &mut infra_providers::Candi
     }
 }
 
-pub(crate) fn enrich_artwork_fallbacks(candidates: &mut [infra_providers::Candidate]) -> Result<()> {
+pub(crate) fn enrich_artwork_fallbacks(
+    candidates: &mut [infra_providers::Candidate],
+) -> Result<()> {
     let snapshot = candidates.to_vec();
     for candidate in candidates {
         let mut artwork = snapshot
@@ -1100,7 +1098,10 @@ pub(crate) fn enrich_artwork_fallbacks(candidates: &mut [infra_providers::Candid
     Ok(())
 }
 
-pub(crate) fn artwork_agrees(left: &infra_providers::Candidate, right: &infra_providers::Candidate) -> bool {
+pub(crate) fn artwork_agrees(
+    left: &infra_providers::Candidate,
+    right: &infra_providers::Candidate,
+) -> bool {
     if !candidate_agrees(left, right) {
         return false;
     }
@@ -1284,7 +1285,10 @@ pub(crate) fn unique_exact_catalog_match(
         == 1
 }
 
-pub(crate) fn candidate_agrees(left: &infra_providers::Candidate, right: &infra_providers::Candidate) -> bool {
+pub(crate) fn candidate_agrees(
+    left: &infra_providers::Candidate,
+    right: &infra_providers::Candidate,
+) -> bool {
     if left
         .isrc
         .as_deref()
@@ -1320,7 +1324,10 @@ pub(crate) fn candidate_source_list(candidate: &infra_providers::Candidate) -> V
     out
 }
 
-pub(crate) fn set_score_sources(candidate: &mut infra_providers::Candidate, sources: Vec<String>) -> Result<()> {
+pub(crate) fn set_score_sources(
+    candidate: &mut infra_providers::Candidate,
+    sources: Vec<String>,
+) -> Result<()> {
     let mut value = candidate
         .score_breakdown
         .as_deref()
@@ -1353,7 +1360,12 @@ pub(crate) async fn log_provider_count(
         .await;
 }
 
-pub(crate) async fn log_provider_skip(state: &Arc<AppState>, filename: &str, provider: &str, reason: &str) {
+pub(crate) async fn log_provider_skip(
+    state: &Arc<AppState>,
+    filename: &str,
+    provider: &str,
+    reason: &str,
+) {
     state.log("warn", provider, Some(filename), reason).await;
 }
 

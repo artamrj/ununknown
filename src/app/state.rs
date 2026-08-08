@@ -322,10 +322,14 @@ mod tests {
 
         // A later automatic scan claims the workflow only after the manual
         // scan is released, and frontend activity cancels it.
-        state.finish_workflow(WorkflowPhase::Idle, "idle", "done").await;
-        assert!(state
-            .try_claim_workflow(WorkflowPhase::Scan, "Automatic scan", true)
-            .await);
+        state
+            .finish_workflow(WorkflowPhase::Idle, "idle", "done")
+            .await;
+        assert!(
+            state
+                .try_claim_workflow(WorkflowPhase::Scan, "Automatic scan", true)
+                .await
+        );
         state.note_frontend_activity().await;
         assert!(state.workflow_cancelled().await);
     }
@@ -339,13 +343,21 @@ mod tests {
             .unwrap();
         let state = AppState::new(Config::default(), pool);
 
-        assert!(state
-            .try_claim_workflow(WorkflowPhase::Scan, "First scan", false)
-            .await);
-        assert!(!state
-            .try_claim_workflow(WorkflowPhase::Apply, "Second workflow", false)
-            .await);
-        assert!(!state.try_claim_workflow(WorkflowPhase::Scan, "Third", true).await);
+        assert!(
+            state
+                .try_claim_workflow(WorkflowPhase::Scan, "First scan", false)
+                .await
+        );
+        assert!(
+            !state
+                .try_claim_workflow(WorkflowPhase::Apply, "Second workflow", false)
+                .await
+        );
+        assert!(
+            !state
+                .try_claim_workflow(WorkflowPhase::Scan, "Third", true)
+                .await
+        );
         assert_eq!(state.workflow.read().await.phase, WorkflowPhase::Scan);
     }
 }

@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) async fn persist_duplicate_members(
     state: &Arc<AppState>,
     representative: &PreparedInput,
@@ -71,14 +70,7 @@ pub(crate) async fn db_writer(
         for job in batch {
             let result = async {
                 let mut tx = state.pool.begin().await?;
-                persist_match(
-                    &mut tx,
-                    &job.path,
-                    &job.info,
-                    &job.candidate,
-                    &job.message,
-                )
-                .await?;
+                persist_match(&mut tx, &job.path, &job.info, &job.candidate, &job.message).await?;
                 tx.commit().await?;
                 Ok::<(), anyhow::Error>(())
             }
@@ -362,7 +354,11 @@ pub(crate) async fn persist_unmatched(
     Ok(())
 }
 
-pub(crate) async fn persist_failed(pool: &sqlx::SqlitePool, path: &Path, error: &str) -> Result<()> {
+pub(crate) async fn persist_failed(
+    pool: &sqlx::SqlitePool,
+    path: &Path,
+    error: &str,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
     let id = upsert_track_outcome(
         &mut tx,
@@ -407,7 +403,10 @@ pub(crate) async fn persist_corrupt(
     Ok(())
 }
 
-pub(crate) async fn persist_analysis_identity(pool: &sqlx::SqlitePool, input: &PreparedInput) -> Result<()> {
+pub(crate) async fn persist_analysis_identity(
+    pool: &sqlx::SqlitePool,
+    input: &PreparedInput,
+) -> Result<()> {
     let snapshot = file_snapshot(&input.path).await;
     sqlx::query(
         "UPDATE tracks SET bitrate=?,file_size=?,file_mtime=?,content_fingerprint=?,updated_at=?

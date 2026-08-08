@@ -1,6 +1,7 @@
 //! Scan workflow drivers: run/run_automatic/retry/run_files plus the shared
 //! types the rest of the scan pipeline operates on.
 
+pub(super) use crate::infrastructure::providers as infra_providers;
 pub(super) use crate::{
     app::{ActivityLogEntry, AppState},
     application::input_dedup::{self, RecordingEvidence},
@@ -11,7 +12,6 @@ pub(super) use crate::{
     infrastructure::{fingerprint_cache, media::fingerprint},
     types::WorkflowPhase,
 };
-pub(super) use crate::infrastructure::providers as infra_providers;
 pub(super) use anyhow::{Context, Result, anyhow};
 pub(super) use chrono::Utc;
 pub(super) use std::{

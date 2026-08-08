@@ -151,10 +151,10 @@ pub fn verify_written_metadata(path: &Path, candidate: &Candidate) -> Result<()>
         &crate::domain::credits::individual_names(&credits.artists),
         "track artists",
     )?;
-    if let Some(album_artist) = candidate.album_artist.as_deref() {
-        if tag.get_string(ItemKey::AlbumArtist) != Some(album_artist) {
-            bail!("written display album artist does not match the canonical credit");
-        }
+    if let Some(album_artist) = candidate.album_artist.as_deref()
+        && tag.get_string(ItemKey::AlbumArtist) != Some(album_artist)
+    {
+        bail!("written display album artist does not match the canonical credit");
     }
     if !candidate.album_artist_credits.is_empty() {
         verify_multi_values(
@@ -222,7 +222,7 @@ fn dedupe_values(values: Vec<String>) -> Vec<String> {
 
 fn push_text_values(tag: &mut Tag, key: ItemKey, values: Vec<String>) {
     for value in dedupe_values(values) {
-        let _ = tag.push(TagItem::new(key.clone(), ItemValue::Text(value)));
+        let _ = tag.push(TagItem::new(key, ItemValue::Text(value)));
     }
 }
 

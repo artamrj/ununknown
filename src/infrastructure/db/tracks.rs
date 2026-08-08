@@ -163,7 +163,10 @@ pub async fn track(pool: &sqlx::SqlitePool, id: TrackId) -> Result<Track, TrackE
     .await?)
 }
 
-pub async fn selected(pool: &sqlx::SqlitePool, id: TrackId) -> Result<(Track, Candidate), TrackError> {
+pub async fn selected(
+    pool: &sqlx::SqlitePool,
+    id: TrackId,
+) -> Result<(Track, Candidate), TrackError> {
     let track = track(pool, id).await?;
     let cid = track
         .selected_candidate_id
@@ -203,7 +206,10 @@ pub async fn selected_for_tracks(
     Ok(out)
 }
 
-pub async fn candidates(pool: &sqlx::SqlitePool, id: TrackId) -> Result<Vec<CandidateRow>, TrackError> {
+pub async fn candidates(
+    pool: &sqlx::SqlitePool,
+    id: TrackId,
+) -> Result<Vec<CandidateRow>, TrackError> {
     Ok(
         sqlx::query_as("SELECT * FROM candidates WHERE track_id=? ORDER BY score DESC")
             .bind(id.0)

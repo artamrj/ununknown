@@ -131,11 +131,10 @@ pub fn score_candidate(
                 "musicbrainz" => 82.0,
                 _ => 78.0,
             };
-            let has_album_context = current
-                .album
-                .as_deref()
-                .is_some_and(|album| !album.trim().is_empty() && !album.trim().starts_with('@'))
-                && input.album.is_some();
+            let has_album_context =
+                current.album.as_deref().is_some_and(|album| {
+                    !album.trim().is_empty() && !album.trim().starts_with('@')
+                }) && input.album.is_some();
             let score = if has_album_context {
                 (0.35 * title) + (0.25 * artist) + (0.25 * album_context) + (0.15 * duration)
             } else if current

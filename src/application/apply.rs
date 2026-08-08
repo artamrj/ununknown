@@ -3,7 +3,7 @@ use crate::{
     application::input_dedup::{self, RecordingEvidence},
     config::Config,
     infrastructure::{
-        db::tracks::{CandidateRow, Track, TRACK_FIELDS, candidates_by_track, selected_for_tracks},
+        db::tracks::{CandidateRow, TRACK_FIELDS, Track, candidates_by_track, selected_for_tracks},
         fingerprint_cache,
         media::{fingerprint, replaygain, tag_writer},
         providers::Candidate,
@@ -13,11 +13,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::HashSet,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use tokio::io::AsyncReadExt;
 
 pub(crate) struct PreparedApply {
@@ -149,7 +145,7 @@ pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
     let cfg = s.config.read().await.clone();
     let selected = selected_for_tracks(&s.pool, ready_tracks).await?;
     let skipped_tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-         "SELECT {} FROM tracks
+        "SELECT {} FROM tracks
          WHERE status='duplicate' AND stage='skipped' AND is_missing=0
            AND content_fingerprint IS NOT NULL
          ORDER BY path",
