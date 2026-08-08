@@ -21,7 +21,6 @@ pub(crate) struct PreparedApply {
     pub(crate) selected_count: usize,
     pub(crate) outputs: usize,
     pub(crate) duplicates_skipped: usize,
-    pub(crate) delete_source_after_write: bool,
 }
 
 #[derive(Clone)]
@@ -296,13 +295,11 @@ pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
     }
     let outputs = items.len();
     let duplicates_skipped = selected_count.saturating_sub(outputs);
-    let delete_source_after_write = cfg.delete_source_after_write;
     Ok(PreparedApply {
         items,
         selected_count,
         outputs,
         duplicates_skipped,
-        delete_source_after_write,
     })
 }
 
@@ -407,12 +404,7 @@ pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize>
         .await;
         return Ok(0);
     }
-    let result = apply(
-        s.clone(),
-        prepared.items,
-        prepared.delete_source_after_write,
-    )
-    .await;
+    let result = apply(s.clone(), prepared.items).await;
     if s.workflow_cancelled().await {
         s.finish_workflow(WorkflowPhase::Idle, "idle", "Automatic write stopped")
             .await;
@@ -437,9 +429,8 @@ pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize>
 pub(crate) async fn finish_apply_workflow(
     state: Arc<AppState>,
     items: Vec<PreviewItem>,
-    delete_source_after_write: bool,
 ) {
-    let result = apply(state.clone(), items, delete_source_after_write).await;
+    let result = apply(state.clone(), items).await;
     if state.workflow_cancelled().await {
         state
             .finish_workflow(WorkflowPhase::Idle, "idle", "Apply stopped")
@@ -749,11 +740,7 @@ fn temporary_destination(destination: &std::path::Path, track_id: i64) -> PathBu
     parent.join(format!(".{stem}.ununknown-{track_id}.{extension}"))
 }
 
-pub async fn apply(
-    s: Arc<AppState>,
-    items: Vec<PreviewItem>,
-    delete_source_after_write: bool,
-) -> Result<()> {
+pub async fn apply(s: Arc<AppState>, items: Vec<PreviewItem>) -> Result<()> {
     let total = items.len() as i64;
     for (i, item) in items.into_iter().enumerate() {
         if s.workflow_cancelled().await {
@@ -819,12 +806,6 @@ pub async fn apply(
         };
         let src = PathBuf::from(&item.current_path);
         let dest = PathBuf::from(&item.destination_path);
-        if delete_source_after_write && paths_resolve_to_same_target(&src, &dest).await? {
-            anyhow::bail!(
-                "refusing to remove source because input and output resolve to the same file: {}",
-                src.display()
-            );
-        }
         let temporary = temporary_destination(&dest, item.track_id.0);
         {
             if let Some(parent) = dest.parent()
@@ -894,32 +875,6 @@ pub async fn apply(
             .map(|publication| publication.path().to_owned())
             .unwrap_or_else(|_| dest.clone());
         let mut result = publication.map(|_| ());
-        if output_available && delete_source_after_write {
-            if paths_resolve_to_same_target(&src, &final_path).await? {
-                anyhow::bail!(
-                    "refusing to remove source because input and output resolve to the same file: {}",
-                    src.display()
-                );
-            }
-            result = remove_source_after_output(&src, &final_path)
-                .await
-                .map(|_| ());
-            if result.is_ok() {
-                s.log_entry(
-                    ActivityLogEntry::new(
-                        "ok",
-                        "apply",
-                        "Removed original after successful corrected output",
-                    )
-                    .file(item.filename.clone())
-                    .context(serde_json::json!({
-                        "source": src.display().to_string(),
-                        "output": final_path.display().to_string()
-                    })),
-                )
-                .await;
-            }
-        }
         let (status, error) = match result {
             Ok(_) => ("applied", None),
             Err(e) => {
@@ -985,14 +940,14 @@ pub async fn apply(
                 .file(item.filename.clone())
                 .context(serde_json::json!({
                     "output": final_path.display().to_string(),
-                    "source_removed": delete_source_after_write,
+                    "source_removed": false,
                     "reused_existing": reused_existing
                 })),
             )
             .await;
             for duplicate in &item.duplicates {
                 if let Err(error) =
-                    finish_duplicate(&s, duplicate, &final_path, delete_source_after_write).await
+                    finish_duplicate(&s, duplicate, &final_path).await
                 {
                     s.increment_failed().await;
                     let detail = format!("{error:#}");
@@ -1051,18 +1006,7 @@ async fn finish_duplicate(
     state: &Arc<AppState>,
     duplicate: &DuplicateSource,
     output: &std::path::Path,
-    delete_source_after_write: bool,
 ) -> Result<()> {
-    let source = std::path::Path::new(&duplicate.current_path);
-    if delete_source_after_write && !duplicate.source_missing {
-        if paths_resolve_to_same_target(source, output).await? {
-            anyhow::bail!(
-                "refusing to remove duplicate source because it is the corrected output: {}",
-                source.display()
-            );
-        }
-        remove_source_after_output(source, output).await?;
-    }
     sqlx::query("DELETE FROM tracks WHERE id=?")
         .bind(duplicate.track_id.0)
         .execute(&state.pool)
@@ -1078,7 +1022,7 @@ async fn finish_duplicate(
             .context(serde_json::json!({
                 "source": duplicate.current_path,
                 "output": output.display().to_string(),
-                "source_removed": delete_source_after_write && !duplicate.source_missing,
+                "source_removed": false,
                 "source_missing": duplicate.source_missing
             })),
         )
@@ -1128,45 +1072,6 @@ pub(crate) async fn resolve_artwork(
             Err(error)
         }
     }
-}
-
-async fn paths_resolve_to_same_target(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<bool> {
-    let source = tokio::fs::canonicalize(source).await?;
-    let destination_parent = destination
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("output file has no parent directory"))?;
-    tokio::fs::create_dir_all(destination_parent).await?;
-    let destination = match tokio::fs::canonicalize(destination).await {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tokio::fs::canonicalize(destination_parent).await?.join(
-                destination
-                    .file_name()
-                    .ok_or_else(|| anyhow::anyhow!("output file has no filename"))?,
-            )
-        }
-        Err(error) => return Err(error.into()),
-    };
-    Ok(source == destination)
-}
-
-async fn remove_source_after_output(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<()> {
-    let output = tokio::fs::metadata(destination)
-        .await
-        .map_err(|error| anyhow::anyhow!("corrected output is unavailable: {error}"))?;
-    if !output.is_file() {
-        anyhow::bail!("corrected output is not a regular file")
-    }
-    tokio::fs::remove_file(source)
-        .await
-        .map_err(|error| anyhow::anyhow!("could not remove original input: {error}"))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1565,32 +1470,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reused_output_removes_source_only_in_delete_mode() {
-        for delete_source in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let source = directory.path().join("input.mp3");
-            let temporary = directory.path().join(".temporary.mp3");
-            let preferred = directory.path().join("Artist - Song.mp3");
-            tokio::fs::write(&source, b"same corrected audio")
-                .await
-                .unwrap();
-            tokio::fs::copy(&source, &temporary).await.unwrap();
-            tokio::fs::copy(&source, &preferred).await.unwrap();
+    async fn reused_output_keeps_source_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("input.mp3");
+        let temporary = directory.path().join(".temporary.mp3");
+        let preferred = directory.path().join("Artist - Song.mp3");
+        tokio::fs::write(&source, b"same corrected audio")
+            .await
+            .unwrap();
+        tokio::fs::copy(&source, &temporary).await.unwrap();
+        tokio::fs::copy(&source, &preferred).await.unwrap();
 
-            let published = publish_no_clobber(&temporary, &preferred, None, None)
-                .await
-                .unwrap();
-            assert!(published.reused_existing());
-            if delete_source {
-                remove_source_after_output(&source, published.path())
-                    .await
-                    .unwrap();
-            }
-
-            assert_eq!(source.exists(), !delete_source);
-            assert!(preferred.exists());
-            assert!(!directory.path().join("Artist - Song (2).mp3").exists());
-        }
+        let published = publish_no_clobber(&temporary, &preferred, None, None)
+            .await
+            .unwrap();
+        assert!(published.reused_existing());
+        assert!(source.exists());
+        assert!(preferred.exists());
+        assert!(!directory.path().join("Artist - Song (2).mp3").exists());
     }
 
     #[tokio::test]
@@ -1621,23 +1518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_is_removed_only_when_corrected_output_exists() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("input.mp3");
-        let output = directory.path().join("output.mp3");
-        tokio::fs::write(&source, b"original").await.unwrap();
-
-        assert!(remove_source_after_output(&source, &output).await.is_err());
-        assert!(source.exists());
-
-        tokio::fs::write(&output, b"corrected").await.unwrap();
-        remove_source_after_output(&source, &output).await.unwrap();
-        assert!(!source.exists());
-        assert_eq!(tokio::fs::read(&output).await.unwrap(), b"corrected");
-    }
-
-    #[tokio::test]
-    async fn duplicate_source_is_removed_after_the_kept_output_exists() {
+    async fn duplicate_source_is_kept_after_the_output_exists() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("duplicates.sqlite");
         let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
@@ -1664,11 +1545,9 @@ mod tests {
             source_missing: false,
         };
 
-        finish_duplicate(&state, &duplicate, &output, true)
-            .await
-            .unwrap();
+        finish_duplicate(&state, &duplicate, &output).await.unwrap();
 
-        assert!(!source.exists());
+        assert!(source.exists());
         assert!(output.exists());
         let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE id=?")
             .bind(track_id)
@@ -1678,15 +1557,4 @@ mod tests {
         assert_eq!(remaining, 0);
     }
 
-    #[tokio::test]
-    async fn identical_source_and_destination_are_detected() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("song.mp3");
-        tokio::fs::write(&source, b"audio").await.unwrap();
-        assert!(
-            paths_resolve_to_same_target(&source, &source)
-                .await
-                .unwrap()
-        );
-    }
 }

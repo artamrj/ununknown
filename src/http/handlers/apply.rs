@@ -28,11 +28,10 @@ pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde
         selected_count,
         outputs,
         duplicates_skipped,
-        delete_source_after_write,
     } = prepared;
     let state = s.clone();
     tokio::spawn(async move {
-        apply_service::finish_apply_workflow(state, items, delete_source_after_write).await;
+        apply_service::finish_apply_workflow(state, items).await;
     });
     Ok(Json(serde_json::json!({
         "started": true,
