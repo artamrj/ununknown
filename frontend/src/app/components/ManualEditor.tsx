@@ -64,8 +64,7 @@ export function ManualEditor({
         cover_url: found.cover_url || current.cover_url,
       }));
       if (found.artist_credits?.length) setArtistCredits(found.artist_credits);
-      if (found.album_artist_credits?.length)
-        setAlbumArtistCredits(found.album_artist_credits);
+      if (found.album_artist_credits?.length) setAlbumArtistCredits(found.album_artist_credits);
       setFeedback({ text: `Loaded metadata and artwork for ${found.artist || "this track"}.` });
     } catch (reason) {
       setFeedback({ error: true, text: (reason as Error).message });
@@ -184,7 +183,9 @@ function ArtistCreditsEditor({
   onChange: (credits: ArtistCredit[]) => void;
 }) {
   const update = (index: number, name: string) =>
-    onChange(credits.map((credit, position) => (position === index ? { ...credit, name } : credit)));
+    onChange(
+      credits.map((credit, position) => (position === index ? { ...credit, name } : credit)),
+    );
   const remove = (index: number) => {
     const next = credits.filter((_, position) => position !== index);
     if (next.length) next[next.length - 1] = { ...next[next.length - 1], join_phrase: "" };
@@ -207,7 +208,11 @@ function ArtistCreditsEditor({
               value={credit.name}
               onChange={(event) => update(index, event.target.value)}
             />
-            <button type="button" aria-label={`Remove ${credit.name}`} onClick={() => remove(index)}>
+            <button
+              type="button"
+              aria-label={`Remove ${credit.name}`}
+              onClick={() => remove(index)}
+            >
               ×
             </button>
           </span>
@@ -219,4 +224,3 @@ function ArtistCreditsEditor({
     </fieldset>
   );
 }
-

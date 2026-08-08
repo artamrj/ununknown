@@ -151,14 +151,13 @@ export function statusFor(track: Track): { label: string; tone: string; icon: Ic
     return { label: "Failed", tone: "error", icon: "alert" };
   if (track.stage === "review")
     return {
-      label:
-        selectedCandidate(track)
+      label: selectedCandidate(track)
+        ? "Needs review"
+        : track.candidates.length > 1
           ? "Needs review"
-          : track.candidates.length > 1
-            ? "Needs review"
-            : track.candidates.length
-              ? "Uncertain"
-              : "Not identified",
+          : track.candidates.length
+            ? "Uncertain"
+            : "Not identified",
       tone: "review",
       icon: "info",
     };

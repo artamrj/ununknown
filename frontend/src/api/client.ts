@@ -27,8 +27,10 @@ export const api = async <T>(path: string, init?: RequestInit): Promise<T> => {
     }
     if (!response.ok) {
       const message =
-        (body && typeof body === "object" && "error" in body &&
-          typeof (body as { error?: unknown }).error === "string"
+        (body &&
+        typeof body === "object" &&
+        "error" in body &&
+        typeof (body as { error?: unknown }).error === "string"
           ? (body as { error: string }).error
           : null) ??
         response.statusText ??

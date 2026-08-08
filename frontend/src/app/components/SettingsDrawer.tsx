@@ -261,4 +261,3 @@ function ProviderStatus({ sources }: { sources: Record<string, boolean> }) {
     </section>
   );
 }
-

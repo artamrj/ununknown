@@ -1,13 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
-import type {
-  AutoApproveResult,
-  RetryIssuesResult,
-  Setup,
-  Track,
-  TrackPage,
-  Workflow,
-} from "@/api/types";
+import { queryKeys, useSetupQuery, useStatusQuery, useTracksQuery } from "@/api/queries";
+import type { AutoApproveResult, RetryIssuesResult, Setup, Track } from "@/api/types";
 import { Icon } from "./Icons";
 import { NavButton } from "./components/NavButton";
 import { TrackRow } from "./components/TrackRow";
@@ -43,18 +38,22 @@ const emptySetup: Setup = {
 };
 
 export function App() {
-  const [setup, setSetup] = useState<Setup>(emptySetup);
+  const queryClient = useQueryClient();
+  const setupQuery = useSetupQuery();
+  const statusQuery = useStatusQuery();
+  const workflow = statusQuery.data;
+  const busy = workflow ? busyPhases.has(workflow.phase) : false;
+  const tracksQuery = useTracksQuery(busy);
+  const tracks = useMemo(() => tracksQuery.data ?? [], [tracksQuery.data]);
+  const setup = setupQuery.data ?? emptySetup;
   const [keys, setKeys] = useState<Record<string, string>>({});
-  const [workflow, setWorkflow] = useState<Workflow>();
-  const [tracks, setTracks] = useState<Track[]>([]);
+  const [setupDraft, setSetupDraft] = useState<Setup | undefined>(undefined);
   const [selectedId, setSelectedId] = useState<number>();
   const [filter, setFilter] = useState<QueueFilter>("all");
   const [queueOrder, setQueueOrder] = useState<QueueOrder>("queue");
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [connected, setConnected] = useState(true);
   const [saving, setSaving] = useState(false);
   const [autoApproving, setAutoApproving] = useState(false);
   const [retryingIssues, setRetryingIssues] = useState(false);
@@ -65,95 +64,33 @@ export function App() {
     if (saved === "light" || saved === "dark") return saved;
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   });
-  const pollCount = useRef(0);
-  const lastPhaseRef = useRef<string>("");
-  const trackCache = useRef(new Map<number, Track>());
-  const lastTracksRef = useRef<Track[] | undefined>(undefined);
-  const lastStatusRef = useRef<Workflow | undefined>(undefined);
-  const busy = workflow ? busyPhases.has(workflow.phase) : false;
-
-  const mergeTracks = useCallback((next: Track[]) => {
-    const cache = trackCache.current;
-    const merged = next.map((track) => {
-      const cached = cache.get(track.id);
-      if (cached && JSON.stringify(cached) === JSON.stringify(track)) return cached;
-      cache.set(track.id, track);
-      return track;
-    });
-    const previous = lastTracksRef.current;
-    if (
-      previous &&
-      previous.length === merged.length &&
-      merged.every((track, index) => track === previous[index])
-    ) {
-      return previous;
-    }
-    lastTracksRef.current = merged;
-    return merged;
-  }, []);
-
-  const mergeStatus = useCallback((next: Workflow) => {
-    const cached = lastStatusRef.current;
-    if (cached && JSON.stringify(cached) === JSON.stringify(next)) return cached;
-    lastStatusRef.current = next;
-    return next;
-  }, []);
-
-  const loadTracks = useCallback(async () => {
-    const page = await api<TrackPage>("/tracks");
-    const merged = mergeTracks(page.items);
-    setTracks(merged);
-    setSelectedId((current) => {
-      if (current && merged.some((track) => track.id === current)) return current;
-      return preferredTrack(merged)?.id;
-    });
-  }, [mergeTracks]);
-
-  const loadApp = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const [nextSetup, status, page] = await Promise.all([
-        api<Setup>("/setup"),
-        api<Workflow>("/status"),
-        api<TrackPage>("/tracks"),
-      ]);
-      setSetup(nextSetup);
-      setWorkflow(mergeStatus(status));
-      setTracks(mergeTracks(page.items));
-      setSelectedId((current) => current ?? preferredTrack(page.items)?.id);
-      setConnected(true);
-    } catch (reason) {
-      setConnected(false);
-      setError((reason as Error).message || "The local backend could not be reached.");
-    } finally {
-      setLoading(false);
-    }
-  }, [mergeStatus, mergeTracks]);
-
-  const refresh = useCallback(async () => {
-    try {
-      const status = await api<Workflow>("/status");
-      setWorkflow(mergeStatus(status));
-      setConnected(true);
-      const phase = status.phase;
-      const phaseChanged = lastPhaseRef.current !== phase;
-      lastPhaseRef.current = phase;
-      if (phaseChanged || !busyPhases.has(phase)) {
-        await loadTracks();
-      } else {
-        pollCount.current += 1;
-        if (pollCount.current % 6 === 0) await loadTracks();
-      }
-    } catch (reason) {
-      setConnected(false);
-      setError((reason as Error).message);
-    }
-  }, [loadTracks, mergeStatus]);
+  const lastPhaseRef = useRef("");
+  const loading = setupQuery.isPending || statusQuery.isPending || tracksQuery.isPending;
+  const connected = !setupQuery.isError && !statusQuery.isError && !tracksQuery.isError;
+  const editableSetup = setupDraft ?? setup;
 
   useEffect(() => {
-    void loadApp();
-  }, [loadApp]);
+    if (setupQuery.data) setSetupDraft(setupQuery.data);
+  }, [setupQuery.data]);
+
+  useEffect(() => {
+    const phase = statusQuery.data?.phase;
+    if (!phase || phase === lastPhaseRef.current) return;
+    lastPhaseRef.current = phase;
+    void queryClient.invalidateQueries({ queryKey: queryKeys.tracks });
+  }, [statusQuery.data?.phase, queryClient]);
+
+  useEffect(() => {
+    const failure = setupQuery.error ?? statusQuery.error ?? tracksQuery.error;
+    if (failure) setError((failure as Error).message);
+  }, [setupQuery.error, statusQuery.error, tracksQuery.error]);
+
+  const invalidateStatusAndTracks = useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: queryKeys.status }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.tracks }),
+    ]);
+  }, [queryClient]);
 
   useEffect(() => {
     const reportActivity = () => {
@@ -174,12 +111,6 @@ export function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("ununknown-theme", theme);
   }, [theme]);
-
-  useEffect(() => {
-    if (!busy) return;
-    const timer = window.setInterval(() => void refresh(), 900);
-    return () => window.clearInterval(timer);
-  }, [busy, refresh]);
 
   useEffect(() => {
     if (!notice) return;
@@ -204,11 +135,11 @@ export function App() {
       await api("/setup", {
         method: "PUT",
         body: JSON.stringify({
-          input_dir: setup.input_dir,
-          output_dir: setup.output_dir,
-          delete_source_after_write: setup.delete_source_after_write,
-          automatic_scan_enabled: setup.automatic_scan_enabled,
-          automatic_scan_interval_minutes: setup.automatic_scan_interval_minutes,
+          input_dir: editableSetup.input_dir,
+          output_dir: editableSetup.output_dir,
+          delete_source_after_write: editableSetup.delete_source_after_write,
+          automatic_scan_enabled: editableSetup.automatic_scan_enabled,
+          automatic_scan_interval_minutes: editableSetup.automatic_scan_interval_minutes,
           acoustid_key: keys.acoustid || undefined,
           audd_token: keys.audd || undefined,
           spotify_client_id: keys.spotify_client_id || undefined,
@@ -222,8 +153,7 @@ export function App() {
         }),
       });
       setKeys({});
-      setSetup(await api<Setup>("/setup"));
-      setConnected(true);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.setup });
     } catch (reason) {
       setError((reason as Error).message);
       throw reason;
@@ -236,12 +166,10 @@ export function App() {
     setNotice("");
     try {
       await saveSetup();
-      trackCache.current.clear();
-      lastTracksRef.current = undefined;
-      setTracks([]);
+      queryClient.setQueryData(queryKeys.tracks, []);
       setSelectedId(undefined);
       await api("/identify", { method: "POST", body: "{}" });
-      await refresh();
+      await invalidateStatusAndTracks();
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -257,7 +185,7 @@ export function App() {
           body: JSON.stringify({ candidate_id: candidateId }),
         },
       );
-      await loadTracks();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.tracks });
       setNotice(
         !result.ready
           ? "Match accepted. This track still needs required metadata before it can be cleaned."
@@ -291,10 +219,7 @@ export function App() {
       ).length,
     [tracks],
   );
-  const retryableArtwork = useMemo(
-    () => tracks.filter(hasRetryableArtwork).length,
-    [tracks],
-  );
+  const retryableArtwork = useMemo(() => tracks.filter(hasRetryableArtwork).length, [tracks]);
 
   const autoApprove = async () => {
     setAutoApproving(true);
@@ -305,7 +230,7 @@ export function App() {
         method: "POST",
         body: "{}",
       });
-      await loadTracks();
+      await queryClient.invalidateQueries({ queryKey: queryKeys.tracks });
       setNotice(
         [
           `${result.approved} review ${result.approved === 1 ? "track" : "tracks"} approved.`,
@@ -339,7 +264,7 @@ export function App() {
         method: "POST",
         body: "{}",
       });
-      await refresh();
+      await invalidateStatusAndTracks();
       if (result.started) {
         setNotice(
           [
@@ -383,7 +308,7 @@ export function App() {
           ? `Writing ${result.outputs} unique ${result.outputs === 1 ? "output" : "outputs"}; ${result.duplicates_skipped} duplicate ${result.duplicates_skipped === 1 ? "recording was" : "recordings were"} skipped.`
           : `Writing ${result.outputs} ${result.outputs === 1 ? "output" : "outputs"}.`,
       );
-      await refresh();
+      await invalidateStatusAndTracks();
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -394,7 +319,7 @@ export function App() {
     try {
       await api("/stop", { method: "POST", body: "{}" });
       setNotice("Stopping safely after the current operation.");
-      await refresh();
+      await invalidateStatusAndTracks();
     } catch (reason) {
       setError((reason as Error).message);
     }
@@ -433,6 +358,10 @@ export function App() {
   const selected = tracks.find((track) => track.id === selectedId);
 
   useEffect(() => {
+    if (selectedId === undefined) {
+      setSelectedId(preferredTrack(visibleTracks)?.id);
+      return;
+    }
     if (visibleTracks.some((track) => track.id === selectedId)) return;
     setSelectedId(visibleTracks[0]?.id);
   }, [selectedId, visibleTracks]);
@@ -702,7 +631,7 @@ export function App() {
                 title="The studio is offline"
                 description="Start the local Rust backend, then reconnect to load your workspace."
                 action="Reconnect"
-                onAction={loadApp}
+                onAction={() => void invalidateStatusAndTracks()}
               />
             ) : tracks.length === 0 ? (
               <EmptyState
@@ -765,7 +694,11 @@ export function App() {
             <Icon name="x" />
           </button>
           {selected ? (
-            <TrackInspector track={selected} onChoose={choose} onSaved={loadTracks} />
+            <TrackInspector
+              track={selected}
+              onChoose={choose}
+              onSaved={() => queryClient.invalidateQueries({ queryKey: queryKeys.tracks })}
+            />
           ) : (
             <InspectorEmpty busy={busy} />
           )}
@@ -783,8 +716,8 @@ export function App() {
 
       {settingsOpen && (
         <SettingsDrawer
-          setup={setup}
-          setSetup={setSetup}
+          setup={editableSetup}
+          setSetup={setSetupDraft}
           keys={keys}
           setKeys={setKeys}
           saving={saving}

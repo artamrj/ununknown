@@ -187,7 +187,7 @@ export function TrackInspector({
                   ? "Duplicate input"
                   : hasRetryableArtwork(track)
                     ? "Cover download temporarily unavailable"
-                  : "Your review is needed"}
+                    : "Your review is needed"}
             </b>
             <p>
               {track.stage_message ||
@@ -329,11 +329,7 @@ export function TrackInspector({
           </section>
           <section className="quality-strip">
             <QualityItem icon="layers" label="Sources" value={candidateSources(candidate)} />
-            <QualityItem
-              icon="album"
-              label="Artwork"
-              value={artworkStatusLabel(candidate)}
-            />
+            <QualityItem icon="album" label="Artwork" value={artworkStatusLabel(candidate)} />
             <QualityItem icon="waveform" label="ReplayGain" value="Added on write" />
           </section>
         </>
@@ -743,4 +739,3 @@ function MetadataHealth({ candidate }: { candidate: Candidate }) {
     </span>
   );
 }
-
