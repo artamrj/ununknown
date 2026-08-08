@@ -64,13 +64,54 @@ fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<Str
         .filter(|value| !value.is_empty())
         .or_else(|| track.format.as_deref().filter(|value| !value.is_empty()))
         .or_else(|| source.extension().and_then(|value| value.to_str()));
-    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    let credits = destination_credits(track, candidate);
     let artist = safe_filename_part(&credits.artist, "Unknown Artist");
     let title = safe_filename_part(&credits.title, "Unknown Title");
     let mut basename = truncate_utf8(&format!("{artist} - {title}"), 220).to_owned();
     if let Some(extension) = extension {
         basename.push('.');
         basename.push_str(&extension.to_ascii_lowercase());
+    }
+
+    fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::credits::Credits {
+        let candidate_credits = crate::domain::credits::normalize_structured(
+            &candidate.artist,
+            &candidate.title,
+            candidate.artist_credits.clone(),
+        );
+        if !candidate.artist_credits.is_empty() {
+            return candidate_credits;
+        }
+        let Some(source_artist) = track.current_artist.as_deref() else {
+            return candidate_credits;
+        };
+        let Some(source_title) = track.current_title.as_deref() else {
+            return candidate_credits;
+        };
+        let source_credits = crate::domain::credits::normalize_featured(source_artist, source_title);
+        let candidate_names = crate::domain::credits::individual_names(&candidate_credits.artists);
+        let source_names = crate::domain::credits::individual_names(&source_credits.artists);
+        if candidate_names.is_empty() || source_names.len() <= candidate_names.len() {
+            return candidate_credits;
+        }
+        let names_equal = |left: &str, right: &str| {
+            crate::domain::credits::identity_key(left) == crate::domain::credits::identity_key(right)
+        };
+        let candidate_is_subset = candidate_names.iter().all(|candidate_name| {
+            source_names
+                .iter()
+                .any(|source_name| names_equal(candidate_name, source_name))
+        });
+        let source_has_extra_primary = source_names.iter().any(|source_name| {
+            !candidate_names
+                .iter()
+                .any(|candidate_name| names_equal(candidate_name, source_name))
+        });
+        if candidate_is_subset && source_has_extra_primary {
+            source_credits
+        } else {
+            candidate_credits
+        }
     }
     Ok(std::path::PathBuf::from(&cfg.output_dir)
         .join(parent)
@@ -116,6 +157,7 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod filename_tests {
     use super::*;
+    use crate::types::{TrackId, TrackStage};
 
     #[test]
     fn filename_parts_preserve_unicode_and_remove_forbidden_characters() {
@@ -132,6 +174,40 @@ mod filename_tests {
         let truncated = truncate_utf8(&value, 220);
         assert!(truncated.len() <= 220);
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn destination_credits_keep_source_primary_when_candidate_only_has_featured_names() {
+        let track = Track {
+            id: TrackId(1),
+            path: "/music/Arta - Cheshm Beham Bezani (feat. Koorosh & Sami Low).mp3".into(),
+            output_path: None,
+            filename: "Arta - Cheshm Beham Bezani (feat. Koorosh & Sami Low).mp3".into(),
+            format: Some("mp3".into()),
+            bitrate: None,
+            duration: None,
+            content_fingerprint: None,
+            current_title: Some("Cheshm Beham Bezani (feat. Koorosh & Sami Low)".into()),
+            current_artist: Some("Arta".into()),
+            current_album: None,
+            current_album_artist: None,
+            current_track_number: None,
+            selected_candidate_id: None,
+            status: "selected".into(),
+            error: None,
+            is_missing: false,
+            stage: TrackStage::Ready,
+            stage_message: None,
+            retry_count: 0,
+            next_retry_at: None,
+        };
+        let candidate = Candidate {
+            title: "Cheshm Beham Bezani".into(),
+            artist: "Koorosh & Sami Low".into(),
+            ..Default::default()
+        };
+        let credits = destination_credits(&track, &candidate);
+        assert_eq!(credits.artist, "Arta feat. Koorosh & Sami Low");
     }
 }
 
