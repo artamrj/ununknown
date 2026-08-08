@@ -1,6 +1,6 @@
 use crate::{
     app::AppState,
-    application::scan_pipeline,
+    application::scan as scan_pipeline,
     config::Config,
     http::error::{ApiError, ApiResult},
     infrastructure::{
