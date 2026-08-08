@@ -156,7 +156,9 @@ The whole scan stream is written through a single DB writer task
 Tracks that auto-selection refused stay in Review (`stage='review'`). The user can:
 
 - **Choose a candidate** (`POST /api/tracks/{id}/choose`) — re-runs completion +
-  cover verification for that candidate; becomes Ready only if core fields complete.
+  cover verification for that candidate. The choice is accepted on recording
+  identity alone (title + artist + album); the track becomes Ready even if no
+  catalog cover could be verified, and the cover is retried at write time.
 - **Smart auto-select** (`POST /api/tracks/auto-approve`) — bulk-runs the same
   `smart_approval::select` + completion + cover pipeline over all Review items.
   Ambiguous/low-confidence ones stay in Review.
@@ -188,8 +190,10 @@ Tracks that auto-selection refused stay in Review (`stage='review'`). The user c
 2. **Per output** (`apply`, `apply.rs:622`):
    - **ReplayGain** — measure loudness with `replaygain::get_or_analyze` (cached).
      Failure never blocks the write.
-   - **Artwork** — `resolve_artwork` downloads the verified cover (cached). If it is
-     gone, the track returns to Review (`return_track_for_cover`).
+   - **Artwork** — `resolve_artwork` retries the cover download at write time
+     (cached). Covers are best-effort: if none verifies, the write proceeds without
+     replacing artwork and any valid embedded cover is preserved. Only unexpected
+     infrastructure errors return the track to Review.
    - **Copy to a temporary file** in the destination directory
      (`.Name.ununknown-{id}.ext`).
    - **Write tags** — `tag_writer::write_resilient` with ReplayGain tags, then
@@ -327,8 +331,9 @@ All HTTP goes through `resilient_http` (timeouts, retries) and a
    label, country) **only from albums compatible with the chosen release** so a
    compilation can't silently change the original release.
 4. Normalize release fields: `Single`/`EP` naming and album artist defaults.
-5. `audit` produces a weighted completeness score and a `core_complete` flag
-   (title, artist, album, **verified cover**).
+5. `audit` produces a weighted completeness score plus two readiness flags:
+   `core_complete` (title, artist, album, **verified cover**) and
+   `identity_complete` (title + artist + album only).
 
 **Cover verification** (`ensure_usable_cover`, `metadata_completion.rs:252`):
 - Collect every artwork candidate (catalog URL + breakdown URLs), ordered by
@@ -340,7 +345,11 @@ All HTTP goes through `resilient_http` (timeouts, retries) and a
   retry-issues flow can recover. If nothing verifies, try Deezer-by-ISRC + fresh
   iTunes/Deezer searches once, then declare the cover missing (`cover_required`).
 
-Only `core_complete` tracks reach the write queue.
+Only `core_complete` tracks reach the automatic write queue. An explicit user
+choice (`/choose`, manual entry, artwork update) is accepted on recording identity
+alone, so a track with an unverifiable cover can still become Ready; the cover is
+then best-effort and retried at write time. `core_complete` remains the bar for
+silent auto-approval.
 
 ---
 
@@ -460,7 +469,9 @@ Setup → Scan & identify
   │     └─ uncertain/unmatched/corrupt → REVIEW
   └─ (automatic mode: only new/changed files, only strict matches)
 Review → choose / auto-select / manual / source-link / artwork / retry-issues
-  └─ core_complete → READY
-Write → per track: ReplayGain → resolve cover → copy to temp → write+verify tags
-      → atomic no-clobber publish → (optional) remove original → delete row
+  ├─ explicit choice (choose / manual) → identity_complete → READY (cover best-effort)
+  └─ auto-approve → core_complete (verified cover) → READY
+Write → per track: ReplayGain → retry cover (best-effort) → copy to temp
+      → write+verify tags → atomic no-clobber publish
+      → (optional) remove original → delete row
 ```

@@ -3,7 +3,10 @@ use crate::{
     application::scan_pipeline,
     config::Config,
     http::error::{ApiError, ApiResult},
-    infrastructure::{media::tag_writer, providers::Candidate},
+    infrastructure::{
+        media::tag_writer,
+        providers::{ArtworkStatus, Candidate},
+    },
     types::{CandidateId, TrackId, TrackStage, WorkflowPhase},
 };
 use anyhow::{Result, anyhow};

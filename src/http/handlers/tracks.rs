@@ -467,7 +467,8 @@ pub async fn select_candidate(
         crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
     let mut transaction = s.pool.begin().await?;
     persist_completed_candidate(&mut transaction, &selected).await?;
-    let (status, stage, message) = readiness_state(&selected, &completion, "Selected by you");
+    let (status, stage, message) =
+        readiness_state(&selected, &completion, "Selected by you", false);
     sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(candidate_id.0)
         .bind(status)
@@ -478,8 +479,9 @@ pub async fn select_candidate(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    let cover_verified = selected.artwork_status == ArtworkStatus::Verified;
     Ok(Json(
-        serde_json::json!({"selected": true, "ready": completion.core_complete}),
+        serde_json::json!({"selected": true, "ready": stage == "ready", "cover_verified": cover_verified}),
     ))
 }
 
@@ -487,8 +489,15 @@ fn readiness_state(
     candidate: &Candidate,
     completion: &crate::application::metadata_completion::CompletionReport,
     prefix: &str,
+    require_cover: bool,
 ) -> (&'static str, &'static str, String) {
-    if completion.core_complete {
+    let complete = if require_cover {
+        completion.core_complete
+    } else {
+        completion.core_complete
+            || crate::application::metadata_completion::identity_complete(candidate)
+    };
+    if complete {
         return (
             "selected",
             "ready",
@@ -718,7 +727,7 @@ pub async fn manual_candidate(
         .await?;
     }
     let (status, stage, message) =
-        readiness_state(&release_fields, &completion, "Entered manually");
+        readiness_state(&release_fields, &completion, "Entered manually", false);
     sqlx::query(
         "UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=? WHERE id=?",
     )
@@ -729,8 +738,9 @@ pub async fn manual_candidate(
     .bind(id.0)
     .execute(&s.pool)
     .await?;
+    let cover_verified = release_fields.artwork_status == ArtworkStatus::Verified;
     Ok(Json(
-        serde_json::json!({"selected": true, "ready": completion.core_complete, "candidate_id": candidate_id}),
+        serde_json::json!({"selected": true, "ready": stage == "ready", "cover_verified": cover_verified, "candidate_id": candidate_id}),
     ))
 }
 
@@ -843,7 +853,8 @@ pub async fn update_artwork(
     selected.artwork_status = crate::infrastructure::providers::ArtworkStatus::Verified;
     selected.artwork_message = Some("Verified cover supplied by you".into());
     let completion = crate::application::metadata_completion::reassess(&mut selected, false);
-    let (status, stage, message) = readiness_state(&selected, &completion, "Artwork updated");
+    let (status, stage, message) =
+        readiness_state(&selected, &completion, "Artwork updated", false);
     sqlx::query("UPDATE tracks SET status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(status)
         .bind(stage)
@@ -1297,11 +1308,60 @@ mod tests {
         assert_eq!(
             row,
             (
-                "review".into(),
+                "ready".into(),
                 "Correct title".into(),
                 "Correct artist".into()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_choice_accepts_metadata_without_a_verified_cover() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("choose-cover-pending.sqlite");
+        let pool = db::connect(database.to_str().unwrap()).await.unwrap();
+        let state = Arc::new(AppState::new(Config::default(), pool.clone()));
+        let track_id = sqlx::query("INSERT INTO tracks(path,filename,status,is_missing,first_seen_at,last_seen_at,last_scanned_at,stage) VALUES('/music/cover-pending.mp3','cover-pending.mp3','needs_review',0,'now','now','now','review')")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        let candidate_id = sqlx::query(
+            "INSERT INTO candidates(track_id,provider,title,artist,album,cover_url,duration_delta,score,score_breakdown)
+             VALUES(?,'deezer','Song','Artist','Album','http://127.0.0.1:1/broken.jpg',1.0,95.0,'{}')",
+        )
+        .bind(track_id)
+        .execute(&pool)
+        .await
+        .unwrap()
+        .last_insert_rowid();
+
+        let Json(response) = select_candidate(
+            State(state),
+            Path(TrackId(track_id)),
+            Json(SelectRequest {
+                candidate_id: Some(CandidateId(candidate_id)),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["selected"], true);
+        assert_eq!(response["ready"], true);
+        assert_eq!(response["cover_verified"], false);
+        let row: (Option<i64>, String, String, String) = sqlx::query_as(
+            "SELECT selected_candidate_id,status,stage,
+                    (SELECT artwork_status FROM candidates WHERE id=?) FROM tracks WHERE id=?",
+        )
+        .bind(candidate_id)
+        .bind(track_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, Some(candidate_id));
+        assert_eq!(row.1, "selected");
+        assert_eq!(row.2, "ready");
+        assert_ne!(row.3, "verified");
     }
 
     #[tokio::test]

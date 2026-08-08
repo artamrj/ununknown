@@ -201,6 +201,20 @@ pub fn complete(
     report
 }
 
+/// The recording identity a user can confirm independently of a catalog cover.
+/// `normalize_release_fields` always supplies an album value, so this is
+/// effectively title + artist. Used to let an explicit user choice become ready
+/// even when no usable cover has been found yet.
+pub fn identity_complete(candidate: &Candidate) -> bool {
+    [
+        nonempty(Some(&candidate.title)).is_some(),
+        nonempty(Some(&candidate.artist)).is_some(),
+        nonempty(candidate.album.as_deref()).is_some(),
+    ]
+    .into_iter()
+    .all(|present| present)
+}
+
 pub fn audit(
     candidate: &Candidate,
     _embedded_cover: bool,

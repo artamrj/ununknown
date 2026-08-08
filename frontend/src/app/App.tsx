@@ -196,15 +196,20 @@ export function App() {
   const choose = async (trackId: number, candidateId: number) => {
     setError("");
     try {
-      const result = await api<{ ready: boolean }>(`/tracks/${trackId}/choose`, {
-        method: "POST",
-        body: JSON.stringify({ candidate_id: candidateId }),
-      });
+      const result = await api<{ ready: boolean; cover_verified?: boolean }>(
+        `/tracks/${trackId}/choose`,
+        {
+          method: "POST",
+          body: JSON.stringify({ candidate_id: candidateId }),
+        },
+      );
       await loadTracks();
       setNotice(
-        result.ready
-          ? "Match accepted. This track is ready to clean."
-          : "Match accepted. The cover will be retried before this track becomes ready.",
+        !result.ready
+          ? "Match accepted. This track still needs required metadata before it can be cleaned."
+          : result.cover_verified
+            ? "Match accepted. This track is ready to clean."
+            : "Match accepted. This track is ready to clean; a cover will be added when one becomes available.",
       );
     } catch (reason) {
       setError((reason as Error).message);
@@ -2285,15 +2290,13 @@ function statusFor(track: Track): { label: string; tone: string; icon: IconName 
   if (track.stage === "review")
     return {
       label:
-        hasRetryableArtwork(track)
-          ? "Retry cover"
-          : selectedCandidate(track)?.artwork_status === "cover_required"
-          ? "Cover required"
-          : track.candidates.length > 1
+        selectedCandidate(track)
           ? "Needs review"
-          : track.candidates.length
-            ? "Uncertain"
-            : "Not identified",
+          : track.candidates.length > 1
+            ? "Needs review"
+            : track.candidates.length
+              ? "Uncertain"
+              : "Not identified",
       tone: "review",
       icon: "info",
     };

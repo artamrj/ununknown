@@ -682,11 +682,7 @@ pub async fn apply(
         };
         let artwork = match resolve_artwork(&s, &item.filename, &candidate).await {
             Ok(Some(artwork)) => Some(artwork),
-            Ok(None) => {
-                let error = anyhow::anyhow!("verified cover is no longer available");
-                return_track_for_cover(&s, item.track_id, &error).await?;
-                continue;
-            }
+            Ok(None) => None,
             Err(error) => {
                 return_track_for_cover(&s, item.track_id, &error).await?;
                 continue;
@@ -964,12 +960,8 @@ pub(super) async fn resolve_artwork(
     filename: &str,
     candidate: &crate::infrastructure::providers::Candidate,
 ) -> Result<Option<Vec<u8>>> {
-    if candidate.artwork_status != crate::infrastructure::providers::ArtworkStatus::Verified {
-        anyhow::bail!(
-            "candidate artwork is not verified ({:?})",
-            candidate.artwork_status
-        );
-    }
+    // Covers are best-effort. A selected candidate whose cover could not be
+    // verified is still accepted; this is the final retry at write time.
     let mut urls = Vec::<(String, String, bool)>::new();
     for artwork in &candidate.artwork_candidates {
         let trusted = artwork.user_confirmed
