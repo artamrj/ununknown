@@ -46,6 +46,20 @@ export type ArtworkCandidate = {
   album?: string;
   artist?: string;
 };
+export type TrackStatus =
+  | "new"
+  | "selected"
+  | "needs_review"
+  | "review"
+  | "applied"
+  | "failed"
+  | "corrupt"
+  | "provider_error"
+  | "processing"
+  | "duplicate"
+  | "verified"
+  | "retryable_error";
+export type TrackStage = "discovered" | "selected" | "ready" | "review" | "skipped" | "failed";
 export type Track = {
   id: number;
   filename: string;
@@ -57,8 +71,8 @@ export type Track = {
   current_album_artist?: string;
   current_track_number?: number;
   selected_candidate_id?: number;
-  status: string;
-  stage: string;
+  status: TrackStatus;
+  stage: TrackStage;
   stage_message?: string;
   error?: string;
   is_missing: boolean;
