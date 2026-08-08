@@ -15,53 +15,159 @@ pub struct ScoreBreakdown {
 
 #[derive(Clone, Debug)]
 pub struct CandidateInput<'a> {
-    pub acoustid_score: f64,
-    pub current: &'a AudioInfo,
     pub title: &'a str,
     pub artist: &'a str,
     pub album: Option<&'a str>,
     pub candidate_duration: Option<f64>,
-    pub is_compilation: bool,
 }
 
-pub fn score(input: CandidateInput<'_>) -> ScoreBreakdown {
+#[derive(Clone, Debug)]
+pub enum ScoreMode<'a> {
+    /// AcoustID-confirmed recording: weight by the acoustic fingerprint
+    /// confidence, with a penalty for compilation releases.
+    Acoustid {
+        acoustid_score: f64,
+        is_compilation: bool,
+    },
+    /// Text-only match: weight title/artist/album/duration similarity with a
+    /// provider-specific ceiling and an explicit source label.
+    Text {
+        source: &'a str,
+        provider_label: &'a str,
+    },
+}
+
+pub struct ScoreOutcome {
+    pub score: f64,
+    pub duration_delta: Option<f64>,
+    pub breakdown_json: String,
+}
+
+/// Single scoring entry point for the scan pipeline: acoustid-weighted and
+/// text-only candidates share the same measurement primitives while keeping
+/// their respective weighting, ceilings, and breakdown JSON shapes.
+pub fn score_candidate(
+    current: &AudioInfo,
+    input: CandidateInput<'_>,
+    mode: ScoreMode<'_>,
+    provider: &str,
+) -> Result<ScoreOutcome, serde_json::Error> {
     let duration_delta = input
         .candidate_duration
-        .map(|duration| (input.current.duration - duration).abs());
-    let duration = duration_delta.map(duration_match).unwrap_or(0.5);
-    let title = input
-        .current
-        .title
-        .as_deref()
-        .map(|value| text_similarity(value, input.title))
-        .unwrap_or_default();
-    let artist = input
-        .current
-        .artist
-        .as_deref()
-        .map(|value| text_similarity(value, input.artist))
-        .unwrap_or_default();
-    let album_context = match (input.current.album.as_deref(), input.album) {
+        .map(|duration| (current.duration - duration).abs());
+    let (title, artist) = match &mode {
+        ScoreMode::Acoustid { .. } => (
+            current
+                .title
+                .as_deref()
+                .map(|value| text_similarity(value, input.title))
+                .unwrap_or_default(),
+            current
+                .artist
+                .as_deref()
+                .map(|value| text_similarity(value, input.artist))
+                .unwrap_or_default(),
+        ),
+        ScoreMode::Text { .. } => (
+            current
+                .title
+                .as_deref()
+                .map(|value| title_similarity(value, input.title))
+                .unwrap_or_default(),
+            current
+                .artist
+                .as_deref()
+                .map(|value| artist_similarity(value, input.artist))
+                .unwrap_or_default(),
+        ),
+    };
+    let album_context = match (current.album.as_deref(), input.album) {
         (Some(current), Some(candidate)) => text_similarity(current, candidate),
         _ => 0.0,
     };
-    let compilation_adjustment = if input.is_compilation { -0.08 } else { 0.0 };
-    let final_score = ((0.45 * input.acoustid_score.clamp(0.0, 1.0))
-        + (0.20 * duration)
-        + (0.15 * title)
-        + (0.10 * artist)
-        + (0.10 * album_context)
-        + compilation_adjustment)
-        .clamp(0.0, 1.0)
-        * 100.0;
-    ScoreBreakdown {
-        acoustid: input.acoustid_score.clamp(0.0, 1.0),
-        duration,
-        title,
-        artist,
-        album_context,
-        compilation_adjustment,
-        final_score,
+    let duration = duration_delta.map(duration_match);
+    match mode {
+        ScoreMode::Acoustid {
+            acoustid_score,
+            is_compilation,
+        } => {
+            let duration = duration.unwrap_or(0.5);
+            let compilation_adjustment = if is_compilation { -0.08 } else { 0.0 };
+            let final_score = ((0.45 * acoustid_score.clamp(0.0, 1.0))
+                + (0.20 * duration)
+                + (0.15 * title)
+                + (0.10 * artist)
+                + (0.10 * album_context)
+                + compilation_adjustment)
+                .clamp(0.0, 1.0)
+                * 100.0;
+            let breakdown = ScoreBreakdown {
+                acoustid: acoustid_score.clamp(0.0, 1.0),
+                duration,
+                title,
+                artist,
+                album_context,
+                compilation_adjustment,
+                final_score,
+            };
+            Ok(ScoreOutcome {
+                score: final_score,
+                duration_delta,
+                breakdown_json: serde_json::to_string(&breakdown)?,
+            })
+        }
+        ScoreMode::Text {
+            source,
+            provider_label,
+        } => {
+            let duration = duration.unwrap_or(0.0);
+            let provider_cap = match provider {
+                "itunes" => 94.0,
+                "radiojavan" => 92.0,
+                "audiomack" => 90.0,
+                "navahang" => 92.0,
+                "genius" => 90.0,
+                "deezer" => 90.0,
+                "musicbrainz" => 82.0,
+                _ => 78.0,
+            };
+            let has_album_context = current
+                .album
+                .as_deref()
+                .is_some_and(|album| !album.trim().is_empty() && !album.trim().starts_with('@'))
+                && input.album.is_some();
+            let score = if has_album_context {
+                (0.35 * title) + (0.25 * artist) + (0.25 * album_context) + (0.15 * duration)
+            } else if current
+                .artist
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                (0.45 * title) + (0.35 * artist) + (0.20 * duration)
+            } else {
+                (0.75 * title) + (0.25 * duration)
+            }
+            .clamp(0.0, 1.0)
+                * 100.0;
+            let score = score.min(provider_cap);
+            let mut value = serde_json::json!({
+                "acoustid": 0.0,
+                "duration": duration,
+                "title": title,
+                "artist": artist,
+                "album_context": album_context,
+                "provider_text_only": true,
+                "auto_select_rule": "Text-only matches require an exact unique title, artist, and duration or independent source agreement",
+                "final_score": score
+            });
+            value["source"] = serde_json::Value::String(source.to_owned());
+            value["sources"] = serde_json::json!([provider_label]);
+            Ok(ScoreOutcome {
+                score,
+                duration_delta,
+                breakdown_json: value.to_string(),
+            })
+        }
     }
 }
 
@@ -175,16 +281,22 @@ mod tests {
             duration: 180.0,
             ..Default::default()
         };
-        let score = score(CandidateInput {
-            acoustid_score: 1.0,
-            current: &info,
-            title: "Song",
-            artist: "Artist",
-            album: Some("Album"),
-            candidate_duration: Some(180.0),
-            is_compilation: false,
-        });
-        assert!(score.final_score >= 99.0);
+        let outcome = score_candidate(
+            &info,
+            CandidateInput {
+                title: "Song",
+                artist: "Artist",
+                album: Some("Album"),
+                candidate_duration: Some(180.0),
+            },
+            ScoreMode::Acoustid {
+                acoustid_score: 1.0,
+                is_compilation: false,
+            },
+            "musicbrainz",
+        )
+        .unwrap();
+        assert!(outcome.score >= 99.0);
     }
 
     #[test]

@@ -6,8 +6,7 @@ pub(super) use crate::{
     application::input_dedup::{self, RecordingEvidence},
     domain::audio,
     domain::matcher::{
-        artist_similarity, duration_match, normalize_match_key, text_close, text_similarity,
-        title_similarity,
+        artist_similarity, normalize_match_key, text_close, text_similarity, title_similarity,
     },
     infrastructure::{fingerprint_cache, media::fingerprint},
     types::WorkflowPhase,

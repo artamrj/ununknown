@@ -31,10 +31,7 @@ pub(crate) async fn identify(
     if !cfg.youtube_api_key.trim().is_empty() {
         out.extend(query_youtube(state, limits, &cfg.youtube_api_key, current, filename).await);
     }
-    match query_musicbrainz_text(state, cfg, current, filename).await {
-        Ok(candidates) => out.extend(candidates),
-        Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
-    }
+    out.extend(query_musicbrainz_text(state, limits, current, filename).await);
     match query_itunes(state, cfg, current, filename).await {
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
@@ -94,11 +91,11 @@ pub(crate) async fn identify(
     if !cfg.soundcloud_client_id.trim().is_empty()
         && !cfg.soundcloud_client_secret.trim().is_empty()
     {
-        out.extend(query_soundcloud(state, limits, cfg, catalog_info, filename).await);
+        out.extend(query_soundcloud(state, limits, catalog_info, filename).await);
     }
-    out.extend(query_discogs(state, cfg, limits, catalog_info, filename).await);
-    out.extend(query_lastfm(state, cfg, limits, catalog_info, filename).await);
-    out.extend(query_theaudiodb(state, cfg, limits, catalog_info, filename).await);
+    out.extend(query_discogs(state, limits, catalog_info, filename).await);
+    out.extend(query_lastfm(state, limits, catalog_info, filename).await);
+    out.extend(query_theaudiodb(state, limits, catalog_info, filename).await);
     out.extend(query_wikidata(state, limits, catalog_info, filename).await);
     for candidate in &mut out {
         normalize_candidate_credits(candidate);
@@ -199,10 +196,7 @@ pub(crate) async fn query_recognized_catalogs(
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
     let mut out = Vec::new();
-    match query_musicbrainz_text(state, cfg, recognized, filename).await {
-        Ok(candidates) => out.extend(candidates),
-        Err(error) => handle_provider_error(state, limits, filename, "musicbrainz", error).await,
-    }
+    out.extend(query_musicbrainz_text(state, limits, recognized, filename).await);
     match query_itunes(state, cfg, recognized, filename).await {
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
@@ -215,6 +209,104 @@ pub(crate) async fn query_recognized_catalogs(
         out.extend(query_genius(state, limits, recognized, filename).await);
     }
     out
+}
+
+/// Shared scaffolding for metadata-catalog lookups: disabled-provider gate,
+/// optional config-key gate, title gate, timing, error handling, and the
+/// common text-scoring pass. Provider-specific steps (AcoustID, SongRec, AudD,
+/// YouTube, the ISRC-boosted Spotify search, and the alias-enriching iTunes
+/// search) stay explicit in `identify`.
+/// Per-provider knobs for the shared catalog runner.
+struct CatalogSpec {
+    /// Provider id used for the disabled gate, skip/error logs, and timing.
+    provider: &'static str,
+    /// `score_breakdown` source tag passed to `score_text_candidate`.
+    source: &'static str,
+    /// Gate the lookup on a non-empty current title.
+    requires_title: bool,
+    /// Config gate that returns a skip reason when a required key is missing.
+    key_check: fn(&crate::config::Config) -> Option<&'static str>,
+}
+
+async fn query_catalog<F, P>(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    current: &audio::AudioInfo,
+    filename: &str,
+    spec: CatalogSpec,
+    search: F,
+) -> Vec<infra_providers::Candidate>
+where
+    F: FnOnce(Arc<AppState>, audio::AudioInfo) -> P,
+    P: std::future::Future<Output = Result<Vec<infra_providers::Candidate>>>,
+{
+    if provider_disabled(limits, spec.provider).await {
+        return Vec::new();
+    }
+    let key_reason = {
+        let cfg = state.config.read().await;
+        (spec.key_check)(&cfg)
+    };
+    if let Some(reason) = key_reason {
+        log_provider_skip(state, filename, spec.provider, reason).await;
+        return Vec::new();
+    }
+    if spec.requires_title
+        && current
+            .title
+            .as_deref()
+            .is_none_or(|title| title.trim().is_empty())
+    {
+        return Vec::new();
+    }
+    let started = Instant::now();
+    match search(state.clone(), current.clone()).await {
+        Ok(mut candidates) => {
+            for candidate in &mut candidates {
+                let _ = score_text_candidate(candidate, current, spec.source);
+            }
+            log_provider_count(state, filename, spec.provider, candidates.len(), started).await;
+            candidates
+        }
+        Err(error) => {
+            handle_provider_error(state, limits, filename, spec.provider, error).await;
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) async fn query_soundcloud(
+    state: &Arc<AppState>,
+    limits: &Arc<PipelineLimits>,
+    current: &audio::AudioInfo,
+    filename: &str,
+) -> Vec<infra_providers::Candidate> {
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "soundcloud",
+            source: "soundcloud_track_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let cfg = state.config.read().await;
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::soundcloud::search(
+                &state.client,
+                &state.soundcloud_auth,
+                &cfg.soundcloud_client_id,
+                &cfg.soundcloud_client_secret,
+                title,
+                current.artist.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
 }
 
 pub(crate) async fn query_songrec(
@@ -380,47 +472,7 @@ pub(crate) async fn query_spotify(
     }
 }
 
-pub(crate) async fn query_soundcloud(
-    state: &Arc<AppState>,
-    limits: &Arc<PipelineLimits>,
-    cfg: &crate::config::Config,
-    current: &audio::AudioInfo,
-    filename: &str,
-) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "soundcloud").await {
-        return Vec::new();
-    }
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|title| !title.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let started = Instant::now();
-    match infra_providers::soundcloud::search(
-        &state.client,
-        &state.soundcloud_auth,
-        &cfg.soundcloud_client_id,
-        &cfg.soundcloud_client_secret,
-        title,
-        current.artist.as_deref(),
-    )
-    .await
-    {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "soundcloud_track_search");
-            }
-            log_provider_count(state, filename, "soundcloud", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "soundcloud", error).await;
-            Vec::new()
-        }
-    }
-}
+
 
 pub(crate) async fn query_itunes(
     state: &Arc<AppState>,
@@ -485,33 +537,31 @@ pub(crate) async fn query_deezer(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "deezer").await {
-        return Vec::new();
-    }
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let started = Instant::now();
-    match infra_providers::deezer::search(&state.pool, &state.client, title, current.artist.as_deref())
-        .await
-    {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "deezer_catalog_search");
-            }
-            log_provider_count(state, filename, "deezer", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "deezer", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "deezer",
+            source: "deezer_catalog_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::deezer::search(
+                &state.pool,
+                &state.client,
+                title,
+                current.artist.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_radiojavan(
     state: &Arc<AppState>,
@@ -519,38 +569,31 @@ pub(crate) async fn query_radiojavan(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "radiojavan").await {
-        return Vec::new();
-    }
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let started = Instant::now();
-    match infra_providers::radiojavan::search(
-        &state.pool,
-        &state.client,
-        title,
-        current.artist.as_deref(),
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "radiojavan",
+            source: "radiojavan_catalog_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::radiojavan::search(
+                &state.pool,
+                &state.client,
+                title,
+                current.artist.as_deref(),
+            )
+            .await
+        },
     )
     .await
-    {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "radiojavan_catalog_search");
-            }
-            log_provider_count(state, filename, "radiojavan", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "radiojavan", error).await;
-            Vec::new()
-        }
-    }
 }
+
 
 pub(crate) async fn query_audiomack(
     state: &Arc<AppState>,
@@ -558,33 +601,31 @@ pub(crate) async fn query_audiomack(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "audiomack").await {
-        return Vec::new();
-    }
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let started = Instant::now();
-    match infra_providers::audiomack::search(&state.pool, &state.client, title, current.artist.as_deref())
-        .await
-    {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "audiomack_catalog_search");
-            }
-            log_provider_count(state, filename, "audiomack", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "audiomack", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "audiomack",
+            source: "audiomack_catalog_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::audiomack::search(
+                &state.pool,
+                &state.client,
+                title,
+                current.artist.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_navahang(
     state: &Arc<AppState>,
@@ -592,33 +633,31 @@ pub(crate) async fn query_navahang(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "navahang").await {
-        return Vec::new();
-    }
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let started = Instant::now();
-    match infra_providers::navahang::search(&state.pool, &state.client, title, current.artist.as_deref())
-        .await
-    {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "navahang_catalog_search");
-            }
-            log_provider_count(state, filename, "navahang", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "navahang", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "navahang",
+            source: "navahang_catalog_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::navahang::search(
+                &state.pool,
+                &state.client,
+                title,
+                current.artist.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_genius(
     state: &Arc<AppState>,
@@ -626,33 +665,31 @@ pub(crate) async fn query_genius(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "genius").await {
-        return Vec::new();
-    }
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Vec::new();
-    };
-    let started = Instant::now();
-    match infra_providers::genius::search(&state.pool, &state.client, title, current.artist.as_deref())
-        .await
-    {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "genius_catalog_search");
-            }
-            log_provider_count(state, filename, "genius", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "genius", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "genius",
+            source: "genius_catalog_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::genius::search(
+                &state.pool,
+                &state.client,
+                title,
+                current.artist.as_deref(),
+            )
+            .await
+        },
+    )
+    .await
 }
+
 
 pub(crate) fn needs_genius_enrichment(candidates: &[infra_providers::Candidate]) -> bool {
     !candidates.iter().any(|candidate| {
@@ -723,19 +760,23 @@ pub(crate) async fn query_musicbrainz_acoustid(
             )
             .await;
         let candidate_duration = candidate.duration_delta;
-        let duration_delta = candidate_duration.map(|value| (current.duration - value).abs());
-        let breakdown = crate::domain::matcher::score(crate::domain::matcher::CandidateInput {
-            acoustid_score: hit.score,
+        let outcome = crate::domain::matcher::score_candidate(
             current,
-            title: &candidate.title,
-            artist: &candidate.artist,
-            album: candidate.album.as_deref(),
-            candidate_duration,
-            is_compilation: candidate.is_compilation,
-        });
-        candidate.score = breakdown.final_score;
-        candidate.duration_delta = duration_delta;
-        candidate.score_breakdown = Some(serde_json::to_string(&breakdown)?);
+            crate::domain::matcher::CandidateInput {
+                title: &candidate.title,
+                artist: &candidate.artist,
+                album: candidate.album.as_deref(),
+                candidate_duration,
+            },
+            crate::domain::matcher::ScoreMode::Acoustid {
+                acoustid_score: hit.score,
+                is_compilation: candidate.is_compilation,
+            },
+            &candidate.provider,
+        )?;
+        candidate.score = outcome.score;
+        candidate.duration_delta = outcome.duration_delta;
+        candidate.score_breakdown = Some(outcome.breakdown_json);
         out.push(candidate);
     }
     Ok(out)
@@ -743,150 +784,139 @@ pub(crate) async fn query_musicbrainz_acoustid(
 
 pub(crate) async fn query_musicbrainz_text(
     state: &Arc<AppState>,
-    cfg: &crate::config::Config,
+    limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
-) -> Result<Vec<infra_providers::Candidate>> {
-    let mut out = Vec::new();
-    let Some(title) = current
-        .title
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    else {
-        return Ok(out);
-    };
-    let started = Instant::now();
-    for mut candidate in infra_providers::musicbrainz::search(
-        &state.pool,
-        &state.client,
-        &cfg.musicbrainz_user_agent,
-        title,
-        current.artist.as_deref(),
-    )
-    .await?
-    {
-        score_text_candidate(&mut candidate, current, "musicbrainz_text_search")?;
-        out.push(candidate);
-    }
-    state
-        .log_entry(
-            ActivityLogEntry::new(
-                "info",
-                "musicbrainz",
-                format!("MusicBrainz tag search returned {} candidate(s)", out.len()),
+) -> Vec<infra_providers::Candidate> {
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "musicbrainz",
+            source: "musicbrainz_text_search",
+            requires_title: true,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            let cfg = state.config.read().await;
+            let title = current.title.as_deref().unwrap_or_default();
+            infra_providers::musicbrainz::search(
+                &state.pool,
+                &state.client,
+                &cfg.musicbrainz_user_agent,
+                title,
+                current.artist.as_deref(),
             )
-            .file(filename.to_owned())
-            .duration_ms(started.elapsed().as_millis() as i64)
-            .context(serde_json::json!({"title": title, "artist": current.artist})),
-        )
-        .await;
-    Ok(out)
+            .await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_discogs(
     state: &Arc<AppState>,
-    cfg: &crate::config::Config,
     limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "discogs").await {
-        return Vec::new();
-    }
-    let token = cfg.discogs_token.trim();
-    if token.trim().is_empty() {
-        log_provider_skip(
-            state,
-            filename,
-            "discogs",
-            "Discogs token/API key is missing",
-        )
-        .await;
-        return Vec::new();
-    }
-    let started = Instant::now();
-    match infra_providers::discogs::search(&state.pool, &state.client, Some(token), current).await {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "discogs_release_search");
-            }
-            log_provider_count(state, filename, "discogs", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "discogs", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "discogs",
+            source: "discogs_release_search",
+            requires_title: false,
+            key_check: |cfg| {
+                cfg.discogs_token
+                    .trim()
+                    .is_empty()
+                    .then_some("Discogs token/API key is missing")
+            },
+        },
+        |state, current| async move {
+            let token = {
+                let cfg = state.config.read().await;
+                cfg.discogs_token.trim().to_owned()
+            };
+            infra_providers::discogs::search(&state.pool, &state.client, Some(&token), &current).await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_lastfm(
     state: &Arc<AppState>,
-    cfg: &crate::config::Config,
     limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "lastfm").await {
-        return Vec::new();
-    }
-    let api_key = cfg.lastfm_key.trim();
-    if api_key.is_empty() {
-        log_provider_skip(state, filename, "lastfm", "Last.fm API key is missing").await;
-        return Vec::new();
-    }
-    let started = Instant::now();
-    match infra_providers::lastfm::search(&state.pool, &state.client, api_key, current).await {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "lastfm_track_search");
-            }
-            log_provider_count(state, filename, "lastfm", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "lastfm", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "lastfm",
+            source: "lastfm_track_search",
+            requires_title: false,
+            key_check: |cfg| {
+                cfg.lastfm_key
+                    .trim()
+                    .is_empty()
+                    .then_some("Last.fm API key is missing")
+            },
+        },
+        |state, current| async move {
+            let api_key = {
+                let cfg = state.config.read().await;
+                cfg.lastfm_key.trim().to_owned()
+            };
+            infra_providers::lastfm::search(&state.pool, &state.client, &api_key, &current).await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_theaudiodb(
     state: &Arc<AppState>,
-    cfg: &crate::config::Config,
     limits: &Arc<PipelineLimits>,
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "theaudiodb").await {
-        return Vec::new();
-    }
-    let api_key = cfg.theaudiodb_key.trim();
-    if api_key.is_empty() {
-        log_provider_skip(
-            state,
-            filename,
-            "theaudiodb",
-            "TheAudioDB API key is missing",
-        )
-        .await;
-        return Vec::new();
-    }
-    let started = Instant::now();
-    match infra_providers::theaudiodb::search(&state.pool, &state.client, api_key, current).await {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "theaudiodb_track_search");
-            }
-            log_provider_count(state, filename, "theaudiodb", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "theaudiodb", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "theaudiodb",
+            source: "theaudiodb_track_search",
+            requires_title: false,
+            key_check: |cfg| {
+                cfg.theaudiodb_key
+                    .trim()
+                    .is_empty()
+                    .then_some("TheAudioDB API key is missing")
+            },
+        },
+        |state, current| async move {
+            let api_key = {
+                let cfg = state.config.read().await;
+                cfg.theaudiodb_key.trim().to_owned()
+            };
+            infra_providers::theaudiodb::search(&state.pool, &state.client, &api_key, &current).await
+        },
+    )
+    .await
 }
+
 
 pub(crate) async fn query_wikidata(
     state: &Arc<AppState>,
@@ -894,24 +924,24 @@ pub(crate) async fn query_wikidata(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
-    if provider_disabled(limits, "wikidata").await {
-        return Vec::new();
-    }
-    let started = Instant::now();
-    match infra_providers::wikidata::search(&state.pool, &state.client, current).await {
-        Ok(mut candidates) => {
-            for candidate in &mut candidates {
-                let _ = score_text_candidate(candidate, current, "wikidata_sparql");
-            }
-            log_provider_count(state, filename, "wikidata", candidates.len(), started).await;
-            candidates
-        }
-        Err(error) => {
-            handle_provider_error(state, limits, filename, "wikidata", error).await;
-            Vec::new()
-        }
-    }
+    query_catalog(
+        state,
+        limits,
+        current,
+        filename,
+        CatalogSpec {
+            provider: "wikidata",
+            source: "wikidata_sparql",
+            requires_title: false,
+            key_check: |_| None,
+        },
+        |state, current| async move {
+            infra_providers::wikidata::search(&state.pool, &state.client, &current).await
+        },
+    )
+    .await
 }
+
 
 pub(crate) fn preserve_album_context_for_catalog_single(
     candidate: &mut infra_providers::Candidate,
