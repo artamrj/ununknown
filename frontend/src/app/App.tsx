@@ -61,7 +61,7 @@ export function App() {
   const busy = workflow ? busyPhases.has(workflow.phase) : false;
 
   const loadTracks = useCallback(async () => {
-    const page = await api<TrackPage>("/tracks?page_size=10000");
+    const page = await api<TrackPage>("/tracks");
     setTracks(page.items);
     setSelectedId((current) => {
       if (current && page.items.some((track) => track.id === current)) return current;
@@ -76,7 +76,7 @@ export function App() {
       const [nextSetup, status, page] = await Promise.all([
         api<Setup>("/setup"),
         api<Workflow>("/status"),
-        api<TrackPage>("/tracks?page_size=10000"),
+        api<TrackPage>("/tracks"),
       ]);
       setSetup(nextSetup);
       setWorkflow(status);
