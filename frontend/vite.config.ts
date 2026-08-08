@@ -8,5 +8,5 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
-  server: { proxy: { "/api": "http://localhost:7331" } },
+  server: { proxy: { "/api": "http://127.0.0.1:7331" } },
 });

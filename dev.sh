@@ -10,7 +10,7 @@ PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 LOCAL_DIR="$PROJECT_DIR/.local"
 
-for command_name in cargo cargo-watch npm; do
+for command_name in cargo cargo-watch npm curl; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Missing required command: $command_name" >&2
     if [[ "$command_name" == "cargo-watch" ]]; then
@@ -68,14 +68,32 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-echo "Starting backend:  http://localhost:7331"
-echo "Starting frontend: http://localhost:5173"
+echo "Starting backend:  http://127.0.0.1:7331"
 echo "Press Ctrl+C to stop both."
 echo
 
 (cd "$PROJECT_DIR" && exec cargo watch -x run) &
 child_pids+=("$!")
 
+backend_ready=false
+for ((attempt = 0; attempt < 60; attempt++)); do
+  if curl --silent --fail --max-time 1 http://127.0.0.1:7331/api/health >/dev/null 2>&1; then
+    backend_ready=true
+    break
+  fi
+  if ! kill -0 "${child_pids[0]}" 2>/dev/null; then
+    echo "Backend stopped before becoming ready." >&2
+    exit 1
+  fi
+  sleep 1
+done
+
+if ! $backend_ready; then
+  echo "Backend did not become ready within 60 seconds." >&2
+  exit 1
+fi
+
+echo "Starting frontend: http://localhost:5173"
 (cd "$FRONTEND_DIR" && exec npm run dev -- --strictPort) &
 child_pids+=("$!")
 
