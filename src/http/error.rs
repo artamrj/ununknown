@@ -37,6 +37,17 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
+impl From<crate::infrastructure::db::tracks::TrackError> for ApiError {
+    fn from(error: crate::infrastructure::db::tracks::TrackError) -> Self {
+        match error {
+            crate::infrastructure::db::tracks::TrackError::NotFound(message) => {
+                Self::NotFound(message)
+            }
+            crate::infrastructure::db::tracks::TrackError::Sqlx(error) => Self::from(error),
+        }
+    }
+}
+
 impl From<serde_json::Error> for ApiError {
     fn from(error: serde_json::Error) -> Self {
         Self::Internal(error.into())

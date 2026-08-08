@@ -11,6 +11,8 @@ const DAILY_CACHE_CLEANUP_KEY: &str = "last_disposable_cache_cleanup";
 const MEDIA_CACHE_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+pub mod tracks;
+
 /// Released pre-consolidation schema used only to build legacy fixtures in tests.
 #[cfg(test)]
 const SCHEMA: &str = r#"

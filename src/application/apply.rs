@@ -1,75 +1,159 @@
-use super::*;
-use crate::app::ActivityLogEntry;
-use crate::application::input_dedup::{self, RecordingEvidence};
-use crate::infrastructure::fingerprint_cache;
-use crate::infrastructure::media::{fingerprint, replaygain};
+use crate::{
+    app::{ActivityLogEntry, AppState},
+    application::input_dedup::{self, RecordingEvidence},
+    config::Config,
+    infrastructure::{
+        db::tracks::{CandidateRow, Track, TRACK_FIELDS, candidates_by_track, selected_for_tracks},
+        fingerprint_cache,
+        media::{fingerprint, replaygain, tag_writer},
+        providers::Candidate,
+    },
+    types::{TrackId, WorkflowPhase},
+};
+use anyhow::{Result, anyhow};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio::io::AsyncReadExt;
 
-struct PreparedApply {
-    items: Vec<PreviewItem>,
-    selected_count: usize,
-    outputs: usize,
-    duplicates_skipped: usize,
-    delete_source_after_write: bool,
+pub(crate) struct PreparedApply {
+    pub(crate) items: Vec<PreviewItem>,
+    pub(crate) selected_count: usize,
+    pub(crate) outputs: usize,
+    pub(crate) duplicates_skipped: usize,
+    pub(crate) delete_source_after_write: bool,
 }
 
-pub async fn start_apply(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    if !s
-        .try_claim_workflow(WorkflowPhase::Apply, "Writing corrected copies", false)
-        .await
-    {
-        return Err(ApiError::conflict("workflow is already running"));
-    }
-    let prepared = match prepare_apply(&s).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            s.reset_workflow(WorkflowPhase::Idle, "Ready").await;
-            return Err(error);
-        }
-    };
-    if prepared.selected_count == 0 {
-        s.reset_workflow(WorkflowPhase::Idle, "Ready").await;
-        return Err(ApiError::validation(
-            "No identified tracks are ready to write",
-        ));
-    }
-    let PreparedApply {
-        items,
-        selected_count,
-        outputs,
-        duplicates_skipped,
-        delete_source_after_write,
-    } = prepared;
-    let state = s.clone();
-    tokio::spawn(async move {
-        finish_apply_workflow(state, items, delete_source_after_write).await;
-    });
-    Ok(Json(serde_json::json!({
-        "started": true,
-        "count": selected_count,
-        "outputs": outputs,
-        "duplicates_skipped": duplicates_skipped
-    })))
+#[derive(Clone)]
+pub(crate) struct PreviewItem {
+    track_id: TrackId,
+    filename: String,
+    current_path: String,
+    destination_path: String,
+    candidate: Candidate,
+    duplicates: Vec<DuplicateSource>,
 }
 
-async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
+#[derive(Clone)]
+struct DuplicateSource {
+    track_id: TrackId,
+    filename: String,
+    current_path: String,
+    source_missing: bool,
+}
+
+fn destination(cfg: &Config, track: &Track, candidate: &Candidate) -> Result<String> {
+    let source = std::path::Path::new(&track.path);
+    let relative = source
+        .strip_prefix(&cfg.input_dir)
+        .ok()
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| source.file_name().map(std::path::Path::new))
+        .ok_or_else(|| anyhow!("audio file has no filename"))?;
+    let parent = relative
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""));
+    // Re-sniff the source at apply time. The database may still contain an old
+    // extension-based format from a previous scan (for example, AAC/M4A bytes in
+    // a file named `.mp3`). Falling back keeps previews for missing files usable.
+    let detected_format = crate::domain::audio::read(source)
+        .ok()
+        .map(|info| info.format);
+    let extension = detected_format
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or_else(|| track.format.as_deref().filter(|value| !value.is_empty()))
+        .or_else(|| source.extension().and_then(|value| value.to_str()));
+    let credits = crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title);
+    let artist = safe_filename_part(&credits.artist, "Unknown Artist");
+    let title = safe_filename_part(&credits.title, "Unknown Title");
+    let mut basename = truncate_utf8(&format!("{artist} - {title}"), 220).to_owned();
+    if let Some(extension) = extension {
+        basename.push('.');
+        basename.push_str(&extension.to_ascii_lowercase());
+    }
+    Ok(std::path::PathBuf::from(&cfg.output_dir)
+        .join(parent)
+        .join(basename)
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn safe_filename_part(value: &str, fallback: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = cleaned.trim_matches([' ', '.']);
+    if cleaned.is_empty() {
+        fallback.to_owned()
+    } else {
+        cleaned.to_owned()
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].trim_end()
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::*;
+
+    #[test]
+    fn filename_parts_preserve_unicode_and_remove_forbidden_characters() {
+        assert_eq!(
+            safe_filename_part("  فریدون / فرخزاد:  ", "fallback"),
+            "فریدون فرخزاد"
+        );
+        assert_eq!(safe_filename_part("...", "Unknown Title"), "Unknown Title");
+    }
+
+    #[test]
+    fn utf8_truncation_does_not_split_character() {
+        let value = "آهنگ".repeat(100);
+        let truncated = truncate_utf8(&value, 220);
+        assert!(truncated.len() <= 220);
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+}
+
+pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
     let ready_tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM tracks WHERE selected_candidate_id IS NOT NULL AND is_missing=0 AND status!='corrupt' AND stage='ready'",
-        queries::TRACK_FIELDS
+        TRACK_FIELDS
     )))
     .fetch_all(&s.pool)
     .await?;
     let cfg = s.config.read().await.clone();
-    let selected = queries::selected_for_tracks(&s.pool, ready_tracks).await?;
+    let selected = selected_for_tracks(&s.pool, ready_tracks).await?;
     let skipped_tracks: Vec<Track> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {} FROM tracks
+         "SELECT {} FROM tracks
          WHERE status='duplicate' AND stage='skipped' AND is_missing=0
            AND content_fingerprint IS NOT NULL
          ORDER BY path",
-        queries::TRACK_FIELDS
+        TRACK_FIELDS
     )))
     .fetch_all(&s.pool)
     .await?;
@@ -95,7 +179,7 @@ async fn prepare_apply(s: &Arc<AppState>) -> ApiResult<PreparedApply> {
 
     // Reapply release and identity rules at the last mutable boundary. This
     // also repairs ready-but-unwritten selections created by an older scan.
-    let by_track = queries::candidates_by_track(&s.pool).await?;
+    let by_track = candidates_by_track(&s.pool).await?;
     for source in &mut sources {
         let track_id = source.track.id;
         let existing_album = source.track.current_album.clone();
@@ -354,7 +438,7 @@ pub(crate) async fn apply_ready_automatically(s: Arc<AppState>) -> Result<usize>
     Ok(count)
 }
 
-async fn finish_apply_workflow(
+pub(crate) async fn finish_apply_workflow(
     state: Arc<AppState>,
     items: Vec<PreviewItem>,
     delete_source_after_write: bool,
@@ -975,7 +1059,7 @@ async fn finish_duplicate(
     Ok(())
 }
 
-pub(super) async fn resolve_artwork(
+pub(crate) async fn resolve_artwork(
     state: &Arc<AppState>,
     filename: &str,
     candidate: &crate::infrastructure::providers::Candidate,

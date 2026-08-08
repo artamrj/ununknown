@@ -246,6 +246,7 @@ async fn recover_issue_files(state: Arc<AppState>, issues: Vec<(PathBuf, bool)>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
 
     async fn test_state() -> Arc<AppState> {
         let directory = tempfile::tempdir().unwrap();
