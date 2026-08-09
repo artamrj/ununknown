@@ -15,7 +15,6 @@ import {
   busyPhases,
   compareTracks,
   filterTitle,
-  folderName,
   friendlyError,
   hasRetryableArtwork,
   isCompleted,
@@ -29,8 +28,6 @@ import {
 } from "./trackUtils";
 
 const emptySetup: Setup = {
-  input_dir: "",
-  output_dir: "",
   delete_source_after_write: false,
   automatic_scan_enabled: true,
   automatic_scan_interval_minutes: 5,
@@ -135,8 +132,6 @@ export function App() {
       await api("/setup", {
         method: "PUT",
         body: JSON.stringify({
-          input_dir: editableSetup.input_dir,
-          output_dir: editableSetup.output_dir,
           delete_source_after_write: editableSetup.delete_source_after_write,
           automatic_scan_enabled: editableSetup.automatic_scan_enabled,
           automatic_scan_interval_minutes: editableSetup.automatic_scan_interval_minutes,
@@ -397,14 +392,14 @@ export function App() {
             <button
               className="topbar-source-summary"
               onClick={() => setSettingsOpen(true)}
-              aria-label="Change music source"
-              title={setup.input_dir || "Choose a music folder"}
+              aria-label="Open settings"
+              title="Settings"
             >
               <span className="source-icon">
                 <Icon name="folder" size={16} />
               </span>
               <span className="source-copy">
-                <b>{folderName(setup.input_dir)}</b>
+                <b>Music library</b>
                 <small>
                   {tracks.length} {tracks.length === 1 ? "file" : "files"}
                 </small>
@@ -443,7 +438,7 @@ export function App() {
           <div className="topbar-controls">
             <button
               className={`topbar-scan-action ${tracks.length ? "" : "prominent"}`.trim()}
-              disabled={busy || saving || !setup.input_dir.trim() || !setup.output_dir.trim()}
+              disabled={busy || saving}
               onClick={identify}
               title={
                 busy
@@ -645,8 +640,8 @@ export function App() {
                   busy
                     ? "Audio files will appear here as they are discovered and identified."
                     : workflow?.phase === "finish"
-                      ? `Corrected files are available in ${setup.output_dir || "your output folder"}.`
-                      : "Enter a music folder above, choose where corrected copies should go, then start cleaning."
+                      ? "Corrected files are available in your configured output folder."
+                      : "Start cleaning to identify and correct your music files."
                 }
               />
             ) : visibleTracks.length === 0 ? (
