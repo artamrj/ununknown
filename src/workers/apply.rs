@@ -338,6 +338,8 @@ pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
             );
             crate::workers::canonical::canonicalize_candidates(
                 &s.pool,
+                &s.client,
+                &cfg.musicbrainz_user_agent,
                 std::slice::from_mut(candidate),
             )
             .await?;

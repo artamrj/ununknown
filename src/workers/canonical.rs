@@ -1,9 +1,10 @@
 use crate::{
     domain::credits::{clean_text, display_artist, identity_key},
-    providers::{ArtistCredit, Candidate},
+    providers::{ArtistCredit, Candidate, musicbrainz},
 };
 use anyhow::Result;
 use chrono::Utc;
+use reqwest::Client;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 
@@ -15,6 +16,8 @@ struct Canonical {
 
 pub async fn canonicalize_candidates(
     pool: &SqlitePool,
+    client: &Client,
+    user_agent: &str,
     candidates: &mut [Candidate],
 ) -> Result<()> {
     for candidate in candidates.iter_mut() {
@@ -76,8 +79,22 @@ pub async fn canonicalize_candidates(
 
     let known_names = collect_known_names(&winners, pool).await?;
     for candidate in &mut *candidates {
-        resolve_ampersand_credits(&mut candidate.artist_credits, &known_names);
-        resolve_ampersand_credits(&mut candidate.album_artist_credits, &known_names);
+        resolve_ampersand_credits(
+            pool,
+            client,
+            user_agent,
+            &mut candidate.artist_credits,
+            &known_names,
+        )
+        .await;
+        resolve_ampersand_credits(
+            pool,
+            client,
+            user_agent,
+            &mut candidate.album_artist_credits,
+            &known_names,
+        )
+        .await;
     }
 
     for candidate in candidates {
@@ -155,24 +172,50 @@ async fn collect_known_names(
             names.insert(name.to_owned());
         }
     }
+    let type_rows = sqlx::query_as::<_, (String,)>(
+        "SELECT name FROM artist_types_cache WHERE artist_type != 'Group'",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (name,) in type_rows {
+        names.insert(identity_key(&name));
+    }
     Ok(names)
 }
 
 /// Split a bare "X & Y" credit into separate artists only when the catalog
 /// evidence identifies each side as a real artist and the whole name is not a
 /// registered artist (an MBID-bearing group such as "Selena Gomez & the Scene").
-/// Unverifiable pairs stay whole rather than blindly splitting group names.
-fn resolve_ampersand_credits(credits: &mut Vec<ArtistCredit>, known_names: &HashSet<String>) {
+/// Falls back to MusicBrainz artist type lookups for names not yet in the catalog.
+async fn resolve_ampersand_credits(
+    pool: &SqlitePool,
+    client: &Client,
+    user_agent: &str,
+    credits: &mut Vec<ArtistCredit>,
+    known_names: &HashSet<String>,
+) {
     let mut out = Vec::with_capacity(credits.len());
     for credit in credits.drain(..) {
         if credit.musicbrainz_id.is_some() {
             out.push(credit);
             continue;
         }
-        let Some(sides) = known_ampersand_split(&credit.name, known_names) else {
+        let Some(sides) = parse_ampersand_sides(&credit.name) else {
             out.push(credit);
             continue;
         };
+        let all_known = sides
+            .iter()
+            .all(|side| known_names.contains(&identity_key(side)));
+        let resolved = if all_known {
+            true
+        } else {
+            resolve_unknown_sides(pool, client, user_agent, &sides).await
+        };
+        if !resolved {
+            out.push(credit);
+            continue;
+        }
         let total = sides.len();
         for (index, name) in sides.into_iter().enumerate() {
             let join = if index + 1 < total { " & " } else { "" };
@@ -182,7 +225,7 @@ fn resolve_ampersand_credits(credits: &mut Vec<ArtistCredit>, known_names: &Hash
     *credits = out;
 }
 
-fn known_ampersand_split(name: &str, known_names: &HashSet<String>) -> Option<Vec<String>> {
+fn parse_ampersand_sides(name: &str) -> Option<Vec<String>> {
     if !name.contains(" & ") {
         return None;
     }
@@ -191,13 +234,24 @@ fn known_ampersand_split(name: &str, known_names: &HashSet<String>) -> Option<Ve
         .map(clean_text)
         .filter(|side| !side.is_empty())
         .collect::<Vec<_>>();
-    if sides.len() < 2 {
-        return None;
+    (sides.len() >= 2).then_some(sides)
+}
+
+async fn resolve_unknown_sides(
+    pool: &SqlitePool,
+    client: &Client,
+    user_agent: &str,
+    sides: &[String],
+) -> bool {
+    for side in sides {
+        match musicbrainz::artist_type(pool, client, user_agent, side).await {
+            Ok(Some(t)) if t != "Group" && t != "Orchestra" && t != "Choir" => {}
+            _ => {
+                return false;
+            }
+        }
     }
-    sides
-        .iter()
-        .all(|side| known_names.contains(&identity_key(side)))
-        .then_some(sides)
+    true
 }
 
 fn collect_credits(
@@ -273,6 +327,12 @@ fn provider_authority(provider: &str) -> i64 {
 mod tests {
     use super::*;
 
+    fn test_client() -> Client {
+        Client::new()
+    }
+
+    const TEST_USER_AGENT: &str = "Ununknown/0.1 (test@example.com)";
+
     #[tokio::test]
     async fn trusted_spelling_wins_and_persists() {
         let directory = tempfile::tempdir().unwrap();
@@ -298,7 +358,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        canonicalize_candidates(&pool, &mut candidates)
+        canonicalize_candidates(&pool, &test_client(), TEST_USER_AGENT, &mut candidates)
             .await
             .unwrap();
         assert!(
@@ -326,7 +386,7 @@ mod tests {
             ..Default::default()
         }];
 
-        canonicalize_candidates(&pool, &mut candidates)
+        canonicalize_candidates(&pool, &test_client(), TEST_USER_AGENT, &mut candidates)
             .await
             .unwrap();
 
@@ -366,7 +426,7 @@ mod tests {
             artist_credits: vec![ArtistCredit::new("Alice & Bob", "")],
             ..Default::default()
         }];
-        canonicalize_candidates(&pool, &mut candidates)
+        canonicalize_candidates(&pool, &test_client(), TEST_USER_AGENT, &mut candidates)
             .await
             .unwrap();
         assert_eq!(candidates[0].artist, "Alice & Bob");
@@ -393,7 +453,7 @@ mod tests {
             }],
             ..Default::default()
         }];
-        canonicalize_candidates(&pool, &mut candidates)
+        canonicalize_candidates(&pool, &test_client(), TEST_USER_AGENT, &mut candidates)
             .await
             .unwrap();
         assert_eq!(candidates[0].artist, "Selena Gomez & the Scene");
@@ -418,7 +478,7 @@ mod tests {
             artist_credits: vec![ArtistCredit::new("Simon & Garfunkel", "")],
             ..Default::default()
         }];
-        canonicalize_candidates(&pool, &mut candidates)
+        canonicalize_candidates(&pool, &test_client(), TEST_USER_AGENT, &mut candidates)
             .await
             .unwrap();
         assert_eq!(candidates[0].artist, "Simon & Garfunkel");

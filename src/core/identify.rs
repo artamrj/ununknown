@@ -135,7 +135,13 @@ pub(crate) async fn identify(
     for candidate in &mut out {
         normalize_candidate_credits(candidate);
     }
-    crate::workers::canonical::canonicalize_candidates(&state.pool, &mut out).await?;
+    crate::workers::canonical::canonicalize_candidates(
+        &state.pool,
+        &state.client,
+        &cfg.musicbrainz_user_agent,
+        &mut out,
+    )
+    .await?;
     apply_source_agreement(&mut out)?;
     enrich_artwork_fallbacks(&mut out)?;
     apply_artwork_override(&state.pool, path, &mut out).await?;

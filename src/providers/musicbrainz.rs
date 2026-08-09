@@ -136,6 +136,66 @@ pub async fn artist_aliases(
     Ok(aliases)
 }
 
+pub async fn artist_type(
+    pool: &SqlitePool,
+    client: &Client,
+    user_agent: &str,
+    name: &str,
+) -> Result<Option<String>> {
+    if let Some(cached) =
+        sqlx::query_as::<_, (String,)>("SELECT artist_type FROM artist_types_cache WHERE name=?")
+            .bind(name)
+            .fetch_optional(pool)
+            .await?
+            .map(|(t,)| t)
+    {
+        return Ok(Some(cached));
+    }
+    validate_user_agent(user_agent)?;
+    let query = format!("artist:\"{name}\"");
+    let key = format!("artist-type:{}", search_key(&query));
+    let raw = if let Some(value) = ProviderCache::get(pool, "musicbrainz", &key).await? {
+        value
+    } else {
+        let value = request_json(
+            client
+                .get("https://musicbrainz.org/ws/2/artist")
+                .query(&[("fmt", "json"), ("limit", "1"), ("query", &query)])
+                .header("User-Agent", user_agent),
+        )
+        .await?;
+        ProviderCache::put(
+            pool,
+            "musicbrainz",
+            &key,
+            &value,
+            Utc::now() + ChronoDuration::days(30),
+        )
+        .await?;
+        value
+    };
+    let artist_type = raw["artists"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .next()
+        .and_then(|artist| artist["type"].as_str())
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    if let Some(ref t) = artist_type {
+        sqlx::query(
+            "INSERT INTO artist_types_cache(name,artist_type,updated_at) VALUES(?,?,?)
+             ON CONFLICT(name) DO UPDATE SET artist_type=excluded.artist_type,updated_at=excluded.updated_at",
+        )
+        .bind(name)
+        .bind(t)
+        .bind(Utc::now().to_rfc3339())
+        .execute(pool)
+        .await?;
+    }
+    Ok(artist_type)
+}
+
 fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     let release = best_recording_release(raw, id);
     let release_group = release.and_then(|v| v.get("release-group"));

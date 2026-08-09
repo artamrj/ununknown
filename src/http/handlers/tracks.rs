@@ -206,6 +206,7 @@ pub async fn auto_approve_review(
     let mut decisions = Vec::new();
     let mut low_confidence = 0_u64;
     let mut unavailable = 0_u64;
+    let cfg = s.config.read().await.clone();
     for track in tracks {
         if track.status == "corrupt" || track.is_missing {
             unavailable += 1;
@@ -253,6 +254,8 @@ pub async fn auto_approve_review(
             );
             crate::workers::canonical::canonicalize_candidates(
                 &s.pool,
+                &s.client,
+                &cfg.musicbrainz_user_agent,
                 std::slice::from_mut(&mut selected),
             )
             .await?;
@@ -457,8 +460,11 @@ pub async fn select_candidate(
         track.current_artist.as_deref(),
         track.current_title.as_deref(),
     );
+    let cfg = s.config.read().await.clone();
     crate::workers::canonical::canonicalize_candidates(
         &s.pool,
+        &s.client,
+        &cfg.musicbrainz_user_agent,
         std::slice::from_mut(&mut selected),
     )
     .await?;
@@ -682,8 +688,11 @@ pub async fn manual_candidate(
         source_artist.as_deref(),
         source_title.as_deref(),
     );
+    let cfg = s.config.read().await.clone();
     crate::workers::canonical::canonicalize_candidates(
         &s.pool,
+        &s.client,
+        &cfg.musicbrainz_user_agent,
         std::slice::from_mut(&mut release_fields),
     )
     .await?;

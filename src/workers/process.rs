@@ -471,6 +471,8 @@ pub(crate) async fn process(
     );
     crate::workers::canonical::canonicalize_candidates(
         &state.pool,
+        &state.client,
+        &cfg.musicbrainz_user_agent,
         std::slice::from_mut(&mut candidate),
     )
     .await?;
