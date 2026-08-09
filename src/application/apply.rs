@@ -86,9 +86,17 @@ fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::c
         &candidate.title,
         candidate.artist_credits.clone(),
     );
-    if !candidate.artist_credits.is_empty() {
-        return candidate_credits;
-    }
+    prefer_source_credits(track, candidate_credits)
+}
+
+/// When the candidate's artist names are a strict subset of the source file's
+/// credits (the candidate dropped featured artists or is featured-only), the
+/// source credit is the fuller, correct human-readable credit and wins.
+/// Otherwise the candidate credit wins.
+fn prefer_source_credits(
+    track: &Track,
+    candidate_credits: crate::domain::credits::Credits,
+) -> crate::domain::credits::Credits {
     let Some(source_artist) = track.current_artist.as_deref() else {
         return candidate_credits;
     };
@@ -109,16 +117,30 @@ fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::c
             .iter()
             .any(|source_name| names_equal(candidate_name, source_name))
     });
-    let source_has_extra_primary = source_names.iter().any(|source_name| {
+    let source_has_extra = source_names.iter().any(|source_name| {
         !candidate_names
             .iter()
             .any(|candidate_name| names_equal(candidate_name, source_name))
     });
-    if candidate_is_subset && source_has_extra_primary {
+    if candidate_is_subset && source_has_extra {
         source_credits
     } else {
         candidate_credits
     }
+}
+
+/// Enrich the candidate with the fuller source credit set so the written tags
+/// (ARTIST/ARTISTS) match the destination filename.
+fn merge_source_credits(track: &Track, candidate: &mut Candidate) {
+    let candidate_credits = crate::domain::credits::normalize_structured(
+        &candidate.artist,
+        &candidate.title,
+        candidate.artist_credits.clone(),
+    );
+    let merged = prefer_source_credits(track, candidate_credits);
+    candidate.artist = merged.artist;
+    candidate.title = merged.title;
+    candidate.artist_credits = merged.artists;
 }
 
 fn safe_filename_part(value: &str, fallback: &str) -> String {
@@ -210,6 +232,80 @@ mod filename_tests {
         let credits = destination_credits(&track, &candidate);
         assert_eq!(credits.artist, "Arta feat. Koorosh & Sami Low");
     }
+
+    fn track_with(title: &str, artist: &str) -> Track {
+        Track {
+            id: TrackId(1),
+            path: format!("/music/{artist} - {title}.mp3"),
+            output_path: None,
+            filename: format!("{artist} - {title}.mp3"),
+            format: Some("mp3".into()),
+            bitrate: None,
+            duration: None,
+            content_fingerprint: None,
+            current_title: Some(title.to_owned()),
+            current_artist: Some(artist.to_owned()),
+            current_album: None,
+            current_album_artist: None,
+            current_track_number: None,
+            selected_candidate_id: None,
+            status: "selected".into(),
+            error: None,
+            is_missing: false,
+            stage: TrackStage::Ready,
+            stage_message: None,
+            retry_count: 0,
+            next_retry_at: None,
+        }
+    }
+
+    #[test]
+    fn destination_credits_keep_source_featured_when_candidate_dropped_them() {
+        let track = track_with("Moorche (feat. Mehrad Hidden)", "Sepehr Khalse");
+        let candidate = Candidate {
+            title: "Moorche".into(),
+            artist: "Sepehr Khalse".into(),
+            artist_credits: vec![crate::domain::credits::ArtistCredit::new(
+                "Sepehr Khalse",
+                "",
+            )],
+            ..Default::default()
+        };
+        let credits = destination_credits(&track, &candidate);
+        assert_eq!(credits.artist, "Sepehr Khalse feat. Mehrad Hidden");
+    }
+
+    #[test]
+    fn destination_credits_keep_source_primary_when_candidate_is_featured_only() {
+        let track = track_with("Marze Por Gohar (feat. Golshifteh Farahani)", "Ali Azimi");
+        let candidate = Candidate {
+            title: "Marze Por Gohar".into(),
+            artist: "Golshifteh Farahani".into(),
+            artist_credits: vec![crate::domain::credits::ArtistCredit::new(
+                "Golshifteh Farahani",
+                "",
+            )],
+            ..Default::default()
+        };
+        let credits = destination_credits(&track, &candidate);
+        assert_eq!(credits.artist, "Ali Azimi feat. Golshifteh Farahani");
+    }
+
+    #[test]
+    fn destination_credits_keep_candidate_when_artists_differ_from_source() {
+        let track = track_with("Marze Por Gohar (feat. Golshifteh Farahani)", "Ali Azimi");
+        let candidate = Candidate {
+            title: "Marze Por Gohar".into(),
+            artist: "Different Artist".into(),
+            artist_credits: vec![crate::domain::credits::ArtistCredit::new(
+                "Different Artist",
+                "",
+            )],
+            ..Default::default()
+        };
+        let credits = destination_credits(&track, &candidate);
+        assert_eq!(credits.artist, "Different Artist");
+    }
 }
 
 pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
@@ -269,6 +365,7 @@ pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
                 existing_album.as_deref(),
                 false,
             );
+            merge_source_credits(&source.track, candidate);
             crate::application::canonical_names::canonicalize_candidates(
                 &s.pool,
                 std::slice::from_mut(candidate),

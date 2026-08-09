@@ -340,7 +340,7 @@ mod tests {
             "thumbnail_url": "https://i1.sndcdn.com/artworks-id-t500x500.jpg"
         }))
         .unwrap();
-        assert_eq!(candidate.artist, "Arta feat. Koorosh, Sami Low, & Raha");
+        assert_eq!(candidate.artist, "Arta feat. Koorosh; Sami Low; Raha");
         assert_eq!(candidate.title, "Hanooz Yadame");
         assert_eq!(candidate.score, 94.0);
     }

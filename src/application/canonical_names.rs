@@ -1,11 +1,11 @@
 use crate::{
-    domain::credits::{display_artist, identity_key},
+    domain::credits::{clean_text, display_artist, identity_key},
     infrastructure::providers::{ArtistCredit, Candidate},
 };
 use anyhow::Result;
 use chrono::Utc;
 use sqlx::SqlitePool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct Canonical {
@@ -74,6 +74,12 @@ pub async fn canonicalize_candidates(
         .await?;
     }
 
+    let known_names = collect_known_names(&winners, pool).await?;
+    for candidate in &mut *candidates {
+        resolve_ampersand_credits(&mut candidate.artist_credits, &known_names);
+        resolve_ampersand_credits(&mut candidate.album_artist_credits, &known_names);
+    }
+
     for candidate in candidates {
         apply_credits(&mut candidate.artist_credits, &winners);
         apply_credits(&mut candidate.album_artist_credits, &winners);
@@ -108,6 +114,71 @@ fn normalize_candidate_credits(candidate: &mut Candidate) {
         candidate.album_artist = Some(credits.artist);
         candidate.album_artist_credits = credits.artists;
     }
+}
+
+async fn collect_known_names(
+    winners: &HashMap<(String, String), Canonical>,
+    pool: &SqlitePool,
+) -> Result<HashSet<String>> {
+    let mut names = winners
+        .keys()
+        .filter(|(kind, _)| kind == "artist")
+        .filter_map(|(_, key)| key.strip_prefix("name:"))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let rows = sqlx::query_as::<_, (String,)>(
+        "SELECT identity_key FROM canonical_names WHERE kind='artist' AND identity_key LIKE 'name:%'",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (key,) in rows {
+        if let Some(name) = key.strip_prefix("name:") {
+            names.insert(name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+/// Split a bare "X & Y" credit into separate artists only when the catalog
+/// evidence identifies each side as a real artist and the whole name is not a
+/// registered artist (an MBID-bearing group such as "Selena Gomez & the Scene").
+/// Unverifiable pairs stay whole rather than blindly splitting group names.
+fn resolve_ampersand_credits(credits: &mut Vec<ArtistCredit>, known_names: &HashSet<String>) {
+    let mut out = Vec::with_capacity(credits.len());
+    for credit in credits.drain(..) {
+        if credit.musicbrainz_id.is_some() {
+            out.push(credit);
+            continue;
+        }
+        let Some(sides) = known_ampersand_split(&credit.name, known_names) else {
+            out.push(credit);
+            continue;
+        };
+        let total = sides.len();
+        for (index, name) in sides.into_iter().enumerate() {
+            let join = if index + 1 < total { " & " } else { "" };
+            out.push(ArtistCredit::new(name, join));
+        }
+    }
+    *credits = out;
+}
+
+fn known_ampersand_split(name: &str, known_names: &HashSet<String>) -> Option<Vec<String>> {
+    if !name.contains(" & ") {
+        return None;
+    }
+    let sides = name
+        .split(" & ")
+        .map(clean_text)
+        .filter(|side| !side.is_empty())
+        .collect::<Vec<_>>();
+    if sides.len() < 2 {
+        return None;
+    }
+    sides
+        .iter()
+        .all(|side| known_names.contains(&identity_key(side)))
+        .then_some(sides)
 }
 
 fn collect_credits(
@@ -248,5 +319,90 @@ mod tests {
         );
         assert_eq!(candidate.artist_credits.len(), 1);
         assert_eq!(candidate.album_artist_credits.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ampersand_pair_splits_when_both_sides_are_known_artists() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("pair.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        for (name, key) in [("Alice", "name:alice"), ("Bob", "name:bob")] {
+            sqlx::query(
+                "INSERT INTO canonical_names(kind,identity_key,canonical_value,authority,updated_at)
+                 VALUES('artist',?,?,80,?)",
+            )
+            .bind(key)
+            .bind(name)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut candidates = vec![Candidate {
+            provider: "genius".into(),
+            title: "Song".into(),
+            artist: "Alice & Bob".into(),
+            artist_credits: vec![ArtistCredit::new("Alice & Bob", "")],
+            ..Default::default()
+        }];
+        canonicalize_candidates(&pool, &mut candidates)
+            .await
+            .unwrap();
+        assert_eq!(candidates[0].artist, "Alice & Bob");
+        assert_eq!(candidates[0].artist_credits.len(), 2);
+        assert_eq!(candidates[0].artist_credits[0].name, "Alice");
+        assert_eq!(candidates[0].artist_credits[1].name, "Bob");
+    }
+
+    #[tokio::test]
+    async fn registered_group_with_ampersand_stays_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("group.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let mut candidates = vec![Candidate {
+            provider: "musicbrainz".into(),
+            title: "Love You Like a Love Song".into(),
+            artist: "Selena Gomez & The Scene".into(),
+            artist_credits: vec![ArtistCredit {
+                name: "Selena Gomez & the Scene".into(),
+                join_phrase: String::new(),
+                musicbrainz_id: Some("ae7572e2-2833-4864-b2e1-4c2c3e1e6b5f".into()),
+            }],
+            ..Default::default()
+        }];
+        canonicalize_candidates(&pool, &mut candidates)
+            .await
+            .unwrap();
+        assert_eq!(candidates[0].artist, "Selena Gomez & the Scene");
+        assert_eq!(candidates[0].artist_credits.len(), 1);
+        assert_eq!(
+            candidates[0].artist_credits[0].name,
+            "Selena Gomez & the Scene"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_ampersand_pair_stays_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("unknown.sqlite");
+        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+            .await
+            .unwrap();
+        let mut candidates = vec![Candidate {
+            provider: "genius".into(),
+            title: "The Sound of Silence".into(),
+            artist: "Simon & Garfunkel".into(),
+            artist_credits: vec![ArtistCredit::new("Simon & Garfunkel", "")],
+            ..Default::default()
+        }];
+        canonicalize_candidates(&pool, &mut candidates)
+            .await
+            .unwrap();
+        assert_eq!(candidates[0].artist, "Simon & Garfunkel");
+        assert_eq!(candidates[0].artist_credits.len(), 1);
     }
 }

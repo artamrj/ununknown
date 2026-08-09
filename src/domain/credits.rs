@@ -245,7 +245,10 @@ fn parse_ambiguous_collaboration(value: &str) -> Option<Vec<ArtistCredit>> {
     }
     let mut names = Vec::new();
     for chunk in value.split(',') {
-        let chunk = clean_text(chunk);
+        let mut chunk = clean_text(chunk);
+        if let Some(rest) = chunk.strip_prefix("& ") {
+            chunk = clean_text(rest);
+        }
         if chunk.is_empty() {
             continue;
         }
@@ -286,6 +289,13 @@ fn parse_ambiguous_collaboration(value: &str) -> Option<Vec<ArtistCredit>> {
 }
 
 fn append_featured_artists(artists: &mut Vec<ArtistCredit>, featured: Vec<ArtistCredit>) {
+    for credit in &featured {
+        for existing in artists.iter_mut() {
+            if let Some(stripped) = strip_duplicate_ampersand_tail(&existing.name, &credit.name) {
+                existing.name = stripped;
+            }
+        }
+    }
     let mut additions = Vec::new();
     for credit in featured {
         if artists
@@ -318,6 +328,13 @@ fn append_featured_artists(artists: &mut Vec<ArtistCredit>, featured: Vec<Artist
         let join = if index + 1 < total { "; " } else { "" };
         artists.push(ArtistCredit::new(name, join));
     }
+}
+
+fn strip_duplicate_ampersand_tail(name: &str, featured: &str) -> Option<String> {
+    let index = name.rfind(" & ")?;
+    let head = clean_text(&name[..index]);
+    let tail = clean_text(&name[index + 3..]);
+    (!head.is_empty() && !tail.is_empty() && same_name(&tail, featured)).then_some(head)
 }
 
 fn normalize_join_phrase(value: &str) -> String {
@@ -393,6 +410,7 @@ mod tests {
         for artist in [
             "Simon & Garfunkel",
             "Earth, Wind & Fire",
+            "Selena Gomez & the Scene",
             "A and B",
             "A x B",
             "AC/DC",
@@ -409,7 +427,10 @@ mod tests {
     fn comma_and_ampersand_collaboration_is_split_into_individual_artists() {
         let credits = normalize_featured("Arta, Koorosh & Sami Low", "Cheshm Beham Bezani");
         assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low");
-        assert_eq!(individual_names(&credits.artists), ["Arta", "Koorosh", "Sami Low"]);
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Arta", "Koorosh", "Sami Low"]
+        );
     }
 
     #[test]
@@ -436,6 +457,33 @@ mod tests {
     #[test]
     fn persian_only_artist_is_preserved() {
         assert_eq!(prefer_latin_alias("هایده"), "هایده");
+    }
+
+    #[test]
+    fn featured_tail_ampersand_is_reconciled_with_featured_credit() {
+        let credits = normalize_featured("Alice & Bob", "Song (feat. Bob)");
+        assert_eq!(credits.title, "Song");
+        assert_eq!(credits.artist, "Alice feat. Bob");
+        assert_eq!(individual_names(&credits.artists), ["Alice", "Bob"]);
+    }
+
+    #[test]
+    fn multi_featured_tail_strips_the_matching_ampersand_tail() {
+        let credits = normalize_featured("Alice & Bob & Carol", "Song (feat. Carol)");
+        assert_eq!(credits.title, "Song");
+        assert_eq!(credits.artist, "Alice & Bob feat. Carol");
+        assert_eq!(individual_names(&credits.artists), ["Alice & Bob", "Carol"]);
+    }
+
+    #[test]
+    fn oxford_comma_ampersand_featured_is_parsed_as_individual_artists() {
+        let credits = normalize_featured("Arta", "Hanooz Yadame (Ft Koorosh, Sami Low, & Raha)");
+        assert_eq!(credits.title, "Hanooz Yadame");
+        assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low; Raha");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Arta", "Koorosh", "Sami Low", "Raha"]
+        );
     }
 
     #[test]

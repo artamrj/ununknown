@@ -189,6 +189,10 @@ The **apply service** (`src/application/apply.rs`, reached from the HTTP endpoin
    re-group by recording evidence, pick one representative per group (promoting the
    best *available* input if the selected one is missing), and compute each
    destination filename. Duplicates become `DuplicateSource` entries on the item.
+   When the candidate's artist credits are a strict subset of the source file's
+   credits (a candidate that dropped featured artists or is featured-only), the
+   fuller source credit wins so both the filename and the written ARTIST/ARTISTS
+   tags keep every real performer.
 2. **Per output** (`apply`, `apply.rs:722`):
    - **ReplayGain** — measure loudness with `replaygain::get_or_analyze` (cached).
      Failure never blocks the write.
@@ -311,7 +315,11 @@ first, expensive or optional ones only when needed:
    **TheAudioDB**, **Wikidata** (also supplies artist genres).
 
 Post-processing per track:
-- Credits are normalized (`canonical_names`, `domain/credits`).
+- Credits are normalized (`canonical_names`, `domain/credits`). A `& X` tail that
+  duplicates a title-featured credit is reconciled, and ambiguous `X & Y` credits
+  split into separate artists only when the `canonical_names` evidence knows each
+  side as a real artist — MBID-bearing groups (e.g. "Selena Gomez & the Scene")
+  always stay whole.
 - Candidates are canonicalized (alias/prefer-latin names).
 - **Source agreement** (`apply_source_agreement`) boosts corroborating rows.
 - Artwork fallbacks + `artwork_overrides` are applied.
