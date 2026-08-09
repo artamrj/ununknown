@@ -583,6 +583,21 @@ function CandidateRow({
         <b>{verdict.title}</b>
         <span>{verdict.detail}</span>
       </div>
+      {signals[4]?.tone === "warning" && (
+        <div className="candidate-verdict risk">
+          <Icon name="alert" size={14} />
+          <b>
+            {signals[4].value === "Release not found"
+              ? "Release evidence missing"
+              : "Release edition conflict"}
+          </b>
+          <span>
+            {signals[4].value === "Release not found"
+              ? "This result does not identify an album matching the file. It will not be auto-approved."
+              : "This result is from a different release than the album in your file. It will not be auto-approved."}
+          </span>
+        </div>
+      )}
       <div
         className="candidate-comparison"
         aria-label={`Compare option ${rank} with original file`}

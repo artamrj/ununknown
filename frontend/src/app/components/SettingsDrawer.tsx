@@ -40,23 +40,6 @@ export function SettingsDrawer({
         </header>
         <div className="drawer-content">
           <section>
-            <h3>File locations</h3>
-            <label>
-              <span>Music folder</span>
-              <input
-                value={setup.input_dir}
-                onChange={(event) => setSetup({ ...setup, input_dir: event.target.value })}
-              />
-            </label>
-            <label>
-              <span>Corrected copies</span>
-              <input
-                value={setup.output_dir}
-                onChange={(event) => setSetup({ ...setup, output_dir: event.target.value })}
-              />
-            </label>
-          </section>
-          <section>
             <h3>Original files</h3>
             <label className={`danger-toggle ${setup.delete_source_after_write ? "enabled" : ""}`}>
               <input
@@ -200,11 +183,7 @@ export function SettingsDrawer({
           </details>
         </div>
         <footer>
-          <button
-            className="primary-action"
-            disabled={saving || !setup.input_dir.trim() || !setup.output_dir.trim()}
-            onClick={() => void onSave()}
-          >
+          <button className="primary-action" disabled={saving} onClick={() => void onSave()}>
             {saving ? <span className="spinner" /> : <Icon name="check" />}Save settings
           </button>
         </footer>

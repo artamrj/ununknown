@@ -6,11 +6,9 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .arg("-version")
         .output()
         .is_ok();
-    let ffmpeg = crate::infrastructure::media::replaygain::available();
-    let songrec = crate::infrastructure::providers::songrec::available();
+    let ffmpeg = crate::media::replaygain::available();
+    let songrec = crate::providers::songrec::available();
     Json(serde_json::json!({
-        "input_dir": cfg.input_dir,
-        "output_dir": cfg.output_dir,
         "delete_source_after_write": cfg.delete_source_after_write,
         "automatic_scan_enabled": cfg.automatic_scan_enabled,
         "automatic_scan_interval_minutes": cfg.automatic_scan_interval_minutes,
@@ -27,7 +25,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "ffmpeg": ffmpeg,
             "songrec": songrec,
             "shazam": true,
-            "integrity_check": crate::infrastructure::media::integrity::available(),
+            "integrity_check": crate::media::integrity::available(),
             "acoustid": !cfg.acoustid_key.is_empty(),
             "audd": !cfg.audd_token.is_empty(),
             "spotify": !cfg.spotify_client_id.is_empty() && !cfg.spotify_client_secret.is_empty(),
@@ -46,32 +44,10 @@ pub async fn update_setup(
     State(s): State<Arc<AppState>>,
     Json(body): Json<SetupRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let input_dir = body.input_dir.trim();
-    let output_dir = body.output_dir.trim();
-    if input_dir.is_empty() || output_dir.is_empty() {
-        return Err(ApiError::validation(
-            "Input and output folders are required",
-        ));
-    }
-    if !std::path::Path::new(input_dir).is_dir() {
-        return Err(ApiError::validation("Input folder does not exist"));
-    }
-    tokio::fs::create_dir_all(output_dir).await?;
-
     let mut cfg = s.config.read().await.clone();
-    let input_path = tokio::fs::canonicalize(input_dir).await?;
-    let output_path = tokio::fs::canonicalize(output_dir).await?;
-    let delete_source_after_write = body
+    cfg.delete_source_after_write = body
         .delete_source_after_write
         .unwrap_or(cfg.delete_source_after_write);
-    if delete_source_after_write && input_path == output_path {
-        return Err(ApiError::validation(
-            "Input and output folders must be different when source removal is enabled",
-        ));
-    }
-    cfg.input_dir = input_dir.into();
-    cfg.output_dir = output_dir.into();
-    cfg.delete_source_after_write = delete_source_after_write;
     cfg.automatic_scan_enabled = body
         .automatic_scan_enabled
         .unwrap_or(cfg.automatic_scan_enabled);
@@ -124,7 +100,7 @@ pub async fn update_setup(
     if let Some(value) = body.theaudiodb_key.filter(|value| !value.trim().is_empty()) {
         cfg.theaudiodb_key = value.trim().into();
     }
-    crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
+    crate::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
     s.notify_automation_scheduler();
     Ok(Json(serde_json::json!({"saved": true})))

@@ -37,13 +37,11 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
-impl From<crate::infrastructure::db::tracks::TrackError> for ApiError {
-    fn from(error: crate::infrastructure::db::tracks::TrackError) -> Self {
+impl From<crate::db::queries::TrackError> for ApiError {
+    fn from(error: crate::db::queries::TrackError) -> Self {
         match error {
-            crate::infrastructure::db::tracks::TrackError::NotFound(message) => {
-                Self::NotFound(message)
-            }
-            crate::infrastructure::db::tracks::TrackError::Sqlx(error) => Self::from(error),
+            crate::db::queries::TrackError::NotFound(message) => Self::NotFound(message),
+            crate::db::queries::TrackError::Sqlx(error) => Self::from(error),
         }
     }
 }

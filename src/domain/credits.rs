@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -85,27 +86,15 @@ fn is_arabic_script(character: char) -> bool {
 }
 
 /// Normalize a display credit while retaining the individual artist identities.
-/// Only separators recognized by Navidrome are parsed. In particular, `&`,
-/// `and`, `x`, commas, and bare slashes are deliberately left inside a name.
+/// Definite separators are always parsed; ambiguous delimiters are only split
+/// when a collaboration is strongly implied.
 pub fn normalize_featured(artist: &str, title: &str) -> Credits {
     let artist = clean_text(artist);
     let (title, featured) = remove_feature_clause(title);
     let mut artists = parse_supported_credit(&artist);
 
     if let Some(featured) = featured {
-        let featured = parse_supported_credit(&featured);
-        for credit in featured {
-            if artists
-                .iter()
-                .any(|existing| same_name(&existing.name, &credit.name))
-            {
-                continue;
-            }
-            if let Some(last) = artists.last_mut() {
-                last.join_phrase = " feat. ".into();
-            }
-            artists.push(ArtistCredit::new(credit.name, ""));
-        }
+        append_featured_artists(&mut artists, parse_supported_credit(&featured));
     }
     if artists.is_empty() && !artist.is_empty() {
         artists.push(ArtistCredit::new(&artist, ""));
@@ -137,18 +126,7 @@ pub fn normalize_structured(display: &str, title: &str, mut artists: Vec<ArtistC
 
     let (title, featured) = remove_feature_clause(title);
     if let Some(featured) = featured {
-        for featured in parse_supported_credit(&featured) {
-            if artists
-                .iter()
-                .any(|existing| same_name(&existing.name, &featured.name))
-            {
-                continue;
-            }
-            if let Some(last) = artists.last_mut() {
-                last.join_phrase = " feat. ".into();
-            }
-            artists.push(ArtistCredit::new(featured.name, ""));
-        }
+        append_featured_artists(&mut artists, parse_supported_credit(&featured));
     }
     if artists.is_empty() {
         return normalize_featured(display, &title);
@@ -208,6 +186,62 @@ pub fn individual_names(artists: &[ArtistCredit]) -> Vec<String> {
     names
 }
 
+/// Identity keys of every constituent artist, expanding "X & Y" so a split
+/// candidate and an unsplit source (or vice versa) compare equal.
+pub fn constituent_identities(credits: &[ArtistCredit]) -> HashSet<String> {
+    credits
+        .iter()
+        .flat_map(|credit| credit.name.split(" & "))
+        .map(identity_key)
+        .collect()
+}
+
+/// When the candidate's artist names are a strict subset of the source file's
+/// credits (the candidate dropped featured artists or is featured-only), the
+/// source credit is the fuller, correct human-readable credit and wins.
+/// Otherwise the candidate credit wins.
+pub fn prefer_source_credits(
+    source_artist: Option<&str>,
+    source_title: Option<&str>,
+    candidate_credits: Credits,
+) -> Credits {
+    let Some(source_artist) = source_artist.filter(|value| !value.trim().is_empty()) else {
+        return candidate_credits;
+    };
+    let Some(source_title) = source_title.filter(|value| !value.trim().is_empty()) else {
+        return candidate_credits;
+    };
+    let source_credits = normalize_featured(source_artist, source_title);
+    let candidate_ids = constituent_identities(&candidate_credits.artists);
+    let source_ids = constituent_identities(&source_credits.artists);
+    if candidate_ids.is_empty() || source_ids.is_empty() {
+        return candidate_credits;
+    }
+    let candidate_is_subset = candidate_ids.iter().all(|id| source_ids.contains(id));
+    let source_has_extra = source_ids.iter().any(|id| !candidate_ids.contains(id));
+    if candidate_is_subset && source_has_extra {
+        source_credits
+    } else {
+        candidate_credits
+    }
+}
+
+/// The single credit pipeline: normalize the provider credits (moving any title
+/// featured credit into the artist list), then prefer the fuller source credit
+/// set when the candidate is a strict subset of it. Evidence-based ampersand
+/// resolution and spelling canonicalization run separately in the application
+/// layer (`workers::canonical::canonicalize_candidates`).
+pub fn finalize_credits(
+    display: &str,
+    title: &str,
+    provider_credits: Vec<ArtistCredit>,
+    source_artist: Option<&str>,
+    source_title: Option<&str>,
+) -> Credits {
+    let candidate = normalize_structured(display, title, provider_credits);
+    prefer_source_credits(source_artist, source_title, candidate)
+}
+
 /// Remove performer credits from a release title without changing legitimate
 /// title/version text. Release-type policy (for example, mapping a confirmed
 /// standalone single to `Single`) is handled by metadata completion.
@@ -254,7 +288,110 @@ fn parse_supported_credit(value: &str) -> Vec<ArtistCredit> {
         rest = rest[index + separator.len()..].trim().to_owned();
     }
     out.retain(|credit| !credit.name.is_empty());
+    if out.len() == 1
+        && let Some(ambiguous) = parse_ambiguous_collaboration(&out[0].name)
+    {
+        return ambiguous;
+    }
     out
+}
+
+fn parse_ambiguous_collaboration(value: &str) -> Option<Vec<ArtistCredit>> {
+    if !value.contains(',') {
+        return None;
+    }
+    let mut names = Vec::new();
+    for chunk in value.split(',') {
+        let mut chunk = clean_text(chunk);
+        if let Some(rest) = chunk.strip_prefix("& ") {
+            chunk = clean_text(rest);
+        }
+        if chunk.is_empty() {
+            continue;
+        }
+        if let Some((left, right)) = chunk.split_once(" & ")
+            && !left.trim().is_empty()
+            && !right.trim().is_empty()
+        {
+            names.push(clean_text(left));
+            names.push(clean_text(right));
+        } else {
+            names.push(chunk);
+        }
+    }
+    if names.len() < 2
+        || names
+            .iter()
+            .all(|name| name.split_whitespace().count() <= 1)
+    {
+        return None;
+    }
+    let total = names.len();
+    Some(
+        names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let join = if index == 0 && total > 1 {
+                    " feat. "
+                } else if index + 1 < total {
+                    "; "
+                } else {
+                    ""
+                };
+                ArtistCredit::new(name, join)
+            })
+            .collect(),
+    )
+}
+
+fn append_featured_artists(artists: &mut Vec<ArtistCredit>, featured: Vec<ArtistCredit>) {
+    for credit in &featured {
+        for existing in artists.iter_mut() {
+            if let Some(stripped) = strip_duplicate_ampersand_tail(&existing.name, &credit.name) {
+                existing.name = stripped;
+            }
+        }
+    }
+    let mut additions = Vec::new();
+    for credit in featured {
+        if artists
+            .iter()
+            .any(|existing| same_name(&existing.name, &credit.name))
+            || additions
+                .iter()
+                .any(|existing: &String| same_name(existing, &credit.name))
+        {
+            continue;
+        }
+        additions.push(credit.name);
+    }
+    if additions.is_empty() {
+        return;
+    }
+    if artists.is_empty() {
+        let total = additions.len();
+        for (index, name) in additions.into_iter().enumerate() {
+            let join = if index + 1 < total { "; " } else { "" };
+            artists.push(ArtistCredit::new(name, join));
+        }
+        return;
+    }
+    if let Some(last) = artists.last_mut() {
+        last.join_phrase = " feat. ".into();
+    }
+    let total = additions.len();
+    for (index, name) in additions.into_iter().enumerate() {
+        let join = if index + 1 < total { "; " } else { "" };
+        artists.push(ArtistCredit::new(name, join));
+    }
+}
+
+fn strip_duplicate_ampersand_tail(name: &str, featured: &str) -> Option<String> {
+    let index = name.rfind(" & ")?;
+    let head = clean_text(&name[..index]);
+    let tail = clean_text(&name[index + 3..]);
+    (!head.is_empty() && !tail.is_empty() && same_name(&tail, featured)).then_some(head)
 }
 
 fn normalize_join_phrase(value: &str) -> String {
@@ -330,6 +467,7 @@ mod tests {
         for artist in [
             "Simon & Garfunkel",
             "Earth, Wind & Fire",
+            "Selena Gomez & the Scene",
             "A and B",
             "A x B",
             "AC/DC",
@@ -340,6 +478,16 @@ mod tests {
                 "{artist}"
             );
         }
+    }
+
+    #[test]
+    fn comma_and_ampersand_collaboration_is_split_into_individual_artists() {
+        let credits = normalize_featured("Arta, Koorosh & Sami Low", "Cheshm Beham Bezani");
+        assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Arta", "Koorosh", "Sami Low"]
+        );
     }
 
     #[test]
@@ -369,13 +517,79 @@ mod tests {
     }
 
     #[test]
+    fn featured_tail_ampersand_is_reconciled_with_featured_credit() {
+        let credits = normalize_featured("Alice & Bob", "Song (feat. Bob)");
+        assert_eq!(credits.title, "Song");
+        assert_eq!(credits.artist, "Alice feat. Bob");
+        assert_eq!(individual_names(&credits.artists), ["Alice", "Bob"]);
+    }
+
+    #[test]
+    fn finalize_merges_source_primary_when_candidate_dropped_it() {
+        let credits = finalize_credits(
+            "Golshifteh Farahani",
+            "Marze Por Gohar",
+            vec![ArtistCredit::new("Golshifteh Farahani", "")],
+            Some("Ali Azimi feat. Golshifteh Farahani"),
+            Some("Marze Por Gohar"),
+        );
+        assert_eq!(credits.artist, "Ali Azimi feat. Golshifteh Farahani");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Ali Azimi", "Golshifteh Farahani"]
+        );
+    }
+
+    #[test]
+    fn finalize_keeps_candidate_credits_when_not_a_source_subset() {
+        let credits = finalize_credits(
+            "Ali Azimi feat. Golshifteh Farahani",
+            "Marze Por Gohar",
+            vec![
+                ArtistCredit::new("Ali Azimi", " feat. "),
+                ArtistCredit::new("Golshifteh Farahani", ""),
+            ],
+            Some("Ali Azimi"),
+            Some("Marze Por Gohar"),
+        );
+        assert_eq!(credits.artist, "Ali Azimi feat. Golshifteh Farahani");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Ali Azimi", "Golshifteh Farahani"]
+        );
+    }
+
+    #[test]
+    fn multi_featured_tail_strips_the_matching_ampersand_tail() {
+        let credits = normalize_featured("Alice & Bob & Carol", "Song (feat. Carol)");
+        assert_eq!(credits.title, "Song");
+        assert_eq!(credits.artist, "Alice & Bob feat. Carol");
+        assert_eq!(individual_names(&credits.artists), ["Alice & Bob", "Carol"]);
+    }
+
+    #[test]
+    fn oxford_comma_ampersand_featured_is_parsed_as_individual_artists() {
+        let credits = normalize_featured("Arta", "Hanooz Yadame (Ft Koorosh, Sami Low, & Raha)");
+        assert_eq!(credits.title, "Hanooz Yadame");
+        assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low; Raha");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Arta", "Koorosh", "Sami Low", "Raha"]
+        );
+    }
+
+    #[test]
     fn removes_a_duplicate_trailing_feature_credit() {
         let credits = normalize_featured(
             "Arta",
             "Hanooz Yadame (feat. Koorosh, Sami Low & Raha) feat. Koorosh,Sami Low,Raha",
         );
         assert_eq!(credits.title, "Hanooz Yadame");
-        assert_eq!(credits.artist, "Arta feat. Koorosh, Sami Low & Raha");
+        assert_eq!(credits.artist, "Arta feat. Koorosh; Sami Low; Raha");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Arta", "Koorosh", "Sami Low", "Raha"]
+        );
     }
 
     #[test]

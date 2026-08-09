@@ -47,10 +47,10 @@ impl Default for Config {
             lastfm_key: String::new(),
             theaudiodb_key: String::new(),
             musicbrainz_user_agent: "Ununknown/0.6 (https://github.com/artamrj/ununknown)".into(),
-            scan_workers: 6,
-            fingerprint_workers: 3,
-            lookup_workers: 3,
-            write_workers: 2,
+            scan_workers: 12,
+            fingerprint_workers: 8,
+            lookup_workers: 8,
+            write_workers: 4,
         }
     }
 }

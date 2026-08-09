@@ -6,7 +6,7 @@ pub async fn frontend_activity(State(s): State<Arc<AppState>>) -> Json<serde_jso
 }
 
 pub async fn workspace(State(s): State<Arc<AppState>>) -> ApiResult<Json<serde_json::Value>> {
-    let mut workflow = s.workflow.read().await.clone();
+    let mut workflow = s.snapshot_workflow().await;
     workflow.matched = sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM tracks WHERE selected_candidate_id IS NOT NULL",
     )

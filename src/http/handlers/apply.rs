@@ -1,5 +1,5 @@
 use super::*;
-use crate::application::apply as apply_service;
+use crate::workers::apply as apply_service;
 
 pub(super) use apply_service::{apply_ready_automatically, resolve_artwork};
 
