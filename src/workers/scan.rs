@@ -284,48 +284,24 @@ async fn run_files(
         metadata: Arc::new(Semaphore::new(cfg.scan_workers)),
         fingerprint: Arc::new(Semaphore::new(cfg.fingerprint_workers)),
         acoustid: Arc::new(Semaphore::new(cfg.lookup_workers)),
-        // Two workers keep first-time recognition from serializing the whole
-        // library while still avoiding the burst traffic that triggers Shazam
-        // rate limits.
         songrec: Arc::new(Semaphore::new(2)),
         disabled_providers: Arc::new(Mutex::new(HashSet::new())),
     });
-    state
-        .set_workflow(
-            WorkflowPhase::Fetch,
-            "deduplicate",
-            "Analyzing input recordings for duplicates",
-            0,
-            total,
-            None,
-        )
-        .await;
-    let jobs = prepare_input_jobs(&state, &limits, files).await?;
-    if state.workflow_cancelled().await {
-        return Ok(true);
-    }
-    state
-        .set_workflow(
-            WorkflowPhase::Fetch,
-            "fetch",
-            starting_message,
-            0,
-            total,
-            None,
-        )
-        .await;
+
     let (persist_tx, persist_rx) = mpsc::channel(64);
     let writer = tokio::spawn(db_writer(state.clone(), persist_rx, 64));
     let scan_workers = cfg.scan_workers.max(1).min(total.max(1));
     let (file_tx, file_rx) = mpsc::channel::<FileJob>(scan_workers * 4);
     let file_rx = Arc::new(Mutex::new(file_rx));
-    let mut tasks = JoinSet::new();
+
+    // Spawn workers FIRST so they are ready to consume jobs immediately.
+    let mut worker_tasks = JoinSet::new();
     for _ in 0..scan_workers {
         let state = state.clone();
         let limits = limits.clone();
         let persist_tx = persist_tx.clone();
         let file_rx = file_rx.clone();
-        tasks.spawn(async move {
+        worker_tasks.spawn(async move {
             loop {
                 let job = {
                     let mut rx = file_rx.lock().await;
@@ -345,22 +321,54 @@ async fn run_files(
             }
         });
     }
-    for job in jobs {
-        if state.workflow_cancelled().await {
-            break;
+
+    // Pipeline: prepare in batches and send to workers immediately.
+    // Workers start processing batch N while batch N+1 is being prepared.
+    let batch_size = 100.max(scan_workers);
+    let prepare_state = state.clone();
+    let prepare_limits = limits.clone();
+    let prepare_handle = tokio::spawn(async move {
+        for (batch_index, batch) in files.chunks(batch_size).enumerate() {
+            if prepare_state.workflow_cancelled().await {
+                break;
+            }
+            let jobs = prepare_input_batch(&prepare_state, &prepare_limits, batch.to_vec()).await?;
+            if batch_index == 0 {
+                prepare_state
+                    .set_workflow(
+                        WorkflowPhase::Fetch,
+                        "fetch",
+                        starting_message,
+                        0,
+                        total,
+                        None,
+                    )
+                    .await;
+            }
+            for job in jobs {
+                file_tx
+                    .send(job)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("scan workers terminated early"))?;
+            }
         }
-        file_tx.send(job).await?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    // Wait for the prepare task to finish sending all jobs.
+    if let Err(error) = prepare_handle.await? {
+        tracing::warn!("prepare task failed: {error:#}");
     }
-    drop(file_tx);
     drop(persist_tx);
 
-    while let Some(result) = tasks.join_next().await {
+    // Wait for workers to finish processing all jobs.
+    while let Some(result) = worker_tasks.join_next().await {
         if let Err(error) = result {
             tracing::warn!("scan worker task failed: {error:#}");
             state.increment_failed().await;
         }
         if state.workflow_cancelled().await {
-            tasks.abort_all();
+            worker_tasks.abort_all();
         }
     }
     let writer_result = writer.await?;
@@ -384,12 +392,11 @@ async fn run_files(
     Ok(cancelled)
 }
 
-async fn prepare_input_jobs(
+async fn prepare_input_batch(
     state: &Arc<AppState>,
     limits: &Arc<PipelineLimits>,
     files: Vec<PathBuf>,
 ) -> Result<Vec<FileJob>> {
-    let total = files.len();
     let mut tasks = JoinSet::new();
     let mut files = files.into_iter();
     let workers = limits.metadata.available_permits().max(1);
@@ -407,22 +414,6 @@ async fn prepare_input_jobs(
             break;
         };
         prepared.push(result.context("input duplicate-analysis worker failed")?);
-        state
-            .set_workflow(
-                WorkflowPhase::Fetch,
-                "deduplicate",
-                "Analyzing input recordings for duplicates",
-                prepared.len(),
-                total,
-                prepared
-                    .last()
-                    .map(|input| input.path.to_string_lossy().into_owned()),
-            )
-            .await;
-        if state.workflow_cancelled().await {
-            tasks.abort_all();
-            break;
-        }
     }
 
     let evidence = prepared
