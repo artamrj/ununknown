@@ -314,10 +314,10 @@ async fn run_files(
             None,
         )
         .await;
-    let (persist_tx, persist_rx) = mpsc::channel(25);
-    let writer = tokio::spawn(db_writer(state.clone(), persist_rx, 25));
+    let (persist_tx, persist_rx) = mpsc::channel(64);
+    let writer = tokio::spawn(db_writer(state.clone(), persist_rx, 64));
     let scan_workers = cfg.scan_workers.max(1).min(total.max(1));
-    let (file_tx, file_rx) = mpsc::channel::<FileJob>(scan_workers * 2);
+    let (file_tx, file_rx) = mpsc::channel::<FileJob>(scan_workers * 4);
     let file_rx = Arc::new(Mutex::new(file_rx));
     let mut tasks = JoinSet::new();
     for _ in 0..scan_workers {

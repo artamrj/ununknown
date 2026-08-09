@@ -25,6 +25,7 @@ pub(crate) async fn identify(
     current: &audio::AudioInfo,
     filename: &str,
 ) -> Result<Vec<infra_providers::Candidate>> {
+    // ── Tier 1: fingerprint-based lookup (rate-limited, sequential) ──
     let mut out = match query_musicbrainz_acoustid(
         state,
         cfg,
@@ -43,21 +44,34 @@ pub(crate) async fn identify(
         }
     };
     let acoustid_matched = !out.is_empty();
-    if !cfg.youtube_api_key.trim().is_empty() {
-        out.extend(query_youtube(state, limits, &cfg.youtube_api_key, current, filename).await);
-    }
-    out.extend(query_musicbrainz_text(state, limits, current, filename).await);
-    match query_itunes(state, cfg, current, filename).await {
+
+    // ── Tier 2: all text-based catalog providers in parallel ──
+    let (yt, mbz, itunes_result, deezer, rj, am, nav) = tokio::join!(
+        query_youtube(state, limits, &cfg.youtube_api_key, current, filename),
+        query_musicbrainz_text(state, limits, current, filename),
+        query_itunes(state, cfg, current, filename),
+        query_deezer(state, limits, current, filename),
+        query_radiojavan(state, limits, current, filename),
+        query_audiomack(state, limits, current, filename),
+        query_navahang(state, limits, current, filename),
+    );
+    out.extend(yt);
+    out.extend(mbz);
+    match itunes_result {
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
     }
-    out.extend(query_deezer(state, limits, current, filename).await);
-    out.extend(query_radiojavan(state, limits, current, filename).await);
-    out.extend(query_audiomack(state, limits, current, filename).await);
-    out.extend(query_navahang(state, limits, current, filename).await);
+    out.extend(deezer);
+    out.extend(rj);
+    out.extend(am);
+    out.extend(nav);
+
+    // Genius enriches weak catalog results — needs Tier 2 to assess strength.
     if needs_genius_enrichment(&out) {
         out.extend(query_genius(state, limits, current, filename).await);
     }
+
+    // ── Tier 3: audio recognition (conditional, sequential) ──
     let has_strong_free_candidate = out.iter().any(|candidate| candidate.score >= 90.0);
     let mut recognized_info = None;
     let mut songrec_matched = false;
@@ -95,23 +109,29 @@ pub(crate) async fn identify(
         }
         out.extend(audd_candidates);
     }
+
+    // ── Tier 4: post-recognition catalog providers in parallel ──
     let catalog_info = recognized_info.as_ref().unwrap_or(current);
-    if !cfg.spotify_client_id.trim().is_empty() && !cfg.spotify_client_secret.trim().is_empty() {
-        let isrcs = out
-            .iter()
-            .filter_map(|candidate| candidate.isrc.clone())
-            .collect::<Vec<_>>();
-        out.extend(query_spotify(state, limits, cfg, catalog_info, filename, &isrcs).await);
-    }
-    if !cfg.soundcloud_client_id.trim().is_empty()
-        && !cfg.soundcloud_client_secret.trim().is_empty()
-    {
-        out.extend(query_soundcloud(state, limits, catalog_info, filename).await);
-    }
-    out.extend(query_discogs(state, limits, catalog_info, filename).await);
-    out.extend(query_lastfm(state, limits, catalog_info, filename).await);
-    out.extend(query_theaudiodb(state, limits, catalog_info, filename).await);
-    out.extend(query_wikidata(state, limits, catalog_info, filename).await);
+    let isrcs = out
+        .iter()
+        .filter_map(|candidate| candidate.isrc.clone())
+        .collect::<Vec<_>>();
+    let (spotify, sc, discogs, lastfm, tadb, wikidata) = tokio::join!(
+        query_spotify(state, limits, cfg, catalog_info, filename, &isrcs),
+        query_soundcloud(state, limits, catalog_info, filename),
+        query_discogs(state, limits, catalog_info, filename),
+        query_lastfm(state, limits, catalog_info, filename),
+        query_theaudiodb(state, limits, catalog_info, filename),
+        query_wikidata(state, limits, catalog_info, filename),
+    );
+    out.extend(spotify);
+    out.extend(sc);
+    out.extend(discogs);
+    out.extend(lastfm);
+    out.extend(tadb);
+    out.extend(wikidata);
+
+    // ── Post-processing ──
     for candidate in &mut out {
         normalize_candidate_credits(candidate);
     }
@@ -211,16 +231,24 @@ pub(crate) async fn query_recognized_catalogs(
     recognized: &audio::AudioInfo,
     filename: &str,
 ) -> Vec<infra_providers::Candidate> {
+    let (mbz, itunes_result, deezer, rj, am, nav) = tokio::join!(
+        query_musicbrainz_text(state, limits, recognized, filename),
+        query_itunes(state, cfg, recognized, filename),
+        query_deezer(state, limits, recognized, filename),
+        query_radiojavan(state, limits, recognized, filename),
+        query_audiomack(state, limits, recognized, filename),
+        query_navahang(state, limits, recognized, filename),
+    );
     let mut out = Vec::new();
-    out.extend(query_musicbrainz_text(state, limits, recognized, filename).await);
-    match query_itunes(state, cfg, recognized, filename).await {
+    out.extend(mbz);
+    match itunes_result {
         Ok(candidates) => out.extend(candidates),
         Err(error) => handle_provider_error(state, limits, filename, "itunes", error).await,
     }
-    out.extend(query_deezer(state, limits, recognized, filename).await);
-    out.extend(query_radiojavan(state, limits, recognized, filename).await);
-    out.extend(query_audiomack(state, limits, recognized, filename).await);
-    out.extend(query_navahang(state, limits, recognized, filename).await);
+    out.extend(deezer);
+    out.extend(rj);
+    out.extend(am);
+    out.extend(nav);
     if needs_genius_enrichment(&out) {
         out.extend(query_genius(state, limits, recognized, filename).await);
     }

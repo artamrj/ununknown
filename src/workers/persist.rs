@@ -76,29 +76,29 @@ pub(crate) async fn db_writer(
                 Err(_) => break,
             }
         }
-        for job in batch {
-            let result = async {
-                let mut tx = state.pool.begin().await?;
+        let batch_result: anyhow::Result<()> = async {
+            let mut tx = state.pool.begin().await?;
+            for job in &batch {
                 persist_match(&mut tx, &job.path, &job.info, &job.candidate, &job.message).await?;
-                tx.commit().await?;
-                Ok::<(), anyhow::Error>(())
             }
-            .await;
-            if let Err(error) = &result {
-                state
-                    .log_entry(
-                        ActivityLogEntry::new("error", "db", "Failed to persist matched candidate")
-                            .error(error.as_ref())
-                            .file(
-                                job.path
-                                    .file_name()
-                                    .and_then(|name| name.to_str())
-                                    .unwrap_or_default()
-                                    .to_owned(),
-                            ),
-                    )
-                    .await;
-            }
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+        let error_msg = batch_result.as_ref().err().map(|e| format!("{e:#}"));
+        if let Some(msg) = &error_msg {
+            state
+                .log_entry(
+                    ActivityLogEntry::new("error", "db", "Failed to persist batch")
+                        .error_text(msg.clone()),
+                )
+                .await;
+        }
+        for job in batch {
+            let result = match &error_msg {
+                None => Ok(()),
+                Some(msg) => Err(anyhow::anyhow!("{msg}")),
+            };
             let _ = job.result.send(result);
         }
     }
