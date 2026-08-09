@@ -44,7 +44,7 @@ pub(crate) async fn persist_duplicate_members(
                     .await;
             }
             Err(error) => {
-                state.increment_failed().await;
+                state.increment_failed();
                 state
                     .log_entry(
                         ActivityLogEntry::new(

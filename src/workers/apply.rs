@@ -1086,7 +1086,7 @@ pub async fn apply(
             }
         };
         if status == "failed" {
-            s.increment_failed().await;
+            s.increment_failed();
             let _ = tokio::fs::remove_file(&temporary).await;
         }
         sqlx::query(
@@ -1135,7 +1135,7 @@ pub async fn apply(
                 if let Err(error) =
                     finish_duplicate(&s, duplicate, &final_path, delete_source_after_write).await
                 {
-                    s.increment_failed().await;
+                    s.increment_failed();
                     let detail = format!("{error:#}");
                     let _ = sqlx::query(
                         "UPDATE tracks SET status='failed',stage='failed',error=?,stage_message='Duplicate output was avoided, but source cleanup failed',updated_at=? WHERE id=?",

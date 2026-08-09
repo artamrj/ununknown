@@ -205,7 +205,7 @@ async fn recover_issue_files(state: Arc<AppState>, issues: Vec<(PathBuf, bool)>)
                     .bind(path.to_string_lossy().as_ref())
                     .execute(&state.pool)
                     .await?;
-                    state.increment_failed().await;
+                    state.increment_failed();
                     state
                         .log_entry(
                             ActivityLogEntry::new(

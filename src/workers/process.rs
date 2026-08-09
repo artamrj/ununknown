@@ -89,7 +89,7 @@ pub(crate) async fn process_file(
                 }
                 Err(error) => {
                     tracing::warn!(path=%member.path.display(), "track failed after retries: {error:#}");
-                    state.increment_failed().await;
+                    state.increment_failed();
                     let error_text = format!("{error:#}");
                     if let Err(persist_error) =
                         persist_failed(&state.pool, &member.path, &error_text).await
@@ -236,7 +236,7 @@ pub(crate) async fn process(
                 .await;
         }
         Ok(crate::media::integrity::Integrity::Corrupt(diagnostic)) => {
-            state.increment_failed().await;
+            state.increment_failed();
             persist_corrupt(&state.pool, path, &info, &diagnostic).await?;
             state
                 .log_entry(
@@ -365,7 +365,7 @@ pub(crate) async fn process(
         )
         .await;
     let Some(best) = candidates.first() else {
-        state.increment_unmatched().await;
+        state.increment_unmatched();
         let fingerprint_note = if fp.is_empty() {
             " Fingerprint creation failed; install Chromaprint (fpcalc) to identify difficult tracks."
         } else if cfg.acoustid_key.is_empty() {
@@ -390,7 +390,7 @@ pub(crate) async fn process(
         &candidates,
     );
     let Some(smart_decision) = smart_decision else {
-        state.increment_unmatched().await;
+        state.increment_unmatched();
         let message = if best.score >= 40.0 {
             let mut source_names = candidates
                 .iter()
@@ -497,7 +497,7 @@ pub(crate) async fn process(
         )
         .await;
     if !completion.core_complete {
-        state.increment_unmatched().await;
+        state.increment_unmatched();
         candidates[smart_decision.candidate_index] = candidate;
         candidates.swap(0, smart_decision.candidate_index);
         let message = format!(
@@ -539,6 +539,6 @@ pub(crate) async fn process(
     result_rx
         .await
         .map_err(|_| anyhow!("DB writer stopped"))??;
-    state.increment_matched().await;
+    state.increment_matched();
     Ok(ProcessOutcome::Matched)
 }

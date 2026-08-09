@@ -365,7 +365,7 @@ async fn run_files(
     while let Some(result) = worker_tasks.join_next().await {
         if let Err(error) = result {
             tracing::warn!("scan worker task failed: {error:#}");
-            state.increment_failed().await;
+            state.increment_failed();
         }
         if state.workflow_cancelled().await {
             worker_tasks.abort_all();
@@ -496,7 +496,7 @@ async fn prepare_input(
 }
 
 pub(crate) async fn finish_scan_progress(state: &Arc<AppState>, total: usize) {
-    let processed = state.finish_track(total).await;
+    let processed = state.finish_track();
     state
         .set_workflow(
             WorkflowPhase::Fetch,

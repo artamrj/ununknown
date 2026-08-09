@@ -1,7 +1,13 @@
 use crate::{config::Config, types::WorkflowPhase};
 use serde::Serialize;
 use sqlx::SqlitePool;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{Notify, RwLock, Semaphore},
     time::Instant,
@@ -104,6 +110,11 @@ pub struct AppState {
     pub workflow: RwLock<Workflow>,
     frontend_last_seen: RwLock<Option<Instant>>,
     automation_notify: Notify,
+    // Hot counters — atomic for lock-free increments from workers
+    processed: AtomicUsize,
+    matched: AtomicUsize,
+    unmatched: AtomicUsize,
+    failed: AtomicUsize,
 }
 
 impl AppState {
@@ -128,6 +139,10 @@ impl AppState {
             }),
             frontend_last_seen: RwLock::new(None),
             automation_notify: Notify::new(),
+            processed: AtomicUsize::new(0),
+            matched: AtomicUsize::new(0),
+            unmatched: AtomicUsize::new(0),
+            failed: AtomicUsize::new(0),
         }
     }
 
@@ -250,24 +265,30 @@ impl AppState {
         workflow.current_file = Some(file.into());
     }
 
-    pub async fn increment_failed(&self) {
-        self.workflow.write().await.failed += 1;
+    pub fn increment_failed(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub async fn increment_matched(&self) {
-        self.workflow.write().await.matched += 1;
+    pub fn increment_matched(&self) {
+        self.matched.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub async fn increment_unmatched(&self) {
-        self.workflow.write().await.unmatched += 1;
+    pub fn increment_unmatched(&self) {
+        self.unmatched.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub async fn finish_track(&self, total: usize) -> usize {
-        let mut workflow = self.workflow.write().await;
-        workflow.processed += 1;
-        workflow.current = workflow.processed;
-        workflow.total = total;
-        workflow.processed
+    pub fn finish_track(&self) -> usize {
+        self.processed.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Read atomic counters into a workflow snapshot for the API response.
+    pub async fn snapshot_workflow(&self) -> Workflow {
+        let mut workflow = self.workflow.read().await.clone();
+        workflow.processed = self.processed.load(Ordering::Relaxed);
+        workflow.matched = self.matched.load(Ordering::Relaxed);
+        workflow.unmatched = self.unmatched.load(Ordering::Relaxed);
+        workflow.failed = self.failed.load(Ordering::Relaxed);
+        workflow
     }
 
     pub async fn log(&self, level: &str, stage: &str, file: Option<&str>, message: &str) {
