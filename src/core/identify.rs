@@ -5,7 +5,9 @@ use crate::{
     },
     domain::{
         audio,
-        matcher::{artist_similarity, normalize_match_key, text_close, title_similarity},
+        matcher::{
+            artist_similarity, normalize_match_key, text_close, text_similarity, title_similarity,
+        },
     },
     providers as infra_providers,
     workers::{
@@ -142,6 +144,7 @@ pub(crate) async fn identify(
         &mut out,
     )
     .await?;
+    apply_release_context(&mut out, current);
     apply_source_agreement(&mut out)?;
     enrich_artwork_fallbacks(&mut out)?;
     apply_artwork_override(&state.pool, path, &mut out).await?;
@@ -798,6 +801,7 @@ pub(crate) async fn query_musicbrainz_acoustid(
             &state.client,
             &cfg.musicbrainz_user_agent,
             &hit.recording_id,
+            current.album.as_deref(),
         )
         .await?;
         state
@@ -1054,6 +1058,52 @@ pub(crate) fn apply_source_agreement(candidates: &mut [infra_providers::Candidat
         set_score_sources(candidate, sources)?;
     }
     Ok(())
+}
+
+/// Existing album metadata is useful release evidence, not just another fuzzy
+/// scoring feature. Keep alternate editions visible, but never auto-approve
+/// one over a meaningful source album without a release-level match.
+pub(crate) fn apply_release_context(
+    candidates: &mut [infra_providers::Candidate],
+    current: &audio::AudioInfo,
+) {
+    let Some(source_album) = current
+        .album
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.starts_with('@'))
+    else {
+        return;
+    };
+    let source_title = current.title.as_deref().unwrap_or_default();
+    let source_album_key = normalize_match_key(source_album);
+    if source_album_key.is_empty() || source_album_key == normalize_match_key(source_title) {
+        return;
+    }
+    for candidate in candidates {
+        let mut evidence = candidate
+            .score_breakdown
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let matched = candidate.album.as_deref().is_some_and(|album| {
+            text_similarity(source_album, album) >= 0.72
+                || normalize_match_key(album) == source_album_key
+        });
+        evidence["release_context"] = serde_json::json!({
+            "source_album": source_album,
+            "matched_source_album": matched,
+            "conflict": !matched,
+            "reason": if matched {
+                "candidate release matches source album"
+            } else if candidate.album.is_some() {
+                "alternate release conflicts with source album"
+            } else {
+                "candidate has no release album"
+            }
+        });
+        candidate.score_breakdown = Some(evidence.to_string());
+    }
 }
 
 pub(crate) fn normalize_candidate_credits(candidate: &mut infra_providers::Candidate) {

@@ -408,11 +408,22 @@ pub(crate) async fn process(
                 .artist
                 .as_deref()
                 .is_some_and(|artist| artist_similarity(artist, &best.artist) >= 0.75);
+            let release_conflict = best
+                .score_breakdown
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|value| value["release_context"]["conflict"].as_bool())
+                .unwrap_or(false);
             match (
                 candidates.len(),
                 info.album.as_deref(),
                 best.album.as_deref(),
             ) {
+                _ if release_conflict => format!(
+                    "The recording matches, but the best catalog result is the alternate album “{}” and conflicts with the file’s album “{}”; review the release edition before applying it.",
+                    best.album.as_deref().unwrap_or("unknown"),
+                    info.album.as_deref().unwrap_or("unknown")
+                ),
                 _ if title_match
                     && artist_match
                     && best.duration_delta.is_some_and(|delta| delta > 15.0) =>

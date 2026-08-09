@@ -323,10 +323,18 @@ fn is_supported(candidate: &Evaluated<'_>) -> bool {
         && (!candidate.artist_available || candidate.artist_similarity >= 0.65);
     let catalog_exact = credible_catalog && exact_text && candidate.duration_close;
     let weak_raw_score = candidate.candidate.score < 55.0;
+    let release_conflict = candidate
+        .candidate
+        .score_breakdown
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value["release_context"]["conflict"].as_bool())
+        .unwrap_or(false);
 
     (recognized || corroborated || catalog_exact)
         && !(weak_raw_score && !candidate.audio_recognition && candidate.sources < 2)
         && !candidate.variant_conflict
+        && !release_conflict
 }
 
 fn same_recording(left: &Evaluated<'_>, right: &Evaluated<'_>) -> bool {
@@ -669,6 +677,60 @@ mod tests {
         .unwrap();
 
         assert_eq!(decision.candidate_id, 2);
+    }
+
+    #[test]
+    fn unresolved_release_conflict_cannot_be_auto_approved() {
+        let mut alternate = candidate(1, "audiomack", "Candy Shop", "Still Will", 99.0);
+        alternate.score_breakdown = Some(
+            serde_json::json!({
+                "sources": ["Audiomack", "MusicBrainz"],
+                "release_context": {"conflict": true}
+            })
+            .to_string(),
+        );
+
+        assert!(
+            select(
+                TrackEvidence {
+                    filename: "50 Cent - Candy Shop.mp3",
+                    title: Some("Candy Shop"),
+                    artist: Some("50 Cent feat. Olivia"),
+                    album: Some("The Massacre"),
+                },
+                &[alternate],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_release_evidence_cannot_be_auto_approved_against_source_album() {
+        let mut missing_release = candidate(1, "shazam", "Candy Shop", "", 99.0);
+        missing_release.album = None;
+        missing_release.score_breakdown = Some(
+            serde_json::json!({
+                "sources": ["Shazam"],
+                "release_context": {
+                    "conflict": true,
+                    "reason": "candidate has no release album"
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(
+            select(
+                TrackEvidence {
+                    filename: "50 Cent - Candy Shop.mp3",
+                    title: Some("Candy Shop"),
+                    artist: Some("50 Cent feat. Olivia"),
+                    album: Some("The Massacre"),
+                },
+                &[missing_release],
+            )
+            .is_none()
+        );
     }
 
     #[test]

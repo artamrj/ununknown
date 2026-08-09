@@ -17,6 +17,7 @@ pub async fn recording(
     client: &Client,
     user_agent: &str,
     id: &str,
+    source_album: Option<&str>,
 ) -> Result<Candidate> {
     validate_user_agent(user_agent)?;
     let key = recording_key(id);
@@ -43,7 +44,7 @@ pub async fn recording(
         .await?;
         value
     };
-    Ok(candidate_from_recording(&raw, id))
+    Ok(candidate_from_recording(&raw, id, source_album))
 }
 
 pub async fn search(
@@ -196,8 +197,8 @@ pub async fn artist_type(
     Ok(artist_type)
 }
 
-fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
-    let release = best_recording_release(raw, id);
+fn candidate_from_recording(raw: &Value, id: &str, source_album: Option<&str>) -> Candidate {
+    let release = best_recording_release(raw, id, source_album);
     let release_group = release.and_then(|v| v.get("release-group"));
     let artist_credits = parse_artist_credits(&raw["artist-credit"]);
     let artist = raw["artist-credit"].as_array().and_then(|v| v.first());
@@ -265,12 +266,35 @@ fn candidate_from_recording(raw: &Value, id: &str) -> Candidate {
     }
 }
 
-fn best_recording_release<'a>(raw: &'a Value, id: &str) -> Option<&'a Value> {
+fn best_recording_release<'a>(
+    raw: &'a Value,
+    id: &str,
+    source_album: Option<&str>,
+) -> Option<&'a Value> {
     let releases = raw["releases"].as_array()?;
+    if let Some(source_album) = source_album.filter(|value| !value.trim().is_empty()) {
+        let source_key = release_key(source_album);
+        if let Some(release) = releases.iter().find(|release| {
+            release["title"]
+                .as_str()
+                .is_some_and(|title| release_key(title) == source_key)
+                && recording_track(release, id).is_some()
+        }) {
+            return Some(release);
+        }
+    }
     releases
         .iter()
         .find(|release| recording_track(release, id).is_some())
         .or_else(|| releases.first())
+}
+
+fn release_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn recording_track<'a>(release: &'a Value, id: &str) -> Option<(&'a Value, &'a Value)> {
@@ -489,6 +513,7 @@ mod tests {
             &Client::new(),
             "Ununknown/0.1 (test@example.com)",
             "recording-1",
+            Some("Album"),
         )
         .await
         .unwrap();

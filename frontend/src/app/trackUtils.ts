@@ -33,7 +33,27 @@ export function candidateSignals(track: Track, candidate: Candidate) {
     comparisonSignal("Artist", track.current_artist, candidate.artist, evidence.artist),
     comparisonSignal("Album", track.current_album, candidate.album, evidence.album_context),
     durationSignal(evidence.duration),
+    releaseContextSignal(evidence.release_context),
   ];
+}
+
+export function releaseContextSignal(raw: unknown) {
+  if (!raw || typeof raw !== "object")
+    return { label: "Release", value: "Not checked", tone: "muted" };
+  const context = raw as { conflict?: unknown; matched_source_album?: unknown; reason?: unknown };
+  if (context.conflict === true) {
+    return {
+      label: "Release",
+      value:
+        context.reason === "candidate has no release album"
+          ? "Release not found"
+          : "Conflicts with file",
+      tone: "warning",
+    };
+  }
+  if (context.matched_source_album === true)
+    return { label: "Release", value: "Matches file", tone: "good" };
+  return { label: "Release", value: "Alternate edition", tone: "warning" };
 }
 
 export function candidateVerdict(score: number, signals: Array<{ tone: string }>) {

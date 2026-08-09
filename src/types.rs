@@ -182,8 +182,15 @@ pub fn normalize_release_fields(candidate: &mut Candidate) -> (bool, bool) {
             candidate.album_artist = Some("Various Artists".into());
             candidate.album_artist_credits = vec![ArtistCredit::new("Various Artists", "")];
         } else {
-            candidate.album_artist = Some(candidate.artist.clone());
-            candidate.album_artist_credits = candidate.artist_credits.clone();
+            let track_credits = if candidate.artist_credits.is_empty() {
+                crate::domain::credits::normalize_featured(&candidate.artist, &candidate.title)
+                    .artists
+            } else {
+                candidate.artist_credits.clone()
+            };
+            let credits = primary_artist_credits(&track_credits);
+            candidate.album_artist_credits = credits.clone();
+            candidate.album_artist = Some(crate::domain::credits::display_artist(&credits));
         }
     } else if candidate.album_artist_credits.is_empty()
         && let Some(album_artist) = candidate.album_artist.as_deref()
@@ -193,5 +200,62 @@ pub fn normalize_release_fields(candidate: &mut Candidate) -> (bool, bool) {
         candidate.album_artist_credits = credits.artists;
     }
 
+    // Featured performers belong to the track credit, not the release artist.
+    // Correct manually or provider-supplied values that copied the full track
+    // credit into ALBUMARTIST.
+    if !candidate.is_compilation
+        && candidate.album_artist_credits.len() == candidate.artist_credits.len()
+        && candidate.album_artist_credits == candidate.artist_credits
+    {
+        let credits = primary_artist_credits(&candidate.artist_credits);
+        candidate.album_artist_credits = credits.clone();
+        candidate.album_artist = Some(crate::domain::credits::display_artist(&credits));
+    }
+
     (album_defaulted, album_artist_defaulted)
+}
+
+fn primary_artist_credits(credits: &[ArtistCredit]) -> Vec<ArtistCredit> {
+    let mut primary = Vec::new();
+    for credit in credits {
+        primary.push(credit.clone());
+        if credit.join_phrase.trim().eq_ignore_ascii_case("feat.")
+            || credit.join_phrase.trim().eq_ignore_ascii_case("feat")
+            || credit.join_phrase.trim().eq_ignore_ascii_case("ft.")
+            || credit.join_phrase.trim().eq_ignore_ascii_case("ft")
+        {
+            break;
+        }
+    }
+    if primary.is_empty() {
+        credits.first().cloned().into_iter().collect()
+    } else {
+        if let Some(last) = primary.last_mut() {
+            last.join_phrase.clear();
+        }
+        primary
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn featured_track_artist_does_not_become_album_artist() {
+        let mut candidate = Candidate {
+            artist: "50 Cent feat. Olivia".into(),
+            artist_credits: vec![
+                ArtistCredit::new("50 Cent", " feat. "),
+                ArtistCredit::new("Olivia", ""),
+            ],
+            ..Default::default()
+        };
+
+        normalize_release_fields(&mut candidate);
+
+        assert_eq!(candidate.album_artist.as_deref(), Some("50 Cent"));
+        assert_eq!(candidate.album_artist_credits.len(), 1);
+        assert_eq!(candidate.album_artist_credits[0].name, "50 Cent");
+    }
 }

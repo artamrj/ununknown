@@ -282,12 +282,19 @@ candidate instead of blindly trusting the raw provider score:
 | Version tags (live/remix/acoustic/…) | −22 per unexpected, −16 per missing |
 | Compilation penalty | −7 |
 
+Release context is a hard gate, not only a score component. When the source file
+has a meaningful album tag, a candidate from a different album or release edition
+is retained for review but cannot be auto-approved. MusicBrainz recording lookup
+first prefers a release whose title matches the source album, preventing a later
+EP, compilation, or reissue from replacing the original album silently.
+
 **Decision rules** — a candidate is auto-approved only when:
 - It is *supported*: recognized by audio, corroborated by ≥2 sources, or an exact
   catalog match (credible provider + ≥0.90/≥0.82 title/artist + close duration).
 - Its total is ≥ 68, and no *different* recording is within 12 points (ties with the
   same recording are tolerated; `same_recording` compares ISRC/version-tags/title).
 - Its version tags match the filename's version tags.
+- Its release context does not conflict with a meaningful source album.
 - Its artist credits do **not drop any performer credited on the source file**
   (a −50 coverage penalty sends degraded credits back to Review; the fuller
   candidate — e.g. `Ali Azimi feat. Golshifteh Farahani` over `Golshifteh Farahani`
@@ -349,6 +356,8 @@ All HTTP goes through `net` (timeouts, retries) and a
    label, country) **only from albums compatible with the chosen release** so a
    compilation can't silently change the original release.
 4. Normalize release fields: `Single`/`EP` naming and album artist defaults.
+   Featured performers remain track artists and are not copied into `album_artist`.
+   Non-compilation album artists are derived from primary/co-primary credits.
 5. `audit` produces a weighted completeness score plus the readiness flag
    `core_complete` (title, artist, album, **verified cover**).
 
