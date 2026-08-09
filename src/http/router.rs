@@ -1,4 +1,4 @@
-use crate::{app::AppState, http::handlers};
+use crate::{core::AppState, http::handlers};
 use axum::{
     Json, Router,
     extract::State,
@@ -78,7 +78,7 @@ async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::AppState, config::Config, infrastructure::db};
+    use crate::{config::Config, db};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;

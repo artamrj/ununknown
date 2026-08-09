@@ -230,7 +230,7 @@ pub fn prefer_source_credits(
 /// featured credit into the artist list), then prefer the fuller source credit
 /// set when the candidate is a strict subset of it. Evidence-based ampersand
 /// resolution and spelling canonicalization run separately in the application
-/// layer (`canonical_names::canonicalize_candidates`).
+/// layer (`workers::canonical::canonicalize_candidates`).
 pub fn finalize_credits(
     display: &str,
     title: &str,

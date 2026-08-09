@@ -1,4 +1,4 @@
-use crate::{domain::audio::AudioInfo, infrastructure::providers::Candidate};
+use crate::{domain::audio::AudioInfo, providers::Candidate};
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::Value;

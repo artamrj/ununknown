@@ -22,9 +22,9 @@ Runtime and tests shell out to `ffmpeg`/`ffprobe` (integrity check, ReplayGain, 
 
 ## Layout and wiring
 
-- `src/http/` — axum router/handlers (deliberately small API) · `src/application/` — pipeline: `scan/`, `apply.rs`, `smart_approval.rs`, `metadata_completion.rs`, `artwork.rs`, `input_dedup.rs` · `src/infrastructure/` — media tools, ~20 providers under `providers/`, SQLite + caches · `src/domain/` — pure logic · `src/app/state.rs` — `AppState` with the concurrency semaphores · `src/config.rs` — env/settings.
+- `src/http/` — axum router/handlers (deliberately small API) · `src/core/` — main functionality: provider-cascade identification (`identify.rs`), scoring (`scoring.rs`), `state.rs` (`AppState`, concurrency semaphores, workflow) · `src/workers/` — sub-functionality: `scan.rs`, `process.rs`, `persist.rs` (single DB writer), `apply.rs`, `artwork.rs`, `approve.rs`, `dedup.rs`, `complete.rs`, `canonical.rs` · `src/providers/` — ~20 metadata providers · `src/media/` — ffmpeg/lofty tools (`fingerprint`, `integrity`, `repair`, `replaygain`, `tags`) · `src/db/` — SQLite (`mod.rs` connection/settings, `queries.rs`, `cache.rs`) · `src/domain/` — pure logic · `src/net.rs` — resilient HTTP · `src/config.rs` — env/settings.
 - Migrations are embedded at compile time with `sqlx::migrate!("./migrations")`. Add a new `migrations/NNNN_name.sql` file (next number) — applied at startup. No `DATABASE_URL`/`.sqlx` is needed to build.
-- All scan persistence goes through one DB writer task (`scan::persist::db_writer`); do not add other write connections in the scan path. Apply uses per-operation transactions.
+- All scan persistence goes through one DB writer task (`workers::persist::db_writer`); do not add other write connections in the scan path. Apply uses per-operation transactions.
 - `UNUNKNOWN_*` env vars override settings stored in SQLite; provider credentials via env never touch disk (full list in README).
 
 ## Hard constraints — do not weaken

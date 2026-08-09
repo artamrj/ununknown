@@ -31,7 +31,7 @@ and the exact algorithm the pipeline runs from first launch to final corrected f
 │  ┌──────────────────────────────┴───────────────────────────────┐    │
 │  │  Infrastructure layer                                        │    │
 │  │  media: audio reader · integrity · fingerprint · replaygain ·│    │
-│  │         tag_writer · repair                                  │    │
+│  │         tags · repair                                        │    │
 │  │  providers: 20+ metadata/audio sources (see §7)              │    │
 │  │  db: SQLite + repository (tracks/candidates) + caches        │    │
 │  └──────────────────────────────────────────────────────────────┘    │
@@ -62,8 +62,8 @@ SQLite schema is versioned in `migrations/` and applied at startup.
 | `tracks` | One row per input file: current tags, status, stage, content fingerprint, selected candidate, output path |
 | `candidates` | One row per metadata suggestion from a provider; full field set + `score` + `score_breakdown` (JSON) |
 | `candidate_sources` | Per-provider evidence rows for a candidate |
-| `provider_cache` | Keyed HTTP responses from metadata providers (disposable, cleared at midnight) |
-| `fingerprint_cache` | Chromaprint result keyed by path+size+mtime |
+| `db::cache` | Keyed HTTP responses from metadata providers (disposable, cleared at midnight) |
+| `db::cache` | Chromaprint result keyed by path+size+mtime |
 | `integrity_cache` | Healthy/corrupt verdict keyed by path+size+mtime |
 | `replaygain_cache` | Track gain/peak keyed by path+size+mtime |
 | `content_hash_cache` | SHA-256 fallback for duplicate detection |
@@ -108,7 +108,7 @@ but can instead be supplied via environment variables so they never touch disk).
 
 ### Phase 1 — Scan / identify (`POST /api/identify`)
 
-`scan::run` (`src/application/scan/mod.rs:39`):
+`workers::scan::run` (`src/workers/scan.rs:39`):
 
 1. Clear the previous workspace (`DELETE FROM tracks` + `automatic_scan_files`).
 2. Walk the input folder **off the async runtime** (`spawn_blocking`) and collect all
@@ -122,7 +122,7 @@ but can instead be supplied via environment variables so they never touch disk).
 ### Phase 2 — Per-track matching
 
 Each duplicate group is processed as one "file job" (`scan::process::process_file` →
-`process`, `src/application/scan/process.rs:3`). Two attempts are allowed per
+`process`, `src/workers/process.rs:3`). Two attempts are allowed per
 track; transient provider failures retry with backoff.
 
 For each member of the group:
@@ -149,7 +149,7 @@ For each member of the group:
    **Ready**; everything else stays in **Review**.
 
 The whole scan stream is written through a single DB writer task
-(`scan::persist::db_writer`, `src/application/scan/persist.rs:56`) so SQLite is only
+(`workers::persist::db_writer`, `src/workers/persist.rs:56`) so SQLite is only
 ever touched from one connection at a time.
 
 ### Phase 3 — Review loop (human in the loop)
@@ -161,7 +161,7 @@ Tracks that auto-selection refused stay in Review (`stage='review'`). The user c
   identity alone (title + artist + album); the track becomes Ready even if no
   catalog cover could be verified, and the cover is retried at write time.
 - **Smart auto-select** (`POST /api/tracks/auto-approve`) — bulk-runs the same
-  `smart_approval::select` + completion + cover pipeline over all Review items.
+  `workers::approve::select` + completion + cover pipeline over all Review items.
   Ambiguous/low-confidence ones stay in Review.
 - **Edit manually** (`PUT /api/tracks/{id}/manual`) — free-form editor; pasting a
   Shazam/Spotify/YouTube/etc. song link can auto-fill fields via
@@ -181,7 +181,7 @@ Tracks that auto-selection refused stay in Review (`stage='review'`). The user c
 
 ### Phase 4 — Write corrected files (`POST /api/write`)
 
-The **apply service** (`src/application/apply.rs`, reached from the HTTP endpoint in
+The **apply service** (`src/workers/apply.rs`, reached from the HTTP endpoint in
 `src/http/handlers/apply.rs`):
 
 1. **Prepare** (`prepare_apply`): load every `stage='ready'` track with its selected
@@ -204,7 +204,7 @@ The **apply service** (`src/application/apply.rs`, reached from the HTTP endpoin
      artwork that matches the selected release is considered.
    - **Copy to a temporary file** in the destination directory
      (`.Name.ununknown-{id}.ext`).
-   - **Write tags** — `tag_writer::write_resilient` with ReplayGain tags, then
+   - **Write tags** — `tags::write_resilient` with ReplayGain tags, then
      `verify_written_metadata` and `verify_embedded_artwork`. Malformed legacy tags
      are removed with a lossless stream-copy and retried. Bounded by the
      `tag_writes` semaphore.
@@ -225,7 +225,7 @@ automatic workflow completing. Each cycle:
 
 1. Skips entirely while the frontend is open (`frontend_active_until`) or a workflow
    is running.
-2. `scan::run_automatic` (`src/application/scan/mod.rs:91`) walks the folder and
+2. `workers::scan::run_automatic` (`src/workers/scan.rs:91`) walks the folder and
    compares each file's
    size+mtime against `automatic_scan_files` — unchanged files are skipped without
    decoding audio or touching providers.
@@ -236,7 +236,7 @@ automatic workflow completing. Each cycle:
 
 ## 5. Duplicate detection algorithm
 
-`input_dedup::group_recordings` (`src/application/input_dedup.rs:51`) groups input
+`workers::dedup::group_recordings` (`src/workers/dedup.rs:51`) groups input
 files using **proof-only evidence** (never title similarity):
 
 - **Exact SHA-256** (`sha256:` key) — definitive, unioned unconditionally.
@@ -262,7 +262,7 @@ the DB) so the workspace and the write queue always agree.
 
 ## 6. Smart auto-selection
 
-`smart_approval::rank` (`src/application/smart_approval.rs:51`) scores every
+`workers::approve::rank` (`src/workers/approve.rs:51`) scores every
 candidate instead of blindly trusting the raw provider score:
 
 **Score components** (weighted sum):
@@ -301,7 +301,7 @@ stripped version over an album version, or a wrong album).
 
 ## 7. Provider cascade (identification)
 
-`scan::providers::identify` (`src/application/scan/providers.rs:3`) runs a staged
+`core::identify::identify` (`src/core/identify.rs:3`) runs a staged
 cascade — the "catalog runner". Order matters — cheap/free/authoritative sources run
 first, expensive or optional ones only when needed:
 
@@ -321,9 +321,9 @@ first, expensive or optional ones only when needed:
    **TheAudioDB**, **Wikidata** (also supplies artist genres).
 
 Post-processing per track:
-- Credits are normalized (`canonical_names`, `domain/credits`). A `& X` tail that
+- Credits are normalized (`workers::canonical`, `domain/credits`). A `& X` tail that
   duplicates a title-featured credit is reconciled, and ambiguous `X & Y` credits
-  split into separate artists only when the `canonical_names` evidence knows each
+  split into separate artists only when the `workers::canonical` evidence knows each
   side as a real artist — MBID-bearing groups (e.g. "Selena Gomez & the Scene")
   always stay whole.
 - Candidates are canonicalized (alias/prefer-latin names).
@@ -333,14 +333,14 @@ Post-processing per track:
 - The `score` stored per candidate is the final blended score with a JSON
   `score_breakdown` (sources, duration delta, audio-recognition flag, artwork list).
 
-All HTTP goes through `resilient_http` (timeouts, retries) and a
-`provider_cache`; MusicBrainz requests are rate-limited to one per second.
+All HTTP goes through `net` (timeouts, retries) and a
+`db::cache`; MusicBrainz requests are rate-limited to one per second.
 
 ---
 
 ## 8. Metadata completion & cover verification
 
-`metadata_completion::complete` (`src/application/metadata_completion.rs:32`):
+`workers::complete::complete` (`src/workers/complete.rs:32`):
 
 1. Collect **agreeing recordings** (same ISRC, or same version tags + ≥0.90 title +
    ≥0.82 artist + compatible duration), ranked by donor quality.
@@ -357,13 +357,13 @@ All HTTP goes through `resilient_http` (timeouts, retries) and a
 credits moved into the artist list), then `prefer_source_credits` keeps the fuller
 source-file credit when the candidate is a strict subset (constituent `&`-expanded
 comparison, so a split `Koorosh` + `Sami Low` and an unsplit `Koorosh & Sami Low`
-compare equal). `canonical_names::canonicalize_candidates` then resolves ambiguous
+compare equal). `workers::canonical::canonicalize_candidates` then resolves ambiguous
 bare `&` credits against persisted library evidence (MBID-bearing groups stay
 whole, e.g. `Selena Gomez & the Scene`) and canonicalizes spelling. Every path to
 Ready — scan, `/choose`, auto-approve, manual entry, and apply — funnels the
 selected candidate through this same finalize step.
 
-**Cover-art worker** (`src/application/artwork.rs`):
+**Cover-art worker** (`src/workers/artwork.rs`):
 
 - `collect_artwork_candidates` gathers every allowed URL for the selected
   recording: the candidate's own artwork list + `cover_url`, `score_breakdown`
@@ -393,7 +393,7 @@ missing, broken, or merely retryable cover stays in Review; the UI offers a
 
 ## 9. Atomic, no-clobber publication
 
-`publish_no_clobber` (`src/application/apply.rs:644`):
+`publish_no_clobber` (`src/workers/apply.rs:644`):
 
 1. `fsync` the finished temporary file.
 2. List existing destination variants (`Name.ext`, `Name (2).ext`, …).
@@ -415,8 +415,8 @@ needless duplicates.
 
 ## 10. Concurrency, rate limiting, and lifecycle
 
-Bounded concurrency lives in `AppState` (`src/app/state.rs`) and
-`scan::PipelineLimits` (`src/application/scan/mod.rs:532`):
+Bounded concurrency lives in `AppState` (`src/core/state.rs`) and
+`workers::scan::PipelineLimits` (`src/workers/scan.rs:532`):
 
 | Resource | Limit |
 |---|---|
@@ -443,8 +443,8 @@ Bounded concurrency lives in `AppState` (`src/app/state.rs`) and
 
 | Cache | Key | Invalidated by |
 |---|---|---|
-| `provider_cache` | provider + search key | expiry (disposable, midnight cleanup) |
-| `fingerprint_cache` | path + size + mtime | file change / cache-limit eviction |
+| `db::cache` | provider + search key | expiry (disposable, midnight cleanup) |
+| `db::cache` | path + size + mtime | file change / cache-limit eviction |
 | `integrity_cache` | path + size + mtime | explicit retry deletes the row |
 | `replaygain_cache` | path + size + mtime(ns) | file change |
 | `content_hash_cache` | path + size + mtime(ns) | file change |
@@ -487,18 +487,18 @@ are evicted first (checked at startup and hourly while idle).
 |---|---|
 | Entry point, startup tasks, graceful shutdown | `src/main.rs` |
 | HTTP routes / API contract | `src/http/router.rs`, `src/http/handlers/*` |
-| Scan + identify pipeline (walk, file jobs, cascade, DB writer) | `src/application/scan/` (`mod.rs`, `process.rs`, `providers.rs`, `persist.rs`, `score.rs`) |
-| Catalog runner (provider cascade) | `src/application/scan/providers.rs` |
-| Duplicate detection | `src/application/input_dedup.rs` |
-| Smart auto-selection | `src/application/smart_approval.rs` |
-| Metadata completion | `src/application/metadata_completion.rs` |
-| Cover-art worker (search, verify, reuse, apply-time fetch) | `src/application/artwork.rs` |
-| Apply service (prepare / write / publish) | `src/application/apply.rs` (+ endpoint `src/http/handlers/apply.rs`) |
+| Scan + identify pipeline (walk, file jobs, cascade, DB writer) | `src/workers/` (`scan.rs`, `process.rs`, `persist.rs`) + `src/core/` (`identify.rs`, `scoring.rs`) |
+| Catalog runner (provider cascade) | `src/core/identify.rs` |
+| Duplicate detection | `src/workers/dedup.rs` |
+| Smart auto-selection | `src/workers/approve.rs` |
+| Metadata completion | `src/workers/complete.rs` |
+| Cover-art worker (search, verify, reuse, apply-time fetch) | `src/workers/artwork.rs` |
+| Apply service (prepare / write / publish) | `src/workers/apply.rs` (+ endpoint `src/http/handlers/apply.rs`) |
 | Review / scan / workspace handlers | `src/http/handlers/tracks.rs`, `scan.rs`, `workspace.rs`, `queries.rs` |
-| Repository (track + candidate types and queries) | `src/infrastructure/db/tracks.rs` |
-| Audio read / integrity / fingerprint / replaygain / tag write / repair | `src/infrastructure/media/*` |
-| Provider integrations | `src/infrastructure/providers/*` |
-| App state, workflow, limits | `src/app/state.rs`, `src/application/scan/mod.rs` |
+| Repository (track + candidate types and queries) | `src/db/queries.rs` |
+| Audio read / integrity / fingerprint / replaygain / tag write / repair | `src/media/*` |
+| Provider integrations | `src/providers/*` |
+| App state, workflow, limits | `src/core/state.rs`, `src/workers/scan.rs` |
 | Configuration | `src/config.rs` |
 | SQLite schema | `migrations/*.sql` |
 | React UI | `frontend/src/app/App.tsx` |

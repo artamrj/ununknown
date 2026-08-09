@@ -6,8 +6,8 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
         .arg("-version")
         .output()
         .is_ok();
-    let ffmpeg = crate::infrastructure::media::replaygain::available();
-    let songrec = crate::infrastructure::providers::songrec::available();
+    let ffmpeg = crate::media::replaygain::available();
+    let songrec = crate::providers::songrec::available();
     Json(serde_json::json!({
         "input_dir": cfg.input_dir,
         "output_dir": cfg.output_dir,
@@ -27,7 +27,7 @@ pub async fn setup(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
             "ffmpeg": ffmpeg,
             "songrec": songrec,
             "shazam": true,
-            "integrity_check": crate::infrastructure::media::integrity::available(),
+            "integrity_check": crate::media::integrity::available(),
             "acoustid": !cfg.acoustid_key.is_empty(),
             "audd": !cfg.audd_token.is_empty(),
             "spotify": !cfg.spotify_client_id.is_empty() && !cfg.spotify_client_secret.is_empty(),
@@ -124,7 +124,7 @@ pub async fn update_setup(
     if let Some(value) = body.theaudiodb_key.filter(|value| !value.trim().is_empty()) {
         cfg.theaudiodb_key = value.trim().into();
     }
-    crate::infrastructure::db::save_settings(&s.pool, &cfg).await?;
+    crate::db::save_settings(&s.pool, &cfg).await?;
     *s.config.write().await = cfg;
     s.notify_automation_scheduler();
     Ok(Json(serde_json::json!({"saved": true})))

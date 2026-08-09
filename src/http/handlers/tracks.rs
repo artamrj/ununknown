@@ -1,5 +1,5 @@
 use super::*;
-use crate::infrastructure::providers::ArtworkStatus;
+use crate::types::ArtworkStatus;
 use crate::types::TrackStage;
 use axum::http::{HeaderMap, StatusCode, header};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -104,20 +104,18 @@ pub async fn remove_track(
         .await?;
         let evidence = duplicate_tracks
             .iter()
-            .map(
-                |duplicate| crate::application::input_dedup::RecordingEvidence {
-                    path: duplicate.path.clone().into(),
-                    format: duplicate.format.clone().unwrap_or_default(),
-                    bitrate: duplicate
-                        .bitrate
-                        .and_then(|value| u32::try_from(value).ok()),
-                    duration: duplicate.duration,
-                    content_key: duplicate.content_fingerprint.clone(),
-                    isrc: None,
-                },
-            )
+            .map(|duplicate| crate::workers::dedup::RecordingEvidence {
+                path: duplicate.path.clone().into(),
+                format: duplicate.format.clone().unwrap_or_default(),
+                bitrate: duplicate
+                    .bitrate
+                    .and_then(|value| u32::try_from(value).ok()),
+                duration: duplicate.duration,
+                content_key: duplicate.content_fingerprint.clone(),
+                isrc: None,
+            })
             .collect::<Vec<_>>();
-        if let Some(group) = crate::application::input_dedup::group_recordings(&evidence).first() {
+        if let Some(group) = crate::workers::dedup::group_recordings(&evidence).first() {
             let promoted = &duplicate_tracks[group.representative];
             sqlx::query("DELETE FROM candidates WHERE track_id=?")
                 .bind(promoted.id.0)
@@ -162,7 +160,7 @@ pub async fn remove_track(
     transaction.commit().await?;
 
     s.log_entry(
-        crate::app::ActivityLogEntry::new("ok", "review", "Removed music file from Review")
+        crate::core::ActivityLogEntry::new("ok", "review", "Removed music file from Review")
             .file(track.filename.clone())
             .detail(format!("Removed source: {}", source.display())),
     )
@@ -218,13 +216,13 @@ pub async fn auto_approve_review(
             unavailable += 1;
             continue;
         }
-        let evidence = crate::application::smart_approval::TrackEvidence {
+        let evidence = crate::workers::approve::TrackEvidence {
             filename: &track.filename,
             title: track.current_title.as_deref(),
             artist: track.current_artist.as_deref(),
             album: track.current_album.as_deref(),
         };
-        if let Some(decision) = crate::application::smart_approval::select(evidence, &candidates) {
+        if let Some(decision) = crate::workers::approve::select(evidence, &candidates) {
             let Some(mut selected) = candidates
                 .iter()
                 .find(|candidate| candidate.id == Some(decision.candidate_id))
@@ -235,40 +233,39 @@ pub async fn auto_approve_review(
             };
             let path = std::path::PathBuf::from(&track.path);
             let embedded_cover = tokio::task::spawn_blocking(move || {
-                crate::infrastructure::media::tag_writer::read_artwork(&path)
+                crate::media::tags::read_artwork(&path)
                     .ok()
                     .flatten()
                     .is_some()
             })
             .await
             .unwrap_or(false);
-            crate::application::metadata_completion::complete(
+            crate::workers::complete::complete(
                 &mut selected,
                 &candidates,
                 track.current_album.as_deref(),
                 embedded_cover,
             );
-            crate::application::canonical_names::merge_source_credits(
+            crate::workers::canonical::merge_source_credits(
                 &mut selected,
                 track.current_artist.as_deref(),
                 track.current_title.as_deref(),
             );
-            crate::application::canonical_names::canonicalize_candidates(
+            crate::workers::canonical::canonicalize_candidates(
                 &s.pool,
                 std::slice::from_mut(&mut selected),
             )
             .await?;
             let limiter = s.artwork_downloads.read().await.clone();
             let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-            crate::application::artwork::ensure_usable_cover(
+            crate::workers::artwork::ensure_usable_cover(
                 &s.pool,
                 &s.client,
                 &mut selected,
                 embedded_cover,
             )
             .await;
-            let completion =
-                crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
+            let completion = crate::workers::complete::reassess(&mut selected, embedded_cover);
             if completion.core_complete {
                 decisions.push((track.id, decision, selected, completion));
             } else {
@@ -442,40 +439,34 @@ pub async fn select_candidate(
     };
     let source_path = std::path::PathBuf::from(&track.path);
     let embedded_cover = tokio::task::spawn_blocking(move || {
-        crate::infrastructure::media::tag_writer::read_artwork(&source_path)
+        crate::media::tags::read_artwork(&source_path)
             .ok()
             .flatten()
             .is_some()
     })
     .await
     .unwrap_or(false);
-    crate::application::metadata_completion::complete(
+    crate::workers::complete::complete(
         &mut selected,
         &candidates,
         track.current_album.as_deref(),
         embedded_cover,
     );
-    crate::application::canonical_names::merge_source_credits(
+    crate::workers::canonical::merge_source_credits(
         &mut selected,
         track.current_artist.as_deref(),
         track.current_title.as_deref(),
     );
-    crate::application::canonical_names::canonicalize_candidates(
+    crate::workers::canonical::canonicalize_candidates(
         &s.pool,
         std::slice::from_mut(&mut selected),
     )
     .await?;
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-    crate::application::artwork::ensure_usable_cover(
-        &s.pool,
-        &s.client,
-        &mut selected,
-        embedded_cover,
-    )
-    .await;
-    let completion =
-        crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
+    crate::workers::artwork::ensure_usable_cover(&s.pool, &s.client, &mut selected, embedded_cover)
+        .await;
+    let completion = crate::workers::complete::reassess(&mut selected, embedded_cover);
     let mut transaction = s.pool.begin().await?;
     let (status, stage, message) = readiness_state(&selected, &completion, "Selected by you");
     sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
@@ -499,7 +490,7 @@ pub async fn select_candidate(
 /// review so a file is never written missing, broken, or wrongly matched art.
 fn readiness_state(
     candidate: &Candidate,
-    completion: &crate::application::metadata_completion::CompletionReport,
+    completion: &crate::workers::complete::CompletionReport,
     prefix: &str,
 ) -> (&'static str, &'static str, String) {
     if completion.core_complete {
@@ -650,7 +641,7 @@ pub async fn manual_candidate(
         release_date: value.release_date.clone(),
         ..Default::default()
     };
-    crate::application::metadata_completion::normalize_release_fields(&mut release_fields);
+    crate::types::normalize_release_fields(&mut release_fields);
     value.album = release_fields.album;
     value.album_artist = release_fields.album_artist;
     let track: Option<(String, String, Option<String>, Option<String>)> =
@@ -676,37 +667,31 @@ pub async fn manual_candidate(
     release_fields.album_artist = value.album_artist.clone();
     if let Some(url) = cover_url.as_deref() {
         release_fields.cover_url = Some(url.to_owned());
-        release_fields.artwork_candidates =
-            vec![crate::infrastructure::providers::ArtworkCandidate {
-                provider: "User verified".into(),
-                url: url.to_owned(),
-                user_confirmed: true,
-                isrc: release_fields.isrc.clone(),
-                album: release_fields.album.clone(),
-                artist: Some(release_fields.artist.clone()),
-                ..Default::default()
-            }];
+        release_fields.artwork_candidates = vec![crate::types::ArtworkCandidate {
+            provider: "User verified".into(),
+            url: url.to_owned(),
+            user_confirmed: true,
+            isrc: release_fields.isrc.clone(),
+            album: release_fields.album.clone(),
+            artist: Some(release_fields.artist.clone()),
+            ..Default::default()
+        }];
     }
-    crate::application::canonical_names::merge_source_credits(
+    crate::workers::canonical::merge_source_credits(
         &mut release_fields,
         source_artist.as_deref(),
         source_title.as_deref(),
     );
-    crate::application::canonical_names::canonicalize_candidates(
+    crate::workers::canonical::canonicalize_candidates(
         &s.pool,
         std::slice::from_mut(&mut release_fields),
     )
     .await?;
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-    crate::application::artwork::ensure_usable_cover(
-        &s.pool,
-        &s.client,
-        &mut release_fields,
-        false,
-    )
-    .await;
-    let completion = crate::application::metadata_completion::reassess(&mut release_fields, false);
+    crate::workers::artwork::ensure_usable_cover(&s.pool, &s.client, &mut release_fields, false)
+        .await;
+    let completion = crate::workers::complete::reassess(&mut release_fields, false);
     let result = sqlx::query("INSERT INTO candidates(track_id,provider,title,artist,album,album_artist,track_number,track_total,disc_number,disc_total,year,genre,composer,label,isrc,release_date,cover_url,score,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(id.0).bind("manual").bind(&release_fields.title).bind(&release_fields.artist)
         .bind(&release_fields.album).bind(&release_fields.album_artist).bind(release_fields.track_number).bind(release_fields.track_total)
@@ -776,37 +761,37 @@ pub async fn update_artwork(
             .cover_url
             .ok_or_else(|| ApiError::validation("Spotify did not return cover artwork"))?
     } else if is_shazam_host(parsed.host_str()) {
-        crate::infrastructure::providers::shazam::lookup_url(&s.pool, &s.client, supplied)
+        crate::providers::shazam::lookup_url(&s.pool, &s.client, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("Shazam link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Shazam did not return cover artwork"))?
     } else if is_soundcloud_host(parsed.host_str()) {
-        crate::infrastructure::providers::soundcloud::lookup_url(&s.client, supplied)
+        crate::providers::soundcloud::lookup_url(&s.client, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("SoundCloud link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("SoundCloud did not return cover artwork"))?
     } else if is_audiomack_host(parsed.host_str()) {
-        crate::infrastructure::providers::audiomack::lookup_url(&s.pool, &s.client, supplied)
+        crate::providers::audiomack::lookup_url(&s.pool, &s.client, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("Audiomack link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Audiomack did not return cover artwork"))?
     } else if is_navahang_host(parsed.host_str()) {
-        crate::infrastructure::providers::navahang::lookup_url(&s.pool, &s.client, supplied)
+        crate::providers::navahang::lookup_url(&s.pool, &s.client, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("Navahang link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Navahang did not return cover artwork"))?
     } else if is_radiojavan_host(parsed.host_str()) {
-        crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, supplied)
+        crate::providers::radiojavan::lookup_url(&s.pool, &s.client, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("Radio Javan link failed: {error:#}")))?
             .cover_url
             .ok_or_else(|| ApiError::validation("Radio Javan did not return cover artwork"))?
     } else if is_genius_host(parsed.host_str()) {
-        crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, supplied)
+        crate::providers::genius::lookup_url(&s.pool, &s.client, supplied)
             .await
             .map_err(|error| ApiError::validation(format!("Genius link failed: {error:#}")))?
             .cover_url
@@ -814,14 +799,13 @@ pub async fn update_artwork(
     } else {
         supplied.to_owned()
     };
-    let (bytes, info) =
-        crate::infrastructure::providers::cover_art_archive::fetch_verified_url_cached(
-            &s.pool, &s.client, &cover_url, true,
-        )
-        .await
-        .map_err(|error| ApiError::validation(format!("Cover download failed: {error:#}")))?;
+    let (bytes, info) = crate::providers::cover_art_archive::fetch_verified_url_cached(
+        &s.pool, &s.client, &cover_url, true,
+    )
+    .await
+    .map_err(|error| ApiError::validation(format!("Cover download failed: {error:#}")))?;
     let _ = bytes;
-    let artwork_candidates = vec![crate::infrastructure::providers::ArtworkCandidate {
+    let artwork_candidates = vec![crate::types::ArtworkCandidate {
         provider: "User verified".into(),
         url: cover_url.clone(),
         user_confirmed: true,
@@ -860,9 +844,9 @@ pub async fn update_artwork(
     let mut selected = selected;
     selected.cover_url = Some(cover_url.clone());
     selected.artwork_candidates = artwork_candidates;
-    selected.artwork_status = crate::infrastructure::providers::ArtworkStatus::Verified;
+    selected.artwork_status = crate::types::ArtworkStatus::Verified;
     selected.artwork_message = Some("Verified cover supplied by you".into());
-    let completion = crate::application::metadata_completion::reassess(&mut selected, false);
+    let completion = crate::workers::complete::reassess(&mut selected, false);
     let (status, stage, message) = readiness_state(&selected, &completion, "Artwork updated");
     sqlx::query("UPDATE tracks SET status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(status)
@@ -886,24 +870,20 @@ pub async fn search_artwork(
     let (track, mut candidate) = queries::selected(&s.pool, id).await?;
     let source_path = std::path::PathBuf::from(&track.path);
     let embedded_cover = tokio::task::spawn_blocking(move || {
-        tag_writer::read_artwork(&source_path)
-            .ok()
-            .flatten()
-            .is_some()
+        tags::read_artwork(&source_path).ok().flatten().is_some()
     })
     .await
     .unwrap_or(false);
     let limiter = s.artwork_downloads.read().await.clone();
     let _permit = limiter.acquire_owned().await.map_err(anyhow::Error::from)?;
-    crate::application::artwork::ensure_usable_cover(
+    crate::workers::artwork::ensure_usable_cover(
         &s.pool,
         &s.client,
         &mut candidate,
         embedded_cover,
     )
     .await;
-    let completion =
-        crate::application::metadata_completion::reassess(&mut candidate, embedded_cover);
+    let completion = crate::workers::complete::reassess(&mut candidate, embedded_cover);
     let mut transaction = s.pool.begin().await?;
     persist_completed_candidate(&mut transaction, &candidate).await?;
     let (status, stage, message) =
@@ -952,7 +932,7 @@ pub async fn artwork_preview(
     let artwork = match super::apply::resolve_artwork(&s, &track.filename, &candidate).await {
         Ok(bytes) => Some(bytes),
         Err(_) => tokio::task::spawn_blocking(move || {
-            tag_writer::read_artwork(std::path::Path::new(&track.path))
+            tags::read_artwork(std::path::Path::new(&track.path))
         })
         .await
         .map_err(anyhow::Error::from)??,
@@ -966,12 +946,13 @@ pub async fn original_artwork_preview(
     Path(id): Path<TrackId>,
 ) -> ApiResult<axum::response::Response> {
     let track = queries::track(&s.pool, id).await?;
-    let artwork = tokio::task::spawn_blocking(move || {
-        tag_writer::read_artwork(std::path::Path::new(&track.path))
-    })
-    .await
-    .map_err(anyhow::Error::from)??
-    .ok_or_else(|| ApiError::not_found("No embedded artwork is available for this track"))?;
+    let artwork =
+        tokio::task::spawn_blocking(move || tags::read_artwork(std::path::Path::new(&track.path)))
+            .await
+            .map_err(anyhow::Error::from)??
+            .ok_or_else(|| {
+                ApiError::not_found("No embedded artwork is available for this track")
+            })?;
     artwork_response(artwork)
 }
 
@@ -1000,11 +981,9 @@ pub async fn candidate_artwork_preview(
         }
     }
     for url in urls {
-        if let Ok(bytes) = crate::infrastructure::providers::cover_art_archive::fetch_url_cached(
-            &s.pool, &s.client, &url,
-        )
-        .await
-            && tag_writer::validate_artwork(&bytes).is_ok()
+        if let Ok(bytes) =
+            crate::providers::cover_art_archive::fetch_url_cached(&s.pool, &s.client, &url).await
+            && tags::validate_artwork(&bytes).is_ok()
         {
             return artwork_response(bytes);
         }
@@ -1048,19 +1027,19 @@ pub async fn resolve_source(
     let mut candidate = if parsed.host_str() == Some("open.spotify.com") {
         lookup_spotify_source(&s, url).await
     } else if is_shazam_host(parsed.host_str()) {
-        crate::infrastructure::providers::shazam::lookup_url(&s.pool, &s.client, url).await
+        crate::providers::shazam::lookup_url(&s.pool, &s.client, url).await
     } else if is_soundcloud_host(parsed.host_str()) {
-        crate::infrastructure::providers::soundcloud::lookup_url(&s.client, url).await
+        crate::providers::soundcloud::lookup_url(&s.client, url).await
     } else if is_audiomack_host(parsed.host_str()) {
-        crate::infrastructure::providers::audiomack::lookup_url(&s.pool, &s.client, url).await
+        crate::providers::audiomack::lookup_url(&s.pool, &s.client, url).await
     } else if is_navahang_host(parsed.host_str()) {
-        crate::infrastructure::providers::navahang::lookup_url(&s.pool, &s.client, url).await
+        crate::providers::navahang::lookup_url(&s.pool, &s.client, url).await
     } else if is_radiojavan_host(parsed.host_str()) {
-        crate::infrastructure::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
+        crate::providers::radiojavan::lookup_url(&s.pool, &s.client, url).await
     } else if is_genius_host(parsed.host_str()) {
-        crate::infrastructure::providers::genius::lookup_url(&s.pool, &s.client, url).await
+        crate::providers::genius::lookup_url(&s.pool, &s.client, url).await
     } else if is_youtube_host(parsed.host_str()) {
-        crate::infrastructure::providers::youtube::lookup_url(&s.client, url).await
+        crate::providers::youtube::lookup_url(&s.client, url).await
     } else {
         Err(anyhow::anyhow!("this site is not a supported music source"))
     }
@@ -1073,7 +1052,7 @@ pub async fn resolve_source(
 
 async fn lookup_spotify_source(s: &AppState, url: &str) -> Result<Candidate> {
     let cfg = s.config.read().await.clone();
-    crate::infrastructure::providers::spotify::lookup_url(
+    crate::providers::spotify::lookup_url(
         &s.client,
         &s.spotify_auth,
         &cfg.spotify_client_id,
@@ -1089,7 +1068,7 @@ async fn enrich_shazam_with_spotify(s: &AppState, candidate: &mut Candidate) {
         return;
     }
     let isrcs = candidate.isrc.clone().into_iter().collect::<Vec<_>>();
-    let Ok(results) = crate::infrastructure::providers::spotify::search(
+    let Ok(results) = crate::providers::spotify::search(
         &s.client,
         &s.spotify_auth,
         &cfg.spotify_client_id,
@@ -1188,7 +1167,7 @@ fn is_youtube_host(host: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, infrastructure::db};
+    use crate::{config::Config, db};
 
     #[tokio::test]
     async fn remove_track_deletes_review_file_and_database_record() {
@@ -1328,16 +1307,14 @@ mod tests {
         let database = directory.path().join("manual.sqlite");
         let pool = db::connect(database.to_str().unwrap()).await.unwrap();
         let state = Arc::new(AppState::new(Config::default(), pool.clone()));
-        crate::infrastructure::provider_cache::ProviderCache::put(
+        crate::db::cache::ProviderCache::put(
             &pool,
             "artwork-url",
-            &crate::infrastructure::provider_cache::search_key(
-                "https://example.test/manual-cover.jpg",
-            ),
+            &crate::db::cache::search_key("https://example.test/manual-cover.jpg"),
             &serde_json::json!({
                 "data_base64": base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
-                    crate::infrastructure::media::tag_writer::test_artwork_png()
+                    crate::media::tags::test_artwork_png()
                 )
             }),
             chrono::Utc::now() + chrono::Duration::days(1),
@@ -1502,16 +1479,14 @@ mod tests {
         let database = directory.path().join("artwork-search.sqlite");
         let pool = db::connect(database.to_str().unwrap()).await.unwrap();
         let state = Arc::new(AppState::new(Config::default(), pool.clone()));
-        crate::infrastructure::provider_cache::ProviderCache::put(
+        crate::db::cache::ProviderCache::put(
             &pool,
             "artwork-url",
-            &crate::infrastructure::provider_cache::search_key(
-                "https://example.test/release-cover.jpg",
-            ),
+            &crate::db::cache::search_key("https://example.test/release-cover.jpg"),
             &serde_json::json!({
                 "data_base64": base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
-                    crate::infrastructure::media::tag_writer::test_artwork_png()
+                    crate::media::tags::test_artwork_png()
                 )
             }),
             chrono::Utc::now() + chrono::Duration::days(1),
@@ -1572,14 +1547,14 @@ mod tests {
         let database = directory.path().join("auto-approve.sqlite");
         let pool = db::connect(database.to_str().unwrap()).await.unwrap();
         let state = Arc::new(AppState::new(Config::default(), pool.clone()));
-        crate::infrastructure::provider_cache::ProviderCache::put(
+        crate::db::cache::ProviderCache::put(
             &pool,
             "artwork-url",
-            &crate::infrastructure::provider_cache::search_key("https://example.test/cover.jpg"),
+            &crate::db::cache::search_key("https://example.test/cover.jpg"),
             &serde_json::json!({
                 "data_base64": base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
-                    crate::infrastructure::media::tag_writer::test_artwork_png()
+                    crate::media::tags::test_artwork_png()
                 )
             }),
             chrono::Utc::now() + chrono::Duration::days(1),

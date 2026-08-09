@@ -1,5 +1,5 @@
 use super::*;
-use crate::app::ActivityLogEntry;
+use crate::core::ActivityLogEntry;
 
 #[derive(Serialize)]
 pub struct RetryIssuesResult {
@@ -173,7 +173,7 @@ async fn recover_issue_files(state: Arc<AppState>, issues: Vec<(PathBuf, bool)>)
                     Some(filename.clone()),
                 )
                 .await;
-            match crate::infrastructure::media::repair::repair(&state.pool, &path).await {
+            match crate::media::repair::repair(&state.pool, &path).await {
                 Ok(repair) => {
                     let message = format!(
                         "Repaired {:.1}s of {:.1}s; damaged backup saved as {}",
@@ -251,7 +251,7 @@ mod tests {
     async fn test_state() -> Arc<AppState> {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("retry-issues.sqlite");
-        let pool = crate::infrastructure::db::connect(database.to_str().unwrap())
+        let pool = crate::db::connect(database.to_str().unwrap())
             .await
             .unwrap();
         std::mem::forget(directory);

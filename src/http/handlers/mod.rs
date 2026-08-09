@@ -1,9 +1,10 @@
 use crate::{
-    app::AppState,
-    application::scan as scan_pipeline,
+    core::AppState,
     http::error::{ApiError, ApiResult},
-    infrastructure::{media::tag_writer, providers::Candidate},
+    media::tags,
+    providers::Candidate,
     types::{CandidateId, TrackId, WorkflowPhase},
+    workers::scan as scan_pipeline,
 };
 use anyhow::Result;
 use axum::{
@@ -13,7 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
-pub(super) use crate::infrastructure::db::tracks::{CandidateRow, Track};
+pub(super) use crate::db::queries::{CandidateRow, Track};
 
 mod apply;
 mod queries;

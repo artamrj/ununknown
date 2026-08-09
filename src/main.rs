@@ -1,10 +1,13 @@
-mod app;
-mod application;
 mod config;
+mod core;
+mod db;
 mod domain;
 mod http;
-mod infrastructure;
+mod media;
+mod net;
+mod providers;
 mod types;
+mod workers;
 
 use anyhow::{Context, Result, bail};
 use axum::{Router, extract::DefaultBodyLimit, middleware};
@@ -39,13 +42,13 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| ".local/output".into()),
         ..Default::default()
     };
-    let pool = infrastructure::db::connect(&defaults.db_path).await?;
-    let mut config = infrastructure::db::load_settings(&pool, defaults).await?;
+    let pool = db::connect(&defaults.db_path).await?;
+    let mut config = db::load_settings(&pool, defaults).await?;
     config.apply_environment_overrides();
-    infrastructure::db::cleanup(&pool, &config).await?;
-    infrastructure::db::run_daily_cache_cleanup_if_due(&pool).await?;
-    infrastructure::db::enforce_media_cache_limit(&pool).await?;
-    let state = Arc::new(app::AppState::new(config, pool));
+    db::cleanup(&pool, &config).await?;
+    db::run_daily_cache_cleanup_if_due(&pool).await?;
+    db::enforce_media_cache_limit(&pool).await?;
+    let state = Arc::new(core::AppState::new(config, pool));
     let maintenance_state = state.clone();
     tokio::spawn(async move {
         loop {
@@ -53,9 +56,7 @@ async fn main() -> Result<()> {
             while maintenance_state.workflow_running().await {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
-            if let Err(error) =
-                infrastructure::db::run_daily_cache_cleanup_if_due(&maintenance_state.pool).await
-            {
+            if let Err(error) = db::run_daily_cache_cleanup_if_due(&maintenance_state.pool).await {
                 tracing::warn!(%error, "daily disposable cache cleanup failed");
             }
         }
@@ -69,9 +70,7 @@ async fn main() -> Result<()> {
             if media_cache_state.workflow_running().await {
                 continue;
             }
-            if let Err(error) =
-                infrastructure::db::enforce_media_cache_limit(&media_cache_state.pool).await
-            {
+            if let Err(error) = db::enforce_media_cache_limit(&media_cache_state.pool).await {
                 tracing::warn!(%error, "media-analysis cache limit check failed");
             }
         }
@@ -205,7 +204,7 @@ fn frontend_directory() -> Result<Option<PathBuf>> {
         .find(|directory| directory.join("index.html").is_file()))
 }
 
-async fn shutdown_signal(state: Arc<app::AppState>) {
+async fn shutdown_signal(state: Arc<core::AppState>) {
     let interrupt = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "failed to install Ctrl+C handler");
