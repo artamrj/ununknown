@@ -433,6 +433,11 @@ pub(crate) async fn process(
         info.album.as_deref(),
         embedded_cover,
     );
+    crate::application::canonical_names::merge_source_credits(
+        &mut candidate,
+        info.artist.as_deref(),
+        info.title.as_deref(),
+    );
     crate::application::canonical_names::canonicalize_candidates(
         &state.pool,
         std::slice::from_mut(&mut candidate),

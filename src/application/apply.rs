@@ -86,61 +86,11 @@ fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::c
         &candidate.title,
         candidate.artist_credits.clone(),
     );
-    prefer_source_credits(track, candidate_credits)
-}
-
-/// When the candidate's artist names are a strict subset of the source file's
-/// credits (the candidate dropped featured artists or is featured-only), the
-/// source credit is the fuller, correct human-readable credit and wins.
-/// Otherwise the candidate credit wins.
-fn prefer_source_credits(
-    track: &Track,
-    candidate_credits: crate::domain::credits::Credits,
-) -> crate::domain::credits::Credits {
-    let Some(source_artist) = track.current_artist.as_deref() else {
-        return candidate_credits;
-    };
-    let Some(source_title) = track.current_title.as_deref() else {
-        return candidate_credits;
-    };
-    let source_credits = crate::domain::credits::normalize_featured(source_artist, source_title);
-    let candidate_names = crate::domain::credits::individual_names(&candidate_credits.artists);
-    let source_names = crate::domain::credits::individual_names(&source_credits.artists);
-    if candidate_names.is_empty() || source_names.len() <= candidate_names.len() {
-        return candidate_credits;
-    }
-    let names_equal = |left: &str, right: &str| {
-        crate::domain::credits::identity_key(left) == crate::domain::credits::identity_key(right)
-    };
-    let candidate_is_subset = candidate_names.iter().all(|candidate_name| {
-        source_names
-            .iter()
-            .any(|source_name| names_equal(candidate_name, source_name))
-    });
-    let source_has_extra = source_names.iter().any(|source_name| {
-        !candidate_names
-            .iter()
-            .any(|candidate_name| names_equal(candidate_name, source_name))
-    });
-    if candidate_is_subset && source_has_extra {
-        source_credits
-    } else {
-        candidate_credits
-    }
-}
-
-/// Enrich the candidate with the fuller source credit set so the written tags
-/// (ARTIST/ARTISTS) match the destination filename.
-fn merge_source_credits(track: &Track, candidate: &mut Candidate) {
-    let candidate_credits = crate::domain::credits::normalize_structured(
-        &candidate.artist,
-        &candidate.title,
-        candidate.artist_credits.clone(),
-    );
-    let merged = prefer_source_credits(track, candidate_credits);
-    candidate.artist = merged.artist;
-    candidate.title = merged.title;
-    candidate.artist_credits = merged.artists;
+    crate::application::canonical_names::prefer_source_credits(
+        track.current_artist.as_deref(),
+        track.current_title.as_deref(),
+        &candidate_credits,
+    )
 }
 
 fn safe_filename_part(value: &str, fallback: &str) -> String {
@@ -227,6 +177,22 @@ mod filename_tests {
         let candidate = Candidate {
             title: "Cheshm Beham Bezani".into(),
             artist: "Koorosh & Sami Low".into(),
+            ..Default::default()
+        };
+        let credits = destination_credits(&track, &candidate);
+        assert_eq!(credits.artist, "Arta feat. Koorosh & Sami Low");
+    }
+
+    #[test]
+    fn destination_credits_keep_source_primary_even_when_candidate_is_split() {
+        let track = track_with("Cheshm Beham Bezani (feat. Koorosh & Sami Low)", "Arta");
+        let candidate = Candidate {
+            title: "Cheshm Beham Bezani".into(),
+            artist: "Koorosh & Sami Low".into(),
+            artist_credits: vec![
+                crate::domain::credits::ArtistCredit::new("Koorosh", " & "),
+                crate::domain::credits::ArtistCredit::new("Sami Low", ""),
+            ],
             ..Default::default()
         };
         let credits = destination_credits(&track, &candidate);
@@ -365,7 +331,11 @@ pub(crate) async fn prepare_apply(s: &Arc<AppState>) -> Result<PreparedApply> {
                 existing_album.as_deref(),
                 false,
             );
-            merge_source_credits(&source.track, candidate);
+            crate::application::canonical_names::merge_source_credits(
+                candidate,
+                source.track.current_artist.as_deref(),
+                source.track.current_title.as_deref(),
+            );
             crate::application::canonical_names::canonicalize_candidates(
                 &s.pool,
                 std::slice::from_mut(candidate),

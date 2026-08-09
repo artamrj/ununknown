@@ -191,8 +191,9 @@ The **apply service** (`src/application/apply.rs`, reached from the HTTP endpoin
    destination filename. Duplicates become `DuplicateSource` entries on the item.
    When the candidate's artist credits are a strict subset of the source file's
    credits (a candidate that dropped featured artists or is featured-only), the
-   fuller source credit wins so both the filename and the written ARTIST/ARTISTS
-   tags keep every real performer.
+   fuller source credit wins — the same `merge_source_credits` rule already applied
+   at scan selection, `/choose`, and auto-approve, so the review UI, the written
+   ARTIST/ARTISTS tags, and the filename all keep every real performer.
 2. **Per output** (`apply`, `apply.rs:722`):
    - **ReplayGain** — measure loudness with `replaygain::get_or_analyze` (cached).
      Failure never blocks the write.

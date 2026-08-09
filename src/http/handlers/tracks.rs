@@ -248,6 +248,11 @@ pub async fn auto_approve_review(
                 track.current_album.as_deref(),
                 embedded_cover,
             );
+            crate::application::canonical_names::merge_source_credits(
+                &mut selected,
+                track.current_artist.as_deref(),
+                track.current_title.as_deref(),
+            );
             crate::application::canonical_names::canonicalize_candidates(
                 &s.pool,
                 std::slice::from_mut(&mut selected),
@@ -450,6 +455,11 @@ pub async fn select_candidate(
         track.current_album.as_deref(),
         embedded_cover,
     );
+    crate::application::canonical_names::merge_source_credits(
+        &mut selected,
+        track.current_artist.as_deref(),
+        track.current_title.as_deref(),
+    );
     crate::application::canonical_names::canonicalize_candidates(
         &s.pool,
         std::slice::from_mut(&mut selected),
@@ -467,7 +477,6 @@ pub async fn select_candidate(
     let completion =
         crate::application::metadata_completion::reassess(&mut selected, embedded_cover);
     let mut transaction = s.pool.begin().await?;
-    persist_completed_candidate(&mut transaction, &selected).await?;
     let (status, stage, message) = readiness_state(&selected, &completion, "Selected by you");
     sqlx::query("UPDATE tracks SET selected_candidate_id=?,status=?,stage=?,stage_message=?,updated_at=? WHERE id=?")
         .bind(candidate_id.0)
