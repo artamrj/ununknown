@@ -653,12 +653,12 @@ pub async fn manual_candidate(
     crate::application::metadata_completion::normalize_release_fields(&mut release_fields);
     value.album = release_fields.album;
     value.album_artist = release_fields.album_artist;
-    let track: Option<(String, String)> =
-        sqlx::query_as("SELECT status,path FROM tracks WHERE id=?")
+    let track: Option<(String, String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT status,path,current_artist,current_title FROM tracks WHERE id=?")
             .bind(id.0)
             .fetch_optional(&s.pool)
             .await?;
-    let Some((status, track_path)) = track else {
+    let Some((status, track_path, source_artist, source_title)) = track else {
         return Err(ApiError::not_found("track not found"));
     };
     if status == "corrupt" {
@@ -687,6 +687,11 @@ pub async fn manual_candidate(
                 ..Default::default()
             }];
     }
+    crate::application::canonical_names::merge_source_credits(
+        &mut release_fields,
+        source_artist.as_deref(),
+        source_title.as_deref(),
+    );
     crate::application::canonical_names::canonicalize_candidates(
         &s.pool,
         std::slice::from_mut(&mut release_fields),

@@ -37,6 +37,7 @@ struct Evaluated<'a> {
     variants: BTreeSet<&'static str>,
     variant_conflict: bool,
     original_album: bool,
+    missing_source_artists: bool,
 }
 
 pub fn select(evidence: TrackEvidence<'_>, candidates: &[Candidate]) -> Option<Decision> {
@@ -100,6 +101,9 @@ pub fn rank(evidence: TrackEvidence<'_>, candidates: &[Candidate]) -> Option<Ran
     } else if is_album_release(best.candidate) {
         reasons.push("album release preferred".to_owned());
     }
+    if best.missing_source_artists {
+        reasons.push("incomplete artist credit".to_owned());
+    }
 
     let confidence = best.total.clamp(0.0, 99.0);
     Some(RankedDecision {
@@ -128,6 +132,7 @@ fn evaluate<'a>(
         .artist
         .map(|artist| artist_similarity(artist, &candidate.artist))
         .unwrap_or(0.5);
+    let coverage_score = source_coverage_score(evidence, candidate);
     let variants = version_tags(&candidate.title);
     let variant_conflict = variants != *expected_variants;
     let audio_recognition = has_audio_recognition(candidate);
@@ -223,6 +228,7 @@ fn evaluate<'a>(
         + if audio_recognition { 15.0 } else { 0.0 }
         + if original_album { 4.0 } else { 0.0 }
         + variant_score
+        + coverage_score
         + if candidate.is_compilation { -7.0 } else { 0.0 };
 
     Evaluated {
@@ -240,7 +246,56 @@ fn evaluate<'a>(
         variants,
         variant_conflict,
         original_album,
+        missing_source_artists: coverage_score < -40.0,
     }
+}
+
+/// Penalize a candidate whose artist credits drop any performer credited on the
+/// source file (a dropped primary or featured artist), and reward a candidate
+/// whose credits cover the full source set. A -50 penalty sends such candidates
+/// back to Review instead of silently approving a degraded credit.
+fn source_coverage_score(evidence: &TrackEvidence<'_>, candidate: &Candidate) -> f64 {
+    let Some(source_artist) = evidence.artist else {
+        return 0.0;
+    };
+    if is_placeholder_artist(source_artist) {
+        return 0.0;
+    }
+    let source_credits = crate::domain::credits::normalize_featured(
+        source_artist,
+        evidence.title.unwrap_or_default(),
+    );
+    let source_ids = crate::domain::credits::constituent_identities(&source_credits.artists);
+    if source_ids.is_empty() {
+        return 0.0;
+    }
+    let candidate_credits = crate::domain::credits::normalize_structured(
+        &candidate.artist,
+        &candidate.title,
+        candidate.artist_credits.clone(),
+    );
+    let candidate_ids = crate::domain::credits::constituent_identities(&candidate_credits.artists);
+    if candidate_ids.is_empty() {
+        return 0.0;
+    }
+    let missing = source_ids.iter().any(|id| !candidate_ids.contains(id));
+    let covers = source_ids.iter().all(|id| candidate_ids.contains(id));
+    if missing {
+        -50.0
+    } else if covers {
+        8.0
+    } else {
+        0.0
+    }
+}
+
+fn is_placeholder_artist(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || matches!(
+            normalized.as_str(),
+            "unknown" | "unknown artist" | "unknown title" | "various artists" | "untitled"
+        )
 }
 
 fn is_supported(candidate: &Evaluated<'_>) -> bool {
@@ -677,6 +732,84 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn candidate_dropping_source_artist_is_not_approved() {
+        let mut degraded = candidate(
+            1,
+            "songrec",
+            "Marze Por Gohar",
+            "Marze Por Gohar (feat. Golshifteh Farahani) - Single",
+            99.0,
+        );
+        degraded.artist = "Golshifteh Farahani".into();
+        degraded.artist_credits = vec![crate::domain::credits::ArtistCredit::new(
+            "Golshifteh Farahani",
+            "",
+        )];
+        degraded.score_breakdown = Some(
+            serde_json::json!({"audio_recognition": true, "sources": ["SongRec", "Radio Javan"]})
+                .to_string(),
+        );
+
+        assert!(
+            select(
+                TrackEvidence {
+                    filename: "Ali Azimi - Marze Por Gohar (feat. Golshifteh Farahani).mp3",
+                    title: Some("Marze Por Gohar"),
+                    artist: Some("Ali Azimi feat. Golshifteh Farahani"),
+                    album: None,
+                },
+                &[degraded],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn full_coverage_candidate_beats_a_degraded_high_score_one() {
+        let mut degraded = candidate(
+            1,
+            "songrec",
+            "Marze Por Gohar",
+            "Marze Por Gohar (feat. Golshifteh Farahani) - Single",
+            99.0,
+        );
+        degraded.artist = "Golshifteh Farahani".into();
+        degraded.artist_credits = vec![crate::domain::credits::ArtistCredit::new(
+            "Golshifteh Farahani",
+            "",
+        )];
+        degraded.score_breakdown = Some(
+            serde_json::json!({"audio_recognition": true, "sources": ["SongRec", "Radio Javan"]})
+                .to_string(),
+        );
+        let mut complete = candidate(
+            2,
+            "genius",
+            "Marze Por Gohar",
+            "Marze Por Gohar (feat. Golshifteh Farahani) - Single",
+            62.0,
+        );
+        complete.artist = "Ali Azimi feat. Golshifteh Farahani".into();
+        complete.artist_credits = vec![
+            crate::domain::credits::ArtistCredit::new("Ali Azimi", " feat. "),
+            crate::domain::credits::ArtistCredit::new("Golshifteh Farahani", ""),
+        ];
+
+        let decision = select(
+            TrackEvidence {
+                filename: "Ali Azimi - Marze Por Gohar (feat. Golshifteh Farahani).mp3",
+                title: Some("Marze Por Gohar"),
+                artist: Some("Ali Azimi feat. Golshifteh Farahani"),
+                album: None,
+            },
+            &[degraded, complete],
+        )
+        .unwrap();
+
+        assert_eq!(decision.candidate_id, 2);
     }
 
     #[test]

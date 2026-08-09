@@ -86,10 +86,10 @@ fn destination_credits(track: &Track, candidate: &Candidate) -> crate::domain::c
         &candidate.title,
         candidate.artist_credits.clone(),
     );
-    crate::application::canonical_names::prefer_source_credits(
+    crate::domain::credits::prefer_source_credits(
         track.current_artist.as_deref(),
         track.current_title.as_deref(),
-        &candidate_credits,
+        candidate_credits,
     )
 }
 

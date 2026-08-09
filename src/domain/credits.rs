@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -183,6 +184,62 @@ pub fn individual_names(artists: &[ArtistCredit]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Identity keys of every constituent artist, expanding "X & Y" so a split
+/// candidate and an unsplit source (or vice versa) compare equal.
+pub fn constituent_identities(credits: &[ArtistCredit]) -> HashSet<String> {
+    credits
+        .iter()
+        .flat_map(|credit| credit.name.split(" & "))
+        .map(identity_key)
+        .collect()
+}
+
+/// When the candidate's artist names are a strict subset of the source file's
+/// credits (the candidate dropped featured artists or is featured-only), the
+/// source credit is the fuller, correct human-readable credit and wins.
+/// Otherwise the candidate credit wins.
+pub fn prefer_source_credits(
+    source_artist: Option<&str>,
+    source_title: Option<&str>,
+    candidate_credits: Credits,
+) -> Credits {
+    let Some(source_artist) = source_artist.filter(|value| !value.trim().is_empty()) else {
+        return candidate_credits;
+    };
+    let Some(source_title) = source_title.filter(|value| !value.trim().is_empty()) else {
+        return candidate_credits;
+    };
+    let source_credits = normalize_featured(source_artist, source_title);
+    let candidate_ids = constituent_identities(&candidate_credits.artists);
+    let source_ids = constituent_identities(&source_credits.artists);
+    if candidate_ids.is_empty() || source_ids.is_empty() {
+        return candidate_credits;
+    }
+    let candidate_is_subset = candidate_ids.iter().all(|id| source_ids.contains(id));
+    let source_has_extra = source_ids.iter().any(|id| !candidate_ids.contains(id));
+    if candidate_is_subset && source_has_extra {
+        source_credits
+    } else {
+        candidate_credits
+    }
+}
+
+/// The single credit pipeline: normalize the provider credits (moving any title
+/// featured credit into the artist list), then prefer the fuller source credit
+/// set when the candidate is a strict subset of it. Evidence-based ampersand
+/// resolution and spelling canonicalization run separately in the application
+/// layer (`canonical_names::canonicalize_candidates`).
+pub fn finalize_credits(
+    display: &str,
+    title: &str,
+    provider_credits: Vec<ArtistCredit>,
+    source_artist: Option<&str>,
+    source_title: Option<&str>,
+) -> Credits {
+    let candidate = normalize_structured(display, title, provider_credits);
+    prefer_source_credits(source_artist, source_title, candidate)
 }
 
 /// Remove performer credits from a release title without changing legitimate
@@ -465,6 +522,41 @@ mod tests {
         assert_eq!(credits.title, "Song");
         assert_eq!(credits.artist, "Alice feat. Bob");
         assert_eq!(individual_names(&credits.artists), ["Alice", "Bob"]);
+    }
+
+    #[test]
+    fn finalize_merges_source_primary_when_candidate_dropped_it() {
+        let credits = finalize_credits(
+            "Golshifteh Farahani",
+            "Marze Por Gohar",
+            vec![ArtistCredit::new("Golshifteh Farahani", "")],
+            Some("Ali Azimi feat. Golshifteh Farahani"),
+            Some("Marze Por Gohar"),
+        );
+        assert_eq!(credits.artist, "Ali Azimi feat. Golshifteh Farahani");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Ali Azimi", "Golshifteh Farahani"]
+        );
+    }
+
+    #[test]
+    fn finalize_keeps_candidate_credits_when_not_a_source_subset() {
+        let credits = finalize_credits(
+            "Ali Azimi feat. Golshifteh Farahani",
+            "Marze Por Gohar",
+            vec![
+                ArtistCredit::new("Ali Azimi", " feat. "),
+                ArtistCredit::new("Golshifteh Farahani", ""),
+            ],
+            Some("Ali Azimi"),
+            Some("Marze Por Gohar"),
+        );
+        assert_eq!(credits.artist, "Ali Azimi feat. Golshifteh Farahani");
+        assert_eq!(
+            individual_names(&credits.artists),
+            ["Ali Azimi", "Golshifteh Farahani"]
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::{
-    domain::credits::{Credits, clean_text, display_artist, identity_key},
+    domain::credits::{clean_text, display_artist, identity_key},
     infrastructure::providers::{ArtistCredit, Candidate},
 };
 use anyhow::Result;
@@ -116,48 +116,6 @@ fn normalize_candidate_credits(candidate: &mut Candidate) {
     }
 }
 
-/// When the candidate's artist names are a strict subset of the source file's
-/// credits (the candidate dropped featured artists or is featured-only), the
-/// source credit is the fuller, correct human-readable credit and wins.
-/// Otherwise the candidate credit wins.
-pub(crate) fn prefer_source_credits(
-    source_artist: Option<&str>,
-    source_title: Option<&str>,
-    candidate_credits: &Credits,
-) -> Credits {
-    let Some(source_artist) = source_artist.filter(|value| !value.trim().is_empty()) else {
-        return candidate_credits.clone();
-    };
-    let Some(source_title) = source_title.filter(|value| !value.trim().is_empty()) else {
-        return candidate_credits.clone();
-    };
-    let source_credits = crate::domain::credits::normalize_featured(source_artist, source_title);
-    let candidate_names = crate::domain::credits::individual_names(&candidate_credits.artists);
-    let source_names = crate::domain::credits::individual_names(&source_credits.artists);
-    let candidate_ids = expanded_identities(&candidate_names);
-    let source_ids = expanded_identities(&source_names);
-    if candidate_ids.is_empty() || source_ids.is_empty() {
-        return candidate_credits.clone();
-    }
-    let candidate_is_subset = candidate_ids.iter().all(|id| source_ids.contains(id));
-    let source_has_extra = source_ids.iter().any(|id| !candidate_ids.contains(id));
-    if candidate_is_subset && source_has_extra {
-        source_credits
-    } else {
-        candidate_credits.clone()
-    }
-}
-
-/// Identity keys of every constituent artist, expanding "X & Y" so a split
-/// candidate and an unsplit source (or vice versa) compare equal.
-fn expanded_identities(names: &[String]) -> HashSet<String> {
-    names
-        .iter()
-        .flat_map(|name| name.split(" & "))
-        .map(identity_key)
-        .collect()
-}
-
 /// Enrich the candidate with the fuller source credit set so the stored,
 /// displayed, and written ARTIST/ARTISTS match the source file's performers.
 pub(crate) fn merge_source_credits(
@@ -165,12 +123,13 @@ pub(crate) fn merge_source_credits(
     source_artist: Option<&str>,
     source_title: Option<&str>,
 ) {
-    let candidate_credits = crate::domain::credits::normalize_structured(
+    let merged = crate::domain::credits::finalize_credits(
         &candidate.artist,
         &candidate.title,
-        candidate.artist_credits.clone(),
+        std::mem::take(&mut candidate.artist_credits),
+        source_artist,
+        source_title,
     );
-    let merged = prefer_source_credits(source_artist, source_title, &candidate_credits);
     candidate.artist = merged.artist;
     candidate.title = merged.title;
     candidate.artist_credits = merged.artists;

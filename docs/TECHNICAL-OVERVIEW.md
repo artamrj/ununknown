@@ -276,6 +276,7 @@ candidate instead of blindly trusting the raw provider score:
 | Metadata completeness | album, cover, year, track no., genre, album artist, ISRC |
 | Multi-source agreement | up to +15 |
 | Provider trust | 0–5 |
+| Source-credit coverage | −50 if the candidate drops any performer credited on the source file; +8 if it covers the full source credit set |
 | Audio recognition bonus | +15 |
 | Original album year bonus | +4 |
 | Version tags (live/remix/acoustic/…) | −22 per unexpected, −16 per missing |
@@ -287,6 +288,10 @@ candidate instead of blindly trusting the raw provider score:
 - Its total is ≥ 68, and no *different* recording is within 12 points (ties with the
   same recording are tolerated; `same_recording` compares ISRC/version-tags/title).
 - Its version tags match the filename's version tags.
+- Its artist credits do **not drop any performer credited on the source file**
+  (a −50 coverage penalty sends degraded credits back to Review; the fuller
+  candidate — e.g. `Ali Azimi feat. Golshifteh Farahani` over `Golshifteh Farahani`
+  — wins).
 
 Tracks that fail stay in Review with a specific human reason (this is why "Auto
 approve" never writes a questionable release, a duet over a plain recording, a
@@ -346,6 +351,17 @@ All HTTP goes through `resilient_http` (timeouts, retries) and a
 4. Normalize release fields: `Single`/`EP` naming and album artist defaults.
 5. `audit` produces a weighted completeness score plus the readiness flag
    `core_complete` (title, artist, album, **verified cover**).
+
+**Artist credits** are resolved through a single pipeline
+(`domain::credits::finalize_credits`): provider credits are parsed (title featured
+credits moved into the artist list), then `prefer_source_credits` keeps the fuller
+source-file credit when the candidate is a strict subset (constituent `&`-expanded
+comparison, so a split `Koorosh` + `Sami Low` and an unsplit `Koorosh & Sami Low`
+compare equal). `canonical_names::canonicalize_candidates` then resolves ambiguous
+bare `&` credits against persisted library evidence (MBID-bearing groups stay
+whole, e.g. `Selena Gomez & the Scene`) and canonicalizes spelling. Every path to
+Ready — scan, `/choose`, auto-approve, manual entry, and apply — funnels the
+selected candidate through this same finalize step.
 
 **Cover-art worker** (`src/application/artwork.rs`):
 
