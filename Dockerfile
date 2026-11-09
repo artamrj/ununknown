@@ -7,7 +7,7 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM rust:1.97-alpine3.24 AS songrec
+FROM rust:1.98-alpine3.24 AS songrec
 RUN apk add --no-cache alsa-lib-dev
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     CARGO_TARGET_DIR=/build/songrec \
     cargo install songrec-lib --version 0.5.3 --locked --root /opt/songrec
 
-FROM rust:1.97-alpine3.24 AS chef
+FROM rust:1.98-alpine3.24 AS chef
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
