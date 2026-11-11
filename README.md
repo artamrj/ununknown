@@ -1,3 +1,25 @@
+<div align="center">
+
+# ⚠️ DEPRECATED
+
+# This project has moved to [🐦 magpie-fi](https://github.com/artamrj/magpie-fi)
+
+## **ununknown is no longer developed. Please use [magpie-fi](https://github.com/artamrj/magpie-fi) instead.**
+
+</div>
+
+> [!CAUTION]
+> **This repository is deprecated.** ununknown and [sync-me-maybe](https://github.com/artamrj/sync-me-maybe) were merged into one project:
+> **[magpie-fi](https://github.com/artamrj/magpie-fi)**.
+>
+> - No new features, no fixes and no security updates here.
+> - magpie-fi does everything ununknown did, and more: it also gets songs from links and a Telegram bot, and files them into a clean library for Navidrome.
+> - **To install and use it, go to <https://github.com/artamrj/magpie-fi>.**
+
+The text below is the old documentation. It is kept only for reference.
+
+---
+
 # Ununknown
 
 Ununknown has one job: correct metadata for a folder of music.
