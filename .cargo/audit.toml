@@ -1,5 +1,3 @@
 [advisories]
-# `rsa` is present only in Cargo.lock as an optional SQLx/MySQL dependency.
-# This application builds SQLx with SQLite alone; `cargo tree -i rsa` is empty.
-ignore = ["RUSTSEC-2023-0071"]
+ignore = []
 informational_warnings = ["unmaintained", "unsound"]
